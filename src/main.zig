@@ -20,10 +20,64 @@ pub fn main() anyerror!void {
 
 test {
     std.testing.refAllDecls(@This());
-    _ = grams;
+    _ = mod_gram;
 }
 
-const grams = struct {
+fn Appender(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const Err = std.mem.Allocator.Error;
+
+        vptr: *anyopaque,
+        func: fn (*anyopaque, T) Err!void,
+
+        fn new(coll: anytype, func: fn (@TypeOf(coll), T) Err!void) Self {
+            if (!comptime std.meta.trait.isSingleItemPtr(@TypeOf(coll))) {
+                @compileLog("got type = ", @typeName(@TypeOf(coll)));
+                @compileError("was expecting single item pointer");
+            }
+            return Self{
+                .vptr = @ptrCast(*anyopaque, coll),
+                .func = @ptrCast(fn (*anyopaque, T) Err!void, func),
+            };
+        }
+
+        fn append(self: Self, item: T) Err!void {
+            try self.func(self.vptr, item);
+        }
+    };
+}
+
+test "appender.list" {
+    var list = std.ArrayList(u32).init(std.testing.allocator);
+    defer list.deinit();
+    var appender = Appender(u32).new(&list, std.ArrayList(u32).append);
+    try appender.append(10);
+    try appender.append(20);
+    try appender.append(30);
+    try appender.append(40);
+    try std.testing.expectEqualSlices(u32, ([_]u32{ 10, 20, 30, 40 })[0..], list.items);
+}
+
+test "appender.set" {
+    var set = std.AutoHashMap(u32, void).init(std.testing.allocator);
+    defer set.deinit();
+    const curry = struct {
+        fn append(ptr: *std.AutoHashMap(u32, void), item: u32) !void {
+            try ptr.put(item, {});
+        }
+    };
+    var appender = Appender(u32).new(&set, curry.append);
+    try appender.append(10);
+    try appender.append(20);
+    try appender.append(30);
+    try appender.append(40);
+    inline for (([_]u32{ 10, 20, 30, 40 })[0..]) |item| {
+        try std.testing.expect(set.contains(item));
+    }
+}
+
+const mod_gram = struct {
     pub const TEC: u8 = 0;
 
     pub fn Gram(comptime gram_len: u4) type {
@@ -44,7 +98,7 @@ const grams = struct {
 
     /// This will tokenize the string before gramming it according to the provided delimiter.
     /// For example, provide std.ascii.spaces to tokenize using whitespace.
-    pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, delimiters: []const u8, out: *std.ArrayList(GramPos(gram_len))) !void {
+    pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, delimiters: []const u8, out: Appender(GramPos(gram_len))) !void {
         if (delimiters.len > 0) {
             var iter = std.mem.tokenize(u8, string, delimiters);
             while (iter.next()) |token| {
@@ -54,7 +108,7 @@ const grams = struct {
             try token_grammer(gram_len, string, 0, boundary_grams, out);
         }
     }
-    fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, boundary_grams: bool, out: *std.ArrayList(GramPos(gram_len))) !void {
+    fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, boundary_grams: bool, out: Appender(GramPos(gram_len))) !void {
         if (gram_len == 0) {
             @compileError("gram_len is 0");
         }
@@ -150,7 +204,7 @@ const grams = struct {
         // }
         return gram;
     }
-    inline fn left_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: *std.ArrayList(GramPos(gram_len))) !void {
+    inline fn left_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
         // the following code will do something similar to what's shown below but for any gram_len
         // the commented out example is how it'd look if gram_len is 3
         // -- out.append(GramPos(2).new(0, .{ TEC, TEC, str[pos] }));
@@ -178,7 +232,7 @@ const grams = struct {
             try out.append(GramPos(gram_len).new(offset, gram));
         }
     }
-    inline fn right_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: *std.ArrayList(GramPos(gram_len))) !void {
+    inline fn right_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
         const pos = string.len - gram_len;
         // the following code will do something similar to what's shown below but for any gram_len
         // the commented out example is how it'd look if gram_len is 3
@@ -301,11 +355,11 @@ const grams = struct {
             .{ .name = "pure_delimiter.3", .string = "", .boundary_grams = true, .expected = &.{} },
         };
         inline for (table) |case| {
-            var arr = std.ArrayList(GramPos(3)).init(std.testing.allocator);
-            defer arr.deinit();
-            try grammer(3, case.string, case.boundary_grams, &std.ascii.spaces, &arr);
-            std.testing.expectEqualSlices(GramPos(3), case.expected, arr.items) catch |err| {
-                std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, arr.items });
+            var list = std.ArrayList(GramPos(3)).init(std.testing.allocator);
+            defer list.deinit();
+            try grammer(3, case.string, case.boundary_grams, &std.ascii.spaces, Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append));
+            std.testing.expectEqualSlices(GramPos(3), case.expected, list.items) catch |err| {
+                std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, list.items });
                 return err;
             };
         }
@@ -398,7 +452,7 @@ const grams = struct {
         inline for (table) |case| {
             var arr = std.ArrayList(GramPos(4)).init(std.testing.allocator);
             defer arr.deinit();
-            try grammer(4, case.string, case.boundary_grams, &std.ascii.spaces, &arr);
+            try grammer(4, case.string, case.boundary_grams, &std.ascii.spaces, Appender(GramPos(4)).new(&arr, std.ArrayList(GramPos(4)).append));
             std.testing.expectEqualSlices(GramPos(4), case.expected, arr.items) catch |err| {
                 std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, arr.items });
                 return err;
