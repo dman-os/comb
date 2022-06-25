@@ -21,64 +21,164 @@ pub fn main() anyerror!void {
 test {
     std.testing.refAllDecls(@This());
     _ = mod_gram;
+    _ = mod_utils;
+    _ = mod_plist;
 }
 
-fn Appender(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const Err = std.mem.Allocator.Error;
+const mod_plist = struct {
+    const Allocator = std.mem.Allocator;
+    fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
+        if (gram_len == 0) {
+            @compileError("gram_len is 0");
+        }
+        return struct {
+            const Self = @This();
+            const Gram = mod_gram.Gram(gram_len);
+            const GramPos = mod_gram.GramPos(gram_len);
+            const GramRef = struct {
+                id: I,
+                pos: usize,
+            };
+            map: std.AutoHashMapUnmanaged(Gram, std.ArrayListUnmanaged(GramRef)),
+            cache: std.AutoHashMapUnmanaged(GramPos, void),
 
-        vptr: *anyopaque,
-        func: fn (*anyopaque, T) Err!void,
-
-        fn new(coll: anytype, func: fn (@TypeOf(coll), T) Err!void) Self {
-            if (!comptime std.meta.trait.isSingleItemPtr(@TypeOf(coll))) {
-                @compileLog("got type = ", @typeName(@TypeOf(coll)));
-                @compileError("was expecting single item pointer");
+            fn init() Self {
+                return Self{
+                    .map = std.AutoHashMapUnmanaged(Gram, std.ArrayListUnmanaged(GramRef)){},
+                    .cache = std.AutoHashMapUnmanaged(GramPos, void){},
+                };
             }
-            return Self{
-                .vptr = @ptrCast(*anyopaque, coll),
-                .func = @ptrCast(fn (*anyopaque, T) Err!void, func),
+
+            fn deinit(self: *Self, allocator: Allocator) void {
+                self.cache.deinit(allocator);
+                var it = self.map.valueIterator();
+                while (it.next()) |list| {
+                    list.deinit(allocator);
+                }
+                self.map.deinit(allocator);
+            }
+
+            fn insert(self: *Self, allocator: Allocator, id: I, name: []const u8, delimiters: []const u8) !void {
+                self.cache.clearAndFree(allocator);
+
+                var appender = blk: {
+                    const curry = struct {
+                        map: *std.AutoHashMapUnmanaged(GramPos, void),
+                        allocator: Allocator,
+
+                        fn append(this: *@This(), item: GramPos) !void {
+                            try this.map.put(this.allocator, item, {});
+                        }
+                    };
+                    break :blk mod_utils.Appender(GramPos).new(&curry{ .map = &self.cache, .allocator = allocator }, curry.append);
+                };
+                try mod_gram.grammer(gram_len, name, true, delimiters, appender);
+
+                var it = self.cache.keyIterator();
+                while (it.next()) |gpos| {
+                    var list = blk: {
+                        const entry = try self.map.getOrPut(allocator, gpos.gram);
+                        if (entry.found_existing) {
+                            break :blk entry.value_ptr;
+                        } else {
+                            entry.value_ptr.* = std.ArrayListUnmanaged(GramRef){};
+                            break :blk entry.value_ptr;
+                        }
+                    };
+                    try list.append(allocator, .{ .id = id, .pos = gpos.pos });
+                }
+            }
+            /// Be sure to `deinit` the result with the allocater given here.
+            fn str_match(self: *Self, allocator: Allocator, string: []const u8, delimiters: []const u8) !std.ArrayListUnmanaged(I) {
+                // self.cache.clearAndFree(allocator);
+                var check = std.AutoHashMap(I, void).init(allocator);
+                defer check.deinit();
+                var out_vec = std.ArrayList(I).init(allocator);
+                defer out_vec.deinit();
+
+                var grams = std.ArrayList(GramPos).init(allocator);
+                defer grams.deinit();
+                try mod_gram.grammer(gram_len, string, false, delimiters, mod_utils.Appender(GramPos).new(&grams, std.ArrayList(GramPos).append));
+
+                var is_init = false;
+                for (grams.items) |gpos| {
+                    const gram = gpos.gram;
+                    if (self.map.get(gram)) |list| {
+                        if (is_init) {
+                            check.clearAndFree();
+                            for (out_vec.items) |id| {
+                                try check.put(id, {});
+                            }
+                            out_vec.clearAndFree();
+
+                            for (list.items) |ref| {
+                                if (check.contains(ref.id)) {
+                                    try out_vec.append(ref.id);
+                                }
+                            }
+                        } else {
+                            for (list.items) |ref| {
+                                try out_vec.append(ref.id);
+                            }
+                            is_init = true;
+                        }
+                    }
+                }
+                return out_vec.moveToUnmanaged();
+            }
+        };
+    }
+    test "plist.str_match" {
+        comptime var table = .{
+            .{ 
+                .name = "single_gram", 
+                .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
+                .query = "Bag", 
+                .expected = &.{ 0, 1, 2 } 
+            },
+            .{ 
+                .name = "multi_gram", 
+                .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend" })[0..], 
+                .query = "Bagend", 
+                .expected = &.{2} 
+            },
+            .{ 
+                .name = "boundary_actual.1", 
+                .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
+                .query = "Ga", 
+                .expected = &.{0, 2} 
+            },
+            .{ 
+                .name = "boundary_actual.2", 
+                .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
+                .query = "Sau", 
+                .expected = &.{1} 
+            },
+            .{ 
+                .name = "boundary_delimter", 
+                .items = ([_][]const u8{ " Gandalf", " Sauron", " Lady\nGalandriel" })[0..], 
+                .query = "Ga", 
+                .expected = &.{0, 2} 
+            },
+        };
+        inline for (table) |case| {
+            var plist = PostingListUnmanaged(u64, 3).init();
+            defer plist.deinit(std.testing.allocator);
+            for (case.items) |name, id| {
+                try plist.insert(std.testing.allocator, @as(u64, id), name, std.ascii.spaces[0..]);
+            }
+            var res = try plist.str_match(std.testing.allocator, case.query, std.ascii.spaces[0..]);
+            defer res.deinit(std.testing.allocator);
+            std.testing.expectEqualSlices(u64, case.expected, res.items) catch |err| {
+                std.debug.print("{s}\n{}\n!=\n{any}", .{ case.name, case.expected, res.items });
+                return err;
             };
         }
-
-        fn append(self: Self, item: T) Err!void {
-            try self.func(self.vptr, item);
-        }
-    };
-}
-
-test "appender.list" {
-    var list = std.ArrayList(u32).init(std.testing.allocator);
-    defer list.deinit();
-    var appender = Appender(u32).new(&list, std.ArrayList(u32).append);
-    try appender.append(10);
-    try appender.append(20);
-    try appender.append(30);
-    try appender.append(40);
-    try std.testing.expectEqualSlices(u32, ([_]u32{ 10, 20, 30, 40 })[0..], list.items);
-}
-
-test "appender.set" {
-    var set = std.AutoHashMap(u32, void).init(std.testing.allocator);
-    defer set.deinit();
-    const curry = struct {
-        fn append(ptr: *std.AutoHashMap(u32, void), item: u32) !void {
-            try ptr.put(item, {});
-        }
-    };
-    var appender = Appender(u32).new(&set, curry.append);
-    try appender.append(10);
-    try appender.append(20);
-    try appender.append(30);
-    try appender.append(40);
-    inline for (([_]u32{ 10, 20, 30, 40 })[0..]) |item| {
-        try std.testing.expect(set.contains(item));
     }
-}
-
+};
 const mod_gram = struct {
     pub const TEC: u8 = 0;
+    pub const Appender = mod_utils.Appender;
 
     pub fn Gram(comptime gram_len: u4) type {
         return [gram_len]u8;
@@ -99,6 +199,9 @@ const mod_gram = struct {
     /// This will tokenize the string before gramming it according to the provided delimiter.
     /// For example, provide std.ascii.spaces to tokenize using whitespace.
     pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, delimiters: []const u8, out: Appender(GramPos(gram_len))) !void {
+        if (gram_len == 0) {
+            @compileError("gram_len is 0");
+        }
         if (delimiters.len > 0) {
             var iter = std.mem.tokenize(u8, string, delimiters);
             while (iter.next()) |token| {
@@ -457,6 +560,61 @@ const mod_gram = struct {
                 std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, arr.items });
                 return err;
             };
+        }
+    }
+};
+
+const mod_utils = struct {
+    fn Appender(comptime T: type) type {
+        return struct {
+            const Self = @This();
+            const Err = std.mem.Allocator.Error;
+
+            vptr: *anyopaque,
+            func: fn (*anyopaque, T) Err!void,
+
+            fn new(coll: anytype, func: fn (@TypeOf(coll), T) Err!void) Self {
+                if (!comptime std.meta.trait.isSingleItemPtr(@TypeOf(coll))) {
+                    @compileError("was expecting single item pointer, got type = " ++ @typeName(@TypeOf(coll)));
+                }
+                return Self{
+                    .vptr = @ptrCast(*anyopaque, coll),
+                    .func = @ptrCast(fn (*anyopaque, T) Err!void, func),
+                };
+            }
+
+            fn append(self: Self, item: T) Err!void {
+                try self.func(self.vptr, item);
+            }
+        };
+    }
+
+    test "appender.list" {
+        var list = std.ArrayList(u32).init(std.testing.allocator);
+        defer list.deinit();
+        var appender = Appender(u32).new(&list, std.ArrayList(u32).append);
+        try appender.append(10);
+        try appender.append(20);
+        try appender.append(30);
+        try appender.append(40);
+        try std.testing.expectEqualSlices(u32, ([_]u32{ 10, 20, 30, 40 })[0..], list.items);
+    }
+
+    test "appender.set" {
+        var set = std.AutoHashMap(u32, void).init(std.testing.allocator);
+        defer set.deinit();
+        const curry = struct {
+            fn append(ptr: *std.AutoHashMap(u32, void), item: u32) !void {
+                try ptr.put(item, {});
+            }
+        };
+        var appender = Appender(u32).new(&set, curry.append);
+        try appender.append(10);
+        try appender.append(20);
+        try appender.append(30);
+        try appender.append(40);
+        inline for (([_]u32{ 10, 20, 30, 40 })[0..]) |item| {
+            try std.testing.expect(set.contains(item));
         }
     }
 };
