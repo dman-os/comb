@@ -23,6 +23,189 @@ test {
     _ = mod_gram;
     _ = mod_utils;
     _ = mod_plist;
+    _ = PlasticTree;
+}
+
+// const mod_treewalking = struct {
+// };
+
+// const mod_index = struct {
+//     const Entry = struct {
+//         name: []const u8,
+//     };
+//     const Index = struct{
+//     };
+// };
+
+const PlasticTree = struct {
+    const Self = @This();
+
+    const Entry = struct {
+        name: []u8,
+        depth: usize,
+        parent: u64,
+    };
+
+    const Config = struct {
+        size: usize = 1_000_000,
+        max_dir_size: usize = 1_000,
+        file_v_dir: f64 = 0.7,
+    };
+
+    arena_allocator: std.heap.ArenaAllocator,
+    list: std.ArrayList(Entry),
+    config: Config,
+
+    fn init(config: Config, allocer: std.mem.Allocator) !Self {
+        var arena = std.heap.ArenaAllocator.init(allocer);
+        errdefer arena.deinit();
+        return Self {
+            .list = try std.ArrayList(Entry).initCapacity(arena.allocator(), config.size),
+            .arena_allocator = arena,
+            .config = config,
+        };
+    }
+    fn allocator(self: *Self) std.mem.Allocator {
+        return self.arena_allocator.allocator();
+    }
+
+    fn deinit(self: *Self) void {
+        // for (self.list.items) |entry| {
+        //     // self.allocator.free(@ptrCast([*]u8, entry.name.ptr));
+        //     self.allocator.free(entry.name);
+        // }
+        // self.list.deinit();
+        
+        // deinit the arena allocator instead of...
+        self.arena_allocator.deinit();
+    }
+
+    fn gen(self: *Self) !void {
+        // the root node
+        var name = try self.allocator().alloc(u8, 1);
+        name[0] = '/';
+        try self.list.append(Entry { .name = name, .depth = 0, .parent = 0 });
+
+        // generate the rest
+        try self.gen_dir(0, 1, self.config.size - 1);
+    }
+
+    fn gen_name(self: *Self) ![]u8 {
+        var rng = std.crypto.random;
+
+        // random length
+        const len = 1 + rng.uintAtMost(usize, 31);
+        var name = try self.allocator().alloc(u8, len);
+
+        // random chars from ascii range
+        for (name[0..]) |*char| {
+            char.* = 32 + rng.uintAtMost(u8, 127 - 32);
+            // remove prohibited characters
+            // TODO: make this a config option
+            if (char.* == '/'){
+                char.* = '0';
+            }
+        }
+
+        return name;
+    }
+
+    fn gen_dir(self: *Self, dir_id: u64, depth: usize, share: usize) std.mem.Allocator.Error!void {
+        var rng = std.crypto.random;
+
+        const child_count = rng.uintAtMost(usize, std.math.min(share, self.config.max_dir_size));
+
+        var remaining_share = share - child_count;
+        var ii: usize = 0;
+        while(ii < child_count): ({ ii += 1; }){
+            const name = try self.gen_name();
+            try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
+
+            if(remaining_share > 0 and rng.float(f64) > self.config.file_v_dir){
+                const sub_dir_share = @floatToInt(usize, rng.float(f64) * @intToFloat(f64, remaining_share));
+                remaining_share -= sub_dir_share;
+                try self.gen_dir(self.list.items.len - 1, depth + 1, sub_dir_share);
+            }
+        }
+        if (remaining_share > 0){
+            const name = try self.gen_name();
+            try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
+            try self.gen_dir(self.list.items.len - 1, depth + 1, remaining_share - 1);
+        }
+    }
+    test "plastic_tree" {
+        // var allocator = std.heap.GeneralPurposeAllocator(.{}){};
+        var list = try PlasticTree.init(.{ .size = 1_000 }, std.testing.allocator);
+        defer list.deinit();
+
+        try list.gen();
+        // for (list.list.items[0..50]) |entry, id|{
+        //     std.debug.print(
+        //         "id: {any} | depth: {any} | parent: {any} | name: {s}\n", 
+        //         .{ id, entry.depth, entry.parent, entry.name }
+        //     );
+        // }
+        // var size = list.list.items.len * @sizeOf(PlasticTree.Entry);
+        // var max_depth: usize = 0;
+        // for (list.list.items) |entry|{
+        //     size += entry.name.len;
+        //     if (max_depth < entry.depth){
+        //         max_depth = entry.depth;
+        //     }
+        // }
+        // std.debug.print("max depth = {}\n", .{ max_depth });
+        // std.debug.print("total bytes = {}\n", .{ size });
+    }
+};
+test "plist.bench"{
+    var tree = try PlasticTree.init(.{ .size = 1_000_000 }, std.testing.allocator);
+    defer tree.deinit();
+    var allocator = tree.allocator();
+
+    try tree.gen();
+
+    var plist = mod_plist.PostingListUnmanaged(usize, 3).init();
+    // defer plist.deinit(allocator);
+
+    for (tree.list.items) |entry, id|{
+        try plist.insert(tree.allocator(), id, entry.name, std.ascii.spaces[0..]);
+    }
+
+    const iterations = 50;
+
+    var avg_elapsed: u64 = undefined;
+    var low_bound: u64 = undefined;
+    var up_bound: u64 = undefined;
+
+    {
+        var timer = try std.time.Timer.start();
+        _ = try plist.str_match(allocator, "this_file_cannot_exist_1234567890e456789", std.ascii.spaces[0..]);
+        // defer vec.deinit(allocator);
+        const elapsed = timer.read();
+        avg_elapsed = elapsed;
+        low_bound = elapsed;
+        up_bound = elapsed;
+    }
+    var ii: usize = 0;
+    while (ii < (iterations - 1)) : ({ ii += 1; }){
+        var timer = try std.time.Timer.start();
+        _ = try plist.str_match(allocator, "this_file_cannot_exist_1234567890e456789", std.ascii.spaces[0..]);
+        // defer vec.deinit(allocator);
+
+        const elapsed = timer.read();
+        avg_elapsed = @divTrunc(elapsed + avg_elapsed, 2);
+        low_bound = if (elapsed < low_bound) elapsed else low_bound;
+        up_bound = if (elapsed > up_bound) elapsed else up_bound;
+    }
+    std.debug.print(
+        "[{}ns; {}ns; {}ns] on str_match for {} iterations\n", 
+        .{ 
+            @divFloor(low_bound, 1), 
+            @divFloor(avg_elapsed, 1), 
+            @divFloor(up_bound, 1), 
+            iterations 
+        }
+    );
 }
 
 const mod_plist = struct {
@@ -88,7 +271,9 @@ const mod_plist = struct {
                     try list.append(allocator, .{ .id = id, .pos = gpos.pos });
                 }
             }
+
             /// Be sure to `deinit` the result with the allocater given here.
+            /// FIXME: optimize
             fn str_match(self: *Self, allocator: Allocator, string: []const u8, delimiters: []const u8) !std.ArrayListUnmanaged(I) {
                 // self.cache.clearAndFree(allocator);
                 var check = std.AutoHashMap(I, void).init(allocator);
@@ -176,6 +361,7 @@ const mod_plist = struct {
         }
     }
 };
+
 const mod_gram = struct {
     pub const TEC: u8 = 0;
     pub const Appender = mod_utils.Appender;
