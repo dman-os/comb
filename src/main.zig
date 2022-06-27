@@ -30,26 +30,20 @@ test {
     _ = Tree;
 }
 
-const Tree = struct {
-    fn walk(allocator: Allocator, path: []const u8, limit: ?usize) !Tree {
+pub const Tree = struct {
+    pub fn walk(allocator: Allocator, path: []const u8, limit: ?usize) !Tree {
         var walker = Tree.Walker.init(allocator, limit orelse std.math.maxInt(usize));
         errdefer walker.deinit();
         const dev = blk: {
-            const file = try std.fs.openFileAbsolute(path, .{});
-            defer file.close();
-            const meta = try file.metadata();
-            // meta.inner.
-            const statx = switch(builtin.target.os.tag){
-                .linux => meta.inner.statx,
-                else => unreachable,
-            };
-            break :blk (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
+            var dir = try std.fs.openDirAbsolute(path, .{});
+            defer dir.close();
+            break :blk try Walker.makedev(dir);
         };
         try walker.scanDir(path, std.fs.cwd(), 0, 0, dev, );
         return walker.toTree();
     }
 
-    const Entry = struct {
+    pub const Entry = struct {
         pub const Kind = std.fs.File.Kind;
         name: []u8,
         kind: Kind,
@@ -59,35 +53,35 @@ const Tree = struct {
     list: std.ArrayList(Entry),
     allocator: Allocator,
 
-    fn init(allocator: Allocator) !Tree {
+    pub fn init(allocator: Allocator) !Tree {
         return Tree {
             .allocator = allocator,
             .list = std.ArrayList(Entry).init(allocator),
         };
     }
 
-    fn deinit(self: *Tree) void {
+    pub fn deinit(self: *Tree) void {
         for (self.list.items) |entry| {
             self.allocator.free(entry.name);
         }
         self.list.deinit();
     }
 
-    const FullPathWeaver = struct {
-        const NameOfErr = error { NotFound };
+    pub const FullPathWeaver = struct {
+        pub const NameOfErr = error { NotFound };
         buf: std.ArrayListUnmanaged(u8),
 
-        fn init() FullPathWeaver {
+        pub fn init() FullPathWeaver {
             return FullPathWeaver {
                 .buf = std.ArrayListUnmanaged(u8){},
             };
         }
-        fn deinit(self: *FullPathWeaver, allocator: Allocator) void {
+        pub fn deinit(self: *FullPathWeaver, allocator: Allocator) void {
             self.buf.deinit(allocator);
         }
         /// The returned slice is invalidated not long after.
-        fn pathOf(self: *FullPathWeaver, allocator: Allocator, tree: Tree, id: usize, delimiter: u8) ![]const u8 {
-            self.buf.clearAndFree(allocator);
+        pub fn pathOf(self: *FullPathWeaver, allocator: Allocator, tree: Tree, id: usize, delimiter: u8) ![]const u8 {
+            self.buf.clearRetainingCapacity();
             var next_id = id;
             while (true) {
                 const entry = tree.list.items[next_id];
@@ -155,13 +149,33 @@ const Tree = struct {
             }
         }
 
+        /// Lifted this from rust libc binidings
+        pub fn makedev(dir: std.fs.Dir) !u64 {
+            const meta = try dir.metadata();
+            // // @compileLog(builtin.target.os.tag);
+            const statx = switch(builtin.target.os.tag) {
+                .linux => meta.inner.statx,
+                else => unreachable,
+            };
+            // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
+            const major = @as(u64, statx.dev_major);
+            const minor = @as(u64, statx.dev_minor);
+            var dev: u64 = 0;
+            dev |= (major & 0x00000fff) << 8;
+            dev |= (major & 0xfffff000) << 32;
+            dev |= (minor & 0x000000ff) << 0;
+            dev |= (minor & 0xffffff00) << 12;
+            return dev;
+        }
+
         fn scanDir(
             self: *@This(), 
             path: []const u8, 
             parent: std.fs.Dir,
             parent_id: usize, 
             depth: usize, 
-            parent_dev: u64
+            // parent_dev: std.meta.Tuple(&.{u32, u32}), 
+            parent_dev: u64, 
         ) Error!void {
             // std.debug.print("error happened at path = {s}\n", .{path});
             var dir = parent.openDir(path,.{ .iterate = true, .no_follow = true }) catch |err| {
@@ -189,19 +203,23 @@ const Tree = struct {
                 .depth = depth,
                 .parent = parent_id,
             });
-
-            const dev = blk: {
-                const meta = try dir.metadata();
-                // @compileLog(builtin.target.os.tag);
-                const statx = switch(builtin.target.os.tag) {
-                    .linux => meta.inner.statx,
-                    else => unreachable,
-                };
-                break :blk (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
-            };
-            // we don't examine other devices
-            if (dev != parent_dev) return;
             const dir_id = self.tree.list.items.len - 1;
+
+            const dev = try Walker.makedev(dir);
+            // we don't examine other devices
+            if (dev != parent_dev) {
+                const parent_path = try self.weaver.pathOf(
+                    self.tree.allocator, 
+                    self.tree,
+                    parent_id, 
+                    '/'
+                );
+                std.debug.print(
+                    "device ({}) != parent dev ({}), skipping dir at = {s}/{s}\n", 
+                    .{ dev, parent_dev, parent_path, path },
+                );
+                return;
+            }
 
             var it = dir.iterate();
             while (self.remaining > 0) {
@@ -242,89 +260,36 @@ const Tree = struct {
         }
     };
 
-    test "zwalk" {
+    test "walk" {
+        if (true) return error.SkipZigTest;
+
         const size: usize = 10_000;
         var allocator = std.testing.allocator;
         var tree = try walk(allocator, "/", size);
         defer tree.deinit();
         var weaver = FullPathWeaver.init();
         defer weaver.deinit(allocator);
-        for (tree.list.items) |file, id| {
-            const path = try weaver.pathOf(allocator, tree, id, '/');
-            std.debug.print(
-                "{} | kind = {} | parent = {} | path = {s}\n", 
-                .{ id, file.kind, file.parent, path }
-            );
-        }
+        // for (tree.list.items) |file, id| {
+        //     const path = try weaver.pathOf(allocator, tree, id, '/');
+        //     std.debug.print(
+        //         "{} | kind = {} | parent = {} | path = {s}\n", 
+        //         .{ id, file.kind, file.parent, path }
+        //     );
+        // }
         try std.testing.expectEqual(size, tree.list.items.len);
     }
 };
 
-test "plist.bench.walk" {
-    std.testing.log_level = std.log.Level.debug;
-    const size: usize = 1_000_000;
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var allocator = arena.allocator();
-    var tree = try Tree.walk(allocator, "/", size);
-    // defer tree.deinit();
-
-    var plist = mod_plist.PostingListUnmanaged(usize, 3).init();
-    // defer plist.deinit(allocator);
-
-    for (tree.list.items) |entry, id|{
-        try plist.insert(allocator, id, entry.name, std.ascii.spaces[0..]);
-    }
-
-    const iterations = 50;
-
-    var avg_elapsed: u64 = undefined;
-    var low_bound: u64 = undefined;
-    var up_bound: u64 = undefined;
-
-    {
-        var timer = try std.time.Timer.start();
-        _ = try plist.str_match(allocator, "this_file_cannot_exist_1234567890e456789", std.ascii.spaces[0..]);
-        // defer vec.deinit(allocator);
-        const elapsed = timer.read();
-        avg_elapsed = elapsed;
-        low_bound = elapsed;
-        up_bound = elapsed;
-    }
-    var ii: usize = 0;
-    while (ii < (iterations - 1)) : ({ ii += 1; }){
-        var timer = try std.time.Timer.start();
-        _ = try plist.str_match(allocator, "this_file_cannot_exist_1234567890e456789", std.ascii.spaces[0..]);
-        // defer vec.deinit(allocator);
-
-        const elapsed = timer.read();
-        avg_elapsed = @divTrunc(elapsed + avg_elapsed, 2);
-        low_bound = if (elapsed < low_bound) elapsed else low_bound;
-        up_bound = if (elapsed > up_bound) elapsed else up_bound;
-    }
-    std.debug.print(
-        "[{}ns; {}ns; {}ns] on str_match for {} iterations\n", 
-        .{ 
-            @divFloor(low_bound, 1), 
-            @divFloor(avg_elapsed, 1), 
-            @divFloor(up_bound, 1), 
-            iterations 
-        }
-    );
-}
-
-const PlasticTree = struct {
+pub const PlasticTree = struct {
     const Self = @This();
 
-    const Entry = struct {
+    pub const Entry = struct {
         name: []u8,
         depth: usize,
         parent: u64,
     };
 
-    const Config = struct {
+    pub const Config = struct {
         size: usize = 1_000_000,
         max_dir_size: usize = 1_000,
         file_v_dir: f64 = 0.7,
@@ -334,7 +299,7 @@ const PlasticTree = struct {
     list: std.ArrayList(Entry),
     config: Config,
 
-    fn init(config: Config, allocer: Allocator) !Self {
+    pub fn init(config: Config, allocer: Allocator) !Self {
         var arena = std.heap.ArenaAllocator.init(allocer);
         errdefer arena.deinit();
         return Self {
@@ -343,11 +308,12 @@ const PlasticTree = struct {
             .config = config,
         };
     }
+
     fn allocator(self: *Self) Allocator {
         return self.arena_allocator.allocator();
     }
 
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
         // for (self.list.items) |entry| {
         //     // self.allocator.free(@ptrCast([*]u8, entry.name.ptr));
         //     self.allocator.free(entry.name);
@@ -358,7 +324,7 @@ const PlasticTree = struct {
         self.arena_allocator.deinit();
     }
 
-    fn gen(self: *Self) !void {
+    pub fn gen(self: *Self) !void {
         // the root node
         var name = try self.allocator().alloc(u8, 1);
         name[0] = '/';
@@ -437,59 +403,9 @@ const PlasticTree = struct {
 };
 
 
-test "plist.bench.gen" {
-    var tree = try PlasticTree.init(.{ .size = 1_000_000 }, std.testing.allocator);
-    defer tree.deinit();
-    var allocator = tree.allocator();
 
-    try tree.gen();
-
-    var plist = mod_plist.PostingListUnmanaged(usize, 3).init();
-    // defer plist.deinit(allocator);
-
-    for (tree.list.items) |entry, id|{
-        try plist.insert(allocator, id, entry.name, std.ascii.spaces[0..]);
-    }
-
-    const iterations = 50;
-
-    var avg_elapsed: u64 = undefined;
-    var low_bound: u64 = undefined;
-    var up_bound: u64 = undefined;
-
-    {
-        var timer = try std.time.Timer.start();
-        _ = try plist.str_match(allocator, "this_file_cannot_exist_1234567890e456789", std.ascii.spaces[0..]);
-        // defer vec.deinit(allocator);
-        const elapsed = timer.read();
-        avg_elapsed = elapsed;
-        low_bound = elapsed;
-        up_bound = elapsed;
-    }
-    var ii: usize = 0;
-    while (ii < (iterations - 1)) : ({ ii += 1; }){
-        var timer = try std.time.Timer.start();
-        _ = try plist.str_match(allocator, "this_file_cannot_exist_1234567890e456789", std.ascii.spaces[0..]);
-        // defer vec.deinit(allocator);
-
-        const elapsed = timer.read();
-        avg_elapsed = @divTrunc(elapsed + avg_elapsed, 2);
-        low_bound = if (elapsed < low_bound) elapsed else low_bound;
-        up_bound = if (elapsed > up_bound) elapsed else up_bound;
-    }
-    std.debug.print(
-        "[{}ns; {}ns; {}ns] on str_match for {} iterations\n", 
-        .{ 
-            @divFloor(low_bound, 1), 
-            @divFloor(avg_elapsed, 1), 
-            @divFloor(up_bound, 1), 
-            iterations 
-        }
-    );
-}
-
-const mod_plist = struct {
-    fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
+pub const mod_plist = struct {
+    pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
         if (gram_len == 0) {
             @compileError("gram_len is 0");
         }
@@ -497,21 +413,22 @@ const mod_plist = struct {
             const Self = @This();
             const Gram = mod_gram.Gram(gram_len);
             const GramPos = mod_gram.GramPos(gram_len);
-            const GramRef = struct {
-                id: I,
-                pos: usize,
-            };
-            map: std.AutoHashMapUnmanaged(Gram, std.ArrayListUnmanaged(GramRef)),
+            // const GramRef = struct {
+            //     id: I,
+            //     pos: usize,
+            // };
+
+            map: std.AutoHashMapUnmanaged(Gram, std.ArrayListUnmanaged(I)),
             cache: std.AutoHashMapUnmanaged(GramPos, void),
 
-            fn init() Self {
+            pub fn init() Self {
                 return Self{
-                    .map = std.AutoHashMapUnmanaged(Gram, std.ArrayListUnmanaged(GramRef)){},
+                    .map = std.AutoHashMapUnmanaged(Gram, std.ArrayListUnmanaged(I)){},
                     .cache = std.AutoHashMapUnmanaged(GramPos, void){},
                 };
             }
 
-            fn deinit(self: *Self, allocator: Allocator) void {
+            pub fn deinit(self: *Self, allocator: Allocator) void {
                 self.cache.deinit(allocator);
                 var it = self.map.valueIterator();
                 while (it.next()) |list| {
@@ -520,8 +437,8 @@ const mod_plist = struct {
                 self.map.deinit(allocator);
             }
 
-            fn insert(self: *Self, allocator: Allocator, id: I, name: []const u8, delimiters: []const u8) !void {
-                self.cache.clearAndFree(allocator);
+            pub fn insert(self: *Self, allocator: Allocator, id: I, name: []const u8, delimiters: []const u8) !void {
+                self.cache.clearRetainingCapacity();
 
                 var appender = blk: {
                     const curry = struct {
@@ -543,105 +460,206 @@ const mod_plist = struct {
                         if (entry.found_existing) {
                             break :blk entry.value_ptr;
                         } else {
-                            entry.value_ptr.* = std.ArrayListUnmanaged(GramRef){};
+                            entry.value_ptr.* = std.ArrayListUnmanaged(I){};
                             break :blk entry.value_ptr;
                         }
                     };
-                    try list.append(allocator, .{ .id = id, .pos = gpos.pos });
+                    // try list.append(allocator, .{ .id = id, .pos = gpos.pos });
+                    try list.append(allocator, id);
                 }
             }
 
-            /// Be sure to `deinit` the result with the allocater given here.
-            /// FIXME: optimize
-            fn str_match(self: *Self, allocator: Allocator, string: []const u8, delimiters: []const u8) !std.ArrayListUnmanaged(I) {
-                // self.cache.clearAndFree(allocator);
-                var check = std.AutoHashMap(I, void).init(allocator);
-                defer check.deinit();
-                var out_vec = std.ArrayList(I).init(allocator);
-                defer out_vec.deinit();
+            pub fn str_matcher(allocator: Allocator) !StrMatcher {
+                return try StrMatcher.init(allocator);
+            }
 
-                var grams = std.ArrayList(GramPos).init(allocator);
-                defer grams.deinit();
-                try mod_gram.grammer(gram_len, string, false, delimiters, mod_utils.Appender(GramPos).new(&grams, std.ArrayList(GramPos).append));
+            pub const StrMatcher = struct {
+                // allocator: Allocator,
+                out_vec: std.ArrayList(I),
+                check: std.AutoHashMap(I, void),
+                grams: std.ArrayList(GramPos),
+                
+                pub fn init(allocator: Allocator) !StrMatcher {
+                    return StrMatcher{
+                        .check = std.AutoHashMap(I, void).init(allocator),
+                        .out_vec = std.ArrayList(I).init(allocator),
+                        .grams = std.ArrayList(GramPos).init(allocator),
+                    };
+                }
 
-                var is_init = false;
-                for (grams.items) |gpos| {
-                    const gram = gpos.gram;
-                    if (self.map.get(gram)) |list| {
-                        if (is_init) {
-                            check.clearAndFree();
-                            for (out_vec.items) |id| {
-                                try check.put(id, {});
-                            }
-                            out_vec.clearAndFree();
+                pub fn deinit(self: *StrMatcher) void {
+                    self.out_vec.deinit();
+                    self.check.deinit();
+                    self.grams.deinit();
+                }
+                // const Clause = union(enum){
+                //     const Op = union(enum){
+                //         And: Clause,
+                //         Or: Clause,
+                //         // Not: Clause,
+                //     };
+                //     const Match = struct {
+                //         grams: []const Gram,
+                //     };
+                //     op: Op,
+                //     match: Match,
+                //
+                // };
+                
+                pub const Error = error { TooShort } || Allocator.Error;
 
-                            for (list.items) |ref| {
-                                if (check.contains(ref.id)) {
-                                    try out_vec.append(ref.id);
+                /// Returned slice is invalid by next usage of this func.
+                /// FIXME: optimize
+                pub fn str_match(
+                    self: *StrMatcher, 
+                    plist: *const Self,
+                    string: []const u8, 
+                    delimiters: []const u8,
+                ) Error![]const I {
+                    if (string.len < gram_len) return Error.TooShort;
+
+                    self.check.clearRetainingCapacity();
+                    self.out_vec.clearRetainingCapacity();
+                    self.grams.clearRetainingCapacity();
+
+                    try mod_gram.grammer(
+                        gram_len, 
+                        string, 
+                        false, 
+                        delimiters, 
+                        mod_utils.Appender(GramPos).new(&self.grams, std.ArrayList(GramPos).append)
+                    );
+                    var is_init = false;
+                    for (self.grams.items) |gpos| {
+                        const gram = gpos.gram;
+                        // if we've seen the gram before
+                        if (plist.map.get(gram)) |list| {
+                            // if this isn't our first gram
+                            if (is_init) {
+                                self.check.clearRetainingCapacity();
+                                for (self.out_vec.items) |id| {
+                                    try self.check.put(id, {});
                                 }
+
+                                self.out_vec.clearRetainingCapacity();
+                                for (list.items) |id| {
+                                    // reduce the previous list of eligible
+                                    // matches according the the new list
+                                    if (self.check.contains(id)) {
+                                        try self.out_vec.append(id);
+                                    }
+                                }
+                                if (self.out_vec.items.len == 0 ) {
+                                    // no items contain that gram
+                                    return &[_]I{};
+                                }
+                            } else {
+                                // alll items satisfying first gram are elgiible
+                                for (list.items) |id| {
+                                    try self.out_vec.append(id);
+                                }
+                                is_init = true;
                             }
                         } else {
-                            for (list.items) |ref| {
-                                try out_vec.append(ref.id);
-                            }
-                            is_init = true;
+                            // no items contain that gram
+                            return &[_]I{};
                         }
                     }
+                    return self.out_vec.items;
                 }
-                return out_vec.moveToUnmanaged();
-            }
+            };
         };
     }
     test "plist.str_match" {
+        const TriPList = PostingListUnmanaged(u64, 3);
+            // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
+        const Expected = union(enum){
+            ok: []const u64,
+            err: TriPList.StrMatcher.Error,
+        };
         comptime var table = .{
             .{ 
                 .name = "single_gram", 
                 .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
                 .query = "Bag", 
-                .expected = &.{ 0, 1, 2 } 
+                .expected = Expected { .ok = &.{ 0, 1, 2 } },
+            },
+            .{ 
+                .name = "single_gram.not_found", 
+                .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
+                .query = "Gab", 
+                .expected = Expected { .ok = &.{ } }
             },
             .{ 
                 .name = "multi_gram", 
                 .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend" })[0..], 
                 .query = "Bagend", 
-                .expected = &.{2} 
+                .expected = Expected { .ok = &.{2} }
+            },
+            .{ 
+                .name = "multi_gram.not_found", 
+                .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Knife Party" })[0..], 
+                .query = "Bagend", 
+                .expected = Expected { .ok = &.{ } }
             },
             .{ 
                 .name = "boundary_actual.1", 
                 .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
                 .query = "Ga", 
-                .expected = &.{0, 2} 
+                // .expected = &.{0, 2} 
+                .expected = Expected { .err = TriPList.StrMatcher.Error.TooShort },
             },
             .{ 
                 .name = "boundary_actual.2", 
                 .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
                 .query = "Sau", 
-                .expected = &.{1} 
+                .expected = Expected { .ok = &.{1} }
             },
             .{ 
                 .name = "boundary_delimter", 
                 .items = ([_][]const u8{ " Gandalf", " Sauron", " Lady\nGalandriel" })[0..], 
                 .query = "Ga", 
-                .expected = &.{0, 2} 
+                // .expected = &.{0, 2} 
+                .expected = Expected { .err = TriPList.StrMatcher.Error.TooShort },
             },
         };
+        var allocator = std.testing.allocator;
         inline for (table) |case| {
-            var plist = PostingListUnmanaged(u64, 3).init();
-            defer plist.deinit(std.testing.allocator);
+            var plist = TriPList.init();
+            defer plist.deinit(allocator);
+
+            var matcher = try TriPList.str_matcher(allocator);
+            defer matcher.deinit();
+
             for (case.items) |name, id| {
                 try plist.insert(std.testing.allocator, @as(u64, id), name, std.ascii.spaces[0..]);
             }
-            var res = try plist.str_match(std.testing.allocator, case.query, std.ascii.spaces[0..]);
-            defer res.deinit(std.testing.allocator);
-            std.testing.expectEqualSlices(u64, case.expected, res.items) catch |err| {
-                std.debug.print("{s}\n{}\n!=\n{any}", .{ case.name, case.expected, res.items });
-                return err;
-            };
+
+            var res = matcher.str_match(&plist, case.query, std.ascii.spaces[0..]);
+            switch (case.expected) {
+                .ok => |expected|{
+                    var matches = try res;
+                    std.testing.expectEqualSlices(u64, expected, matches) catch |err| {
+                        std.debug.print("{s}\n{any}\n!=\n{any}\n", .{ case.name, expected, matches });
+                        var it = plist.map.iterator();
+                        while (it.next()) |pair| {
+                            std.debug.print("gram {s} => {any}\n", .{ pair.key_ptr.*, pair.value_ptr.items });
+                        }
+                        for (matcher.grams.items) |gram| {
+                            std.debug.print("search grams: {s}\n", .{ gram.gram });
+                        }
+                        return err;
+                    };
+                },
+                .err => |e_err| {
+                    try std.testing.expectError(e_err, res);
+                }
+            }
         }
     }
 };
 
-const mod_gram = struct {
+pub const mod_gram = struct {
     pub const TEC: u8 = 0;
     pub const Appender = mod_utils.Appender;
 
@@ -1029,8 +1047,8 @@ const mod_gram = struct {
     }
 };
 
-const mod_utils = struct {
-    fn Appender(comptime T: type) type {
+pub const mod_utils = struct {
+    pub fn Appender(comptime T: type) type {
         return struct {
             const Self = @This();
             const Err = Allocator.Error;

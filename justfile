@@ -12,3 +12,6 @@ run:
 alias t := test
 test:
     zig build test
+
+bench +ARGS:
+    zig test src/benches.zig  -O ReleaseFast {{ARGS}}
