@@ -293,6 +293,7 @@ pub const PlasticTree = struct {
         size: usize = 1_000_000,
         max_dir_size: usize = 1_000,
         file_v_dir: f64 = 0.7,
+        max_name_len: usize = 18,
     };
 
     arena_allocator: std.heap.ArenaAllocator,
@@ -338,7 +339,7 @@ pub const PlasticTree = struct {
         var rng = std.crypto.random;
 
         // random length
-        const len = 1 + rng.uintAtMost(usize, 31);
+        const len = 1 + rng.uintAtMost(usize, self.config.max_name_len - 1);
         var name = try self.allocator().alloc(u8, len);
 
         // random chars from ascii range

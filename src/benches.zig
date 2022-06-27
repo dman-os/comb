@@ -93,9 +93,9 @@ fn bench_plist(
 ) !void {
     {
         var max: usize = 0;
-        var max_gram = [_]u8{mod_gram.TEC} ** 3;
+        var max_gram = [_]u8{mod_gram.TEC} ** gram_len;
         var min: usize = std.math.maxInt(usize);
-        var min_gram = [_]u8{mod_gram.TEC} ** 3;
+        var min_gram = [_]u8{mod_gram.TEC} ** gram_len;
         var bucket_count: usize = 0;
         var entry_count: usize = 0;
         var avg_len_list: f64 = 0.0;
@@ -177,8 +177,12 @@ fn bench_plist(
 }
 
 test "plist.bench.gen" {
-    // var allocator = std.testing.allocator;
+    const size: usize = 1_000_000;
+    const id_t = u32;
+    const gram_len = 3;
 
+    // var allocator = std.testing.allocator;
+    
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var allocator = arena.allocator();
@@ -187,32 +191,38 @@ test "plist.bench.gen" {
     // defer _ = gp.deinit();
     // var allocator = gp.allocator();
     
-    var tree = try comb.PlasticTree.init(.{ .size = 1_000_000 }, allocator);
+    var tree = try comb.PlasticTree.init(.{ .size = size }, allocator);
     defer tree.deinit();
 
     try tree.gen();
+    std.debug.print("done generating fake tree of size {}\n", .{ size });
 
-    var plist = mod_plist.PostingListUnmanaged(usize, 3).init();
+    var plist = mod_plist.PostingListUnmanaged(id_t, gram_len).init();
     // defer plist.deinit(allocator);
 
     var longest: usize = 0;
     var longest_name = try allocator.alloc(u8, 1);
     defer allocator.free(longest_name);
     for (tree.list.items) |entry, id|{
-        try plist.insert(allocator, id, entry.name, std.ascii.spaces[0..]);
+        try plist.insert(allocator, @intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
+        if (id % 10_000 == 0 ) {
+            std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
+        }
         if (entry.name.len > longest){
             longest = entry.name.len;
+            std.debug.print("got long at {s}\n", .{entry.name});
             allocator.free(longest_name);
             longest_name = try allocator.dupe(u8, entry.name);
         }
     }
-    try bench_plist(usize, 3, &plist, allocator, longest_name);
+    std.debug.print("done adding to plist {} items\n", .{ size });
+    try bench_plist(id_t, gram_len, &plist, allocator, longest_name);
 }
 
 test "plist.bench.walk" {
     const size: usize = 1_000_000;
     const id_t = usize;
-    const gram_len = 3;
+    const gram_len = 1;
 
     // var allocator = std.testing.allocator;
 
@@ -247,6 +257,9 @@ test "plist.bench.walk" {
         var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
         for (tree.list.items) |entry, id| {
             try plist.insert(allocator, id, entry.name, std.ascii.spaces[0..]);
+            if (id % 10_000 == 0 ) {
+                std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
+            }
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 allocator.free(deepest_name);
