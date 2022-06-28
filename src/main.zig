@@ -2,22 +2,68 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const Packed = packed struct {
-    a: u8,
-    b: u32,
-};
+const log_level = std.log.Level.debug;
 
-fn addFortyTwo(x: anytype) @TypeOf(x) {
-    return x + 42;
-}
+pub fn main() !void {
+    const Index = mod_index.Index;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var a7r = gpa.allocator();
+    
+    var index = Index.init(a7r);
+    defer index.deinit();
 
-pub fn main() anyerror!void {
-    const p = Packed{ .a = 1, .b = 2 };
-    std.debug.print("{}\n", .{@TypeOf(&p.b)});
-    std.debug.print("{}\n", .{@sizeOf(@TypeOf(&p.b))});
-    std.debug.print("{}\n", .{@sizeOf(@TypeOf(p))});
-    std.debug.print("{}\n", .{addFortyTwo(10)});
-    std.debug.print("{}\n", .{@TypeOf(@as([]const u8, "hellow!"))});
+    var timer = try std.time.Timer.start();
+    {
+        std.log.info("Walking tree from /", . {});
+
+        var arena = std.heap.ArenaAllocator.init(a7r);
+        defer arena.deinit();
+        timer.reset();
+        var tree = try Tree.walk(arena.allocator(), "/", null);
+        // defer tree.deinit();
+        const walk_elapsed = timer.read();
+        std.log.info(
+            "Done walking tree with {} items in {d} seconds", 
+            .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
+        );
+
+        var new_ids = try a7r.alloc(Index.Id, tree.list.items.len);
+        defer a7r.free(new_ids);
+        timer.reset();
+        for (tree.list.items) |t_entry, ii| {
+            const i_entry = try t_entry.conv(Index.Id, new_ids[t_entry.parent]).clone(a7r);
+            new_ids[ii] = try index.file_created(i_entry);
+        }
+        const index_elapsed = timer.read();
+        std.log.info(
+            "Done adding items to index in {d} seconds", 
+            .{ @divFloor(index_elapsed, std.time.ns_per_s) }
+        );
+    }
+    var stdin = std.io.getStdIn();
+    var stdin_rdr = stdin.reader();
+    var phrase = std.ArrayList(u8).init(a7r);
+    var matcher = index.matcher();
+    var weaver = Index.FullPathWeaver.init();
+    while (true) {
+        std.debug.print("Ready to search: ", .{});
+        try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
+        std.log.info("Searching...", .{});
+        _ = timer.reset();
+        var matches = try matcher.str_match(phrase.items);
+        const elapsed = timer.read();
+        var ii:usize = 0;
+        for (matches) |id| {
+            ii += 1;
+            const path = try weaver.pathOf(&index, id, '/');
+            std.debug.print("{}. {s}\n", .{ ii, path });
+        }
+        std.log.info(
+            "{} results in {d} seconds", 
+            .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},
+        );
+    }
 }
 
 test {
@@ -25,10 +71,266 @@ test {
     _ = mod_gram;
     _ = mod_utils;
     _ = mod_plist;
+    _ = mod_index;
     _ = PlasticTree;
     // _ = mod_tpool;
     _ = Tree;
 }
+
+fn FsEntry(comptime I: type) type {
+    return struct {
+        pub const Kind = std.fs.File.Kind;
+        name: []u8,
+        parent: I,
+        kind: Kind,
+        depth: usize,
+        size: u64,
+        inode: u64,
+        dev: u64,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        ctime: i64,
+        atime: i64,
+        mtime: i64,
+
+        fn clone(orig: @This(), a7r: Allocator) !@This() {
+            return @This() {
+                .name = try a7r.dupe(u8, orig.name),
+                .parent = orig.parent,
+                .kind = orig.kind,
+                .depth = orig.depth,
+                .size = orig.size,
+                .inode = orig.inode,
+                .dev = orig.dev,
+                .mode = orig.mode,
+                .uid = orig.uid,
+                .gid = orig.gid,
+                .ctime = orig.ctime,
+                .atime = orig.atime,
+                .mtime = orig.mtime,
+            };
+        }
+
+        fn conv(orig: @This(), comptime P: type, new_parent: P) FsEntry(P) {
+            return FsEntry(P) {
+                .name = orig.name,
+                .parent = new_parent,
+                .kind = orig.kind,
+                .depth = orig.depth,
+                .size = orig.size,
+                .inode = orig.inode,
+                .dev = orig.dev,
+                .mode = orig.mode,
+                .uid = orig.uid,
+                .gid = orig.gid,
+                .ctime = orig.ctime,
+                .atime = orig.atime,
+                .mtime = orig.mtime,
+            };
+        }
+    };
+}
+
+const mod_index = struct {
+    const Index = struct {
+        const Self = @This();
+        pub const Id = packed struct {
+            id: u24,
+            gen: u8,
+        };
+        pub const Entry = FsEntry(Id);
+        const RowMeta = struct {
+            free: bool,
+            gen: u8,
+        };
+        const FreeSlot = Id;
+
+        a7r: Allocator,
+        table: std.MultiArrayList(Entry),
+        meta: std.ArrayListUnmanaged(RowMeta),
+        free_slots: std.PriorityQueue(FreeSlot, void, free_slot_cmp),
+
+        fn free_slot_cmp(_: void, a: FreeSlot, b: FreeSlot) std.math.Order {
+            return std.math.order(a.gen, b.gen);
+        }
+        // fn slot_gen_cmp(ctx: *Self, a: usize, b: usize) std.PriorityQueue.Order {
+        //     const row_a = ctx.meta[a];
+        //     const row_b = ctx.meta[b];
+        //     return std.math.order(row_a.gen, row_b.gen);
+        // }
+
+        pub fn init(allocator: Allocator) Self {
+            var self = Self {
+                .a7r = allocator,
+                .table = std.MultiArrayList(Entry){},
+                .meta = std.ArrayListUnmanaged(RowMeta){},
+                .free_slots = std.PriorityQueue(FreeSlot, void, free_slot_cmp).init(allocator, .{}),
+            };
+            return self;
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.table.items(.name)) |name|{
+                self.a7r.free(name);
+            }
+            self.table.deinit(self.a7r);
+            self.meta.deinit(self.a7r);
+            self.free_slots.deinit();
+        }
+
+        fn file_created(self: *Self, entry: Entry) !Id {
+            if (self.free_slots.removeOrNull()) |id| {
+                var row = self.meta.items[id.id];
+                self.table.set(id.id, entry);
+                row.gen += 1;
+                row.free = false;
+                return Id {
+                    .id = id.id,
+                    .gen = row.gen,
+                };
+            } else {
+                const id = self.meta.items.len;
+                try self.meta.append(self.a7r, RowMeta {
+                    .free = false,
+                    .gen = 0,
+                });
+                errdefer _ = self.meta.pop();
+                try self.table.append(self.a7r, entry);
+                return Id {
+                    .id = @intCast(u24, id),
+                    .gen = 0,
+                };
+            }
+        }
+
+        const IndexGetErr = error { StaleHandle,};
+
+        fn isStale(self: *const Self, id: Id) bool {
+            const row = self.meta.items[id.id];
+            return row.gen > id.gen;
+        }
+
+        /// Be sure to clone the returned result
+        fn get(self: *const Self, id: Id) !Entry {
+            if (self.isStale(id)) return IndexGetErr.StaleHandle;
+            return self.table.get(id.id);
+        }
+
+        fn idAt(self: *const Self, idx: usize) Id {
+            const row = self.meta.items[idx];
+            return Id {
+                .id = @intCast(u24, idx),
+                .gen = row.gen,
+            };
+        }
+
+        pub const FullPathWeaver = struct {
+            pub const NameOfErr = error { NotFound };
+            buf: std.ArrayListUnmanaged(u8),
+
+            pub fn init() FullPathWeaver {
+                return FullPathWeaver {
+                    .buf = std.ArrayListUnmanaged(u8){},
+                };
+            }
+            pub fn deinit(self: *FullPathWeaver, allocator: Allocator) void {
+                self.buf.deinit(allocator);
+            }
+            /// The returned slice is invalidated not long after.
+            pub fn pathOf(self: *FullPathWeaver, index: *const Index, id: Id, delimiter: u8) ![]const u8 {
+                self.buf.clearRetainingCapacity();
+                var next_id = id;
+                const names = index.table.items(.name);
+                const parents = index.table.items(.parent);
+                while (true) {
+                    if (index.isStale(next_id)) return IndexGetErr.StaleHandle;
+
+                    const name = names[next_id.id];
+                    try self.buf.appendSlice(index.a7r, name);
+                    std.mem.reverse(u8, self.buf.items[(self.buf.items.len - name.len)..]);
+                    try self.buf.append(index.a7r, delimiter);
+
+                    const parent = parents[next_id.id];
+                    next_id = parent;
+                    // FIXME: a better sentinel
+                    if (next_id.id == 0) {
+                        break;
+                    }
+                }
+                std.mem.reverse(u8, self.buf.items[0..]);
+                return self.buf.items;
+            }
+        };
+
+        pub fn matcher(self: *const Self) StrMatcher {
+            return StrMatcher.init(self.a7r, self);
+        }
+
+        pub const StrMatcher = struct {
+            // allocator: Allocator,
+            out_vec: std.ArrayList(Id),
+            index: *const Self,
+            
+            pub fn init(allocator: Allocator, index: *const Self) StrMatcher {
+                return StrMatcher{
+                    .out_vec = std.ArrayList(Id).init(allocator),
+                    .index = index,
+                };
+            }
+
+            pub fn deinit(self: *StrMatcher) void {
+                self.out_vec.deinit();
+            }
+
+            pub fn str_match(
+                self: *StrMatcher, 
+                string: []const u8, 
+            ) ![]const Id {
+                self.out_vec.clearRetainingCapacity();
+                for (self.index.table.items(.name)) |name, ii| {
+                    if (std.mem.indexOf(u8, name, string)) |_| {
+                        try self.out_vec.append(self.index.idAt(ii));
+                    }
+                }
+                return self.out_vec.items;
+            }
+        };
+    };
+
+    test "index" {
+        var a7r = std.testing.allocator;
+
+        var index = Index.init(a7r);
+        defer index.deinit();
+
+        defer {
+            for(index.table.items(.name)) |name|{
+                a7r.free(name);
+            }
+        }
+
+        var entry = Index.Entry {
+            // .name = try a7r.dupe(u8, "manameisjeff"),
+            .name = try a7r.dupe(u8, "/"),
+            .parent = Index.Id { .id = 0, .gen = 0 },
+            .kind = Index.Entry.Kind.Directory,
+            .depth = 0,
+            .size = 0,
+            .inode = 0,
+            .dev = 0,
+            .mode = 0,
+            .uid = 0,
+            .gid = 0,
+            .ctime = 0,
+            .atime = 0,
+            .mtime = 0,
+        };
+        const id = try index.file_created(entry);
+        var ret = try index.get(id);
+        try std.testing.expectEqual(entry, ret);
+    }
+};
 
 pub const Tree = struct {
     pub fn walk(allocator: Allocator, path: []const u8, limit: ?usize) !Tree {
@@ -37,23 +339,18 @@ pub const Tree = struct {
         const dev = blk: {
             var dir = try std.fs.openDirAbsolute(path, .{});
             defer dir.close();
-            break :blk try Walker.makedev(dir);
+            const meta = try dir.metadata();
+            break :blk Walker.makedev(meta.inner.statx);
         };
         try walker.scanDir(path, std.fs.cwd(), 0, 0, dev, );
         return walker.toTree();
     }
 
-    pub const Entry = struct {
-        pub const Kind = std.fs.File.Kind;
-        name: []u8,
-        kind: Kind,
-        depth: usize,
-        parent: u64,
-    };
+    pub const Entry = FsEntry(usize);
     list: std.ArrayList(Entry),
     allocator: Allocator,
 
-    pub fn init(allocator: Allocator) !Tree {
+    pub fn init(allocator: Allocator) Tree {
         return Tree {
             .allocator = allocator,
             .list = std.ArrayList(Entry).init(allocator),
@@ -103,6 +400,7 @@ pub const Tree = struct {
         remaining: usize,
         tree: Tree,
         weaver: FullPathWeaver,
+        // buf: std.ArrayList(u8),
 
         log_interval: usize = 10_000,
 
@@ -116,13 +414,15 @@ pub const Tree = struct {
         fn init(allocator: Allocator, limit: usize) @This() {
             return @This() {
                 .remaining = limit,
-                .tree = try Tree.init(allocator),
+                .tree = Tree.init(allocator),
+                // .buf = std.ArrayList(u8).init(allocator),
                 .weaver = FullPathWeaver.init(),
             };
         }
 
         fn deinit(self: *@This()) void{
             self.tree.deinit();
+            // self.buf.deinit();
             self.weaver.deinit(self.tree.allocator);
         }
 
@@ -134,29 +434,23 @@ pub const Tree = struct {
         fn append(self: *Walker, entry: Entry) !void {
             try self.tree.list.append(entry);
             self.remaining -= 1;
-            if (self.remaining % self.log_interval == 0) {
+            if (self.tree.list.items.len % self.log_interval == 0) {
                 const path = try self.weaver.pathOf(
                     self.tree.allocator, 
                     self.tree,
                     self.tree.list.items.len - 1, 
                     '/'
                 );
-                std.debug.print(
-                // std.log.info(
-                    "scanned {} items, now on: {s}\n", 
+                // std.debug.print(
+                std.log.info(
+                    "scanned {} items, now on: {s}", 
                     .{ self.tree.list.items.len, path }
                 );
             }
         }
 
         /// Lifted this from rust libc binidings
-        pub fn makedev(dir: std.fs.Dir) !u64 {
-            const meta = try dir.metadata();
-            // // @compileLog(builtin.target.os.tag);
-            const statx = switch(builtin.target.os.tag) {
-                .linux => meta.inner.statx,
-                else => unreachable,
-            };
+        pub fn makedev(statx: std.os.linux.Statx) u64 {
             // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
             const major = @as(u64, statx.dev_major);
             const minor = @as(u64, statx.dev_minor);
@@ -187,9 +481,8 @@ pub const Tree = struct {
                             parent_id, 
                             '/'
                         );
-                        std.debug.print(
-                        // std.log.info(
-                            "AccessDenied opening dir {s}/{s}\n", .{ parent_path, path, });
+                        std.log.debug(
+                            "AccessDenied opening dir {s}/{s}", .{ parent_path, path, });
                         return;
                     },
                     else => return err,
@@ -197,29 +490,43 @@ pub const Tree = struct {
             };
             defer dir.close();
 
-            try self.append(Entry {
-                .name = try self.tree.allocator.dupe(u8, path),
-                .kind = .Directory,
-                .depth = depth,
-                .parent = parent_id,
-            });
-            const dir_id = self.tree.list.items.len - 1;
+            const dev = blk: {
+                const meta = try dir.metadata();
+                const statx = meta.inner.statx;
+                const dev = makedev(statx);
+                try self.append(Entry {
+                    .name = try self.tree.allocator.dupe(u8, path),
+                    .kind = .Directory,
+                    .depth = depth,
+                    .parent = parent_id,
+                    .size = statx.size,
+                    .inode = statx.ino,
+                    .dev = dev,
+                    .mode = statx.mode,
+                    .uid = statx.uid,
+                    .gid = statx.gid,
+                    .ctime = statx.ctime.tv_sec,
+                    .atime = statx.atime.tv_sec,
+                    .mtime = statx.mtime.tv_sec,
+                });
 
-            const dev = try Walker.makedev(dir);
-            // we don't examine other devices
-            if (dev != parent_dev) {
-                const parent_path = try self.weaver.pathOf(
-                    self.tree.allocator, 
-                    self.tree,
-                    parent_id, 
-                    '/'
-                );
-                std.debug.print(
-                    "device ({}) != parent dev ({}), skipping dir at = {s}/{s}\n", 
-                    .{ dev, parent_dev, parent_path, path },
-                );
-                return;
-            }
+                // we don't examine other devices
+                if (dev != parent_dev) {
+                    const parent_path = try self.weaver.pathOf(
+                        self.tree.allocator, 
+                        self.tree,
+                        parent_id, 
+                        '/'
+                    );
+                    std.log.debug(
+                        "device ({}) != parent dev ({}), skipping dir at = {s}/{s}", 
+                        .{ dev, parent_dev, parent_path, path },
+                    );
+                    return;
+                }
+                break :blk dev;
+            };
+            const dir_id = self.tree.list.items.len - 1;
 
             var it = dir.iterate();
             while (self.remaining > 0) {
@@ -227,19 +534,46 @@ pub const Tree = struct {
                 if (it.next()) |next| {
                     // check if there's a file left in the dir
                     const entry = next orelse break;
-
-                    if (entry.kind == .Directory){
+                    if (entry.kind == .Directory) {
                         try self.scanDir(entry.name, dir, dir_id, depth + 1, dev);
-                    }else {
-                        // const file = try std.fs.openFileAbsolute(entry.name, .{});
-                        // defer file.close();
-                        // const stat = try file.stat();
-                        // const meta = try file.metadata();
+                    } else {
+                        const posix_name = try std.os.toPosixPath(entry.name);
+                        const meta = meta_no_follow(dir.fd, &posix_name) catch |err| {
+                            const parent_path = try self.weaver.pathOf(
+                                self.tree.allocator, 
+                                self.tree,
+                                dir_id, 
+                                '/'
+                            );
+                            switch(err){
+                                std.os.OpenError.AccessDenied => {
+                                    std.log.debug(
+                                        "AccessDenied opening file {s}/{s}", .{ parent_path, entry.name, });
+                                    continue;
+                                },
+                                else => { 
+                                    std.debug.print(
+                                    // std.log.info(
+                                        "Unexpected err {} at {s}/{s}", .{ err, parent_path, entry.name, });
+                                    return err;
+                                },
+                            }
+                        };
+                        const statx = meta.statx;
                         try self.append(Entry {
                             .name = try self.tree.allocator.dupe(u8, entry.name),
                             .kind = entry.kind,
                             .depth = depth,
                             .parent = parent_id,
+                            .size = statx.size,
+                            .inode = statx.ino,
+                            .dev = makedev(statx),
+                            .mode = statx.mode,
+                            .uid = statx.uid,
+                            .gid = statx.gid,
+                            .ctime = statx.ctime.tv_sec,
+                            .atime = statx.atime.tv_sec,
+                            .mtime = statx.mtime.tv_sec,
                         });
                     }
                 } else |err| switch (err) {
@@ -250,9 +584,8 @@ pub const Tree = struct {
                             parent_id, 
                             '/'
                         );
-                        std.debug.print(
-                        // std.log.info(
-                            "AccessDenied on iteration for dir at: {s}/{s}\n", .{ parent_path, path, });
+                        std.log.debug(
+                            "AccessDenied on iteration for dir at: {s}/{s}", .{ parent_path, path, });
                     },
                     else => return err,
                 }
@@ -269,16 +602,58 @@ pub const Tree = struct {
         defer tree.deinit();
         var weaver = FullPathWeaver.init();
         defer weaver.deinit(allocator);
-        // for (tree.list.items) |file, id| {
-        //     const path = try weaver.pathOf(allocator, tree, id, '/');
-        //     std.debug.print(
-        //         "{} | kind = {} | parent = {} | path = {s}\n", 
-        //         .{ id, file.kind, file.parent, path }
-        //     );
-        // }
+        for (tree.list.items) |file, id| {
+            const path = try weaver.pathOf(allocator, tree, id, '/');
+            std.debug.print(
+                "{} | kind = {} | parent = {} | size = {} | path = {s}\n", 
+                .{ id, file.kind, file.parent, file.size, path }
+            );
+        }
         try std.testing.expectEqual(size, tree.list.items.len);
     }
 };
+
+const ReadMetaError = error {
+    UnsupportedSyscall
+};
+
+/// Name has to be sentinel terminated, I think.
+/// Modified from zig std lib
+fn meta_no_follow(dir_handle: std.os.fd_t, name: [*]const u8) !std.fs.File.MetadataLinux {
+    const os = std.os;
+    var stx = std.mem.zeroes(os.linux.Statx);
+    const rcx = os.linux.statx(
+        dir_handle, 
+        name,
+        os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, 
+        os.linux.STATX_BASIC_STATS | 
+        os.linux.STATX_BTIME, 
+        &stx
+    );
+
+    switch (os.errno(rcx)) {
+        .SUCCESS => {},
+        .ACCES => return os.OpenError.AccessDenied,
+        .BADF => unreachable,
+        .FAULT => unreachable,
+        .INVAL => unreachable,
+        .LOOP => unreachable,
+        .NOENT => return os.OpenError.FileNotFound,
+        .NAMETOOLONG => return os.OpenError.NameTooLong,
+        .NOTDIR => return os.OpenError.NotDir,
+        // NOSYS happens when `statx` is unsupported, which is the case on kernel versions before 4.11
+        // Here, we call `fstat` and fill `stx` with the data we need
+        .NOSYS => {
+            @panic("statx not spported in kernel");
+            // return ReadMetaError.UnsupportedSyscall;
+        },
+        .NOMEM => return os.OpenError.SystemResources,
+        else => |err| return os.unexpectedErrno(err),
+    }
+    return std.fs.File.MetadataLinux {
+        .statx = stx,
+    };
+}
 
 pub const PlasticTree = struct {
     const Self = @This();
@@ -384,26 +759,26 @@ pub const PlasticTree = struct {
         defer list.deinit();
 
         try list.gen();
-        // for (list.list.items[0..50]) |entry, id|{
-        //     std.debug.print(
-        //         "id: {any} | depth: {any} | parent: {any} | name: {s}\n", 
-        //         .{ id, entry.depth, entry.parent, entry.name }
-        //     );
-        // }
-        // var size = list.list.items.len * @sizeOf(PlasticTree.Entry);
-        // var max_depth: usize = 0;
-        // for (list.list.items) |entry|{
-        //     size += entry.name.len;
-        //     if (max_depth < entry.depth){
-        //         max_depth = entry.depth;
-        //     }
-        // }
-        // std.debug.print("max depth = {}\n", .{ max_depth });
-        // std.debug.print("total bytes = {}\n", .{ size });
+        if (false) {
+            for (list.list.items[0..50]) |entry, id|{
+                std.debug.print(
+                    "id: {any} | depth: {any} | parent: {any} | name: {s}\n", 
+                    .{ id, entry.depth, entry.parent, entry.name }
+                );
+            }
+            var size = list.list.items.len * @sizeOf(PlasticTree.Entry);
+            var max_depth: usize = 0;
+            for (list.list.items) |entry|{
+                size += entry.name.len;
+                if (max_depth < entry.depth){
+                    max_depth = entry.depth;
+                }
+            }
+            std.debug.print("max depth = {}\n", .{ max_depth });
+            std.debug.print("total bytes = {}\n", .{ size });
+        }
     }
 };
-
-
 
 pub const mod_plist = struct {
     pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
@@ -470,8 +845,8 @@ pub const mod_plist = struct {
                 }
             }
 
-            pub fn str_matcher(allocator: Allocator) !StrMatcher {
-                return try StrMatcher.init(allocator);
+            pub fn str_matcher(allocator: Allocator) StrMatcher {
+                return StrMatcher.init(allocator);
             }
 
             pub const StrMatcher = struct {
@@ -480,7 +855,7 @@ pub const mod_plist = struct {
                 check: std.AutoHashMap(I, void),
                 grams: std.ArrayList(GramPos),
                 
-                pub fn init(allocator: Allocator) !StrMatcher {
+                pub fn init(allocator: Allocator) StrMatcher {
                     return StrMatcher{
                         .check = std.AutoHashMap(I, void).init(allocator),
                         .out_vec = std.ArrayList(I).init(allocator),
@@ -1102,14 +1477,6 @@ pub const mod_utils = struct {
         }
     }
 };
-
-// const mod_index = struct {
-//     const Entry = struct {
-//         name: []const u8,
-//     };
-//     const Index = struct{
-//     };
-// };
 
 // test "anyopaque.fn"{
 //     const inner = struct {

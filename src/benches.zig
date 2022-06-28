@@ -176,6 +176,52 @@ fn bench_plist(
     try mod_bench.bench("str_match", &ctx, BenchCtx.do, .{});
 }
 
+test "rowscan.bench.gen" {
+    const size: usize = 1_000_000;
+    // var allocator = std.testing.allocator;
+    
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    // var gp = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer _ = gp.deinit();
+    // var allocator = gp.allocator();
+
+    var tree = try comb.PlasticTree.init(.{ .size = size }, allocator);
+    defer tree.deinit();
+
+    try tree.gen();
+    std.debug.print("done generating fake tree of size {}\n", .{ size });
+
+    const BenchCtx = struct {
+        const Self = @This();
+        allocator: Allocator,
+        tree: *comb.PlasticTree,
+        search_str: []const u8,
+        matches: std.ArrayList(usize),
+        fn do(self: *Self) void {
+            self.matches.clearRetainingCapacity();
+            for (self.tree.list.items) |entry, id| {
+                if (std.mem.indexOf(u8, entry.name, self.search_str)) |_| {
+                    self.matches.append(id) catch @panic("wtf");
+                }
+            }
+        }
+    };
+    var ctx = BenchCtx{ 
+        .allocator = allocator, 
+        .tree = &tree,
+        // .search_str = tree.list.items[tree.list.items.len - 1].name,
+        .search_str = "abc",
+        .matches = std.ArrayList(usize).init(allocator),
+    };
+    defer {
+        ctx.matches.deinit();
+    }
+    try mod_bench.bench("rowscan", &ctx, BenchCtx.do, .{});
+}
+
 test "plist.bench.gen" {
     const size: usize = 1_000_000;
     const id_t = u32;
