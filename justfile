@@ -1,6 +1,9 @@
 set shell := ["sh", "-c"]
 set dotenv-load
 
+default:
+  @just --list --unsorted
+
 alias b := build
 build:
     zig build
@@ -13,5 +16,5 @@ alias t := test
 test:
     zig build test
 
-bench +ARGS:
+bench *ARGS:
     zig test src/benches.zig  -O ReleaseFast {{ARGS}}

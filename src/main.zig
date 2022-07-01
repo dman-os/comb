@@ -2,12 +2,45 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
+pub const mod_utils = @import("utils.zig");
+pub const mod_gram = @import("gram.zig");
+pub const mod_treewalking = @import("treewalking.zig");
+
+const FsEntry = mod_treewalking.FsEntry;
+const Tree = mod_treewalking.Tree;
+const PlasticTree = mod_treewalking.PlasticTree;
+
 const log_level = std.log.Level.debug;
 
 pub fn main() !void {
     const Index = mod_index.Index;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+
+    // const backing_file_size = 1024 * 1024 * 1024;
+    // var mmap_file = try std.fs.createFileAbsolute("/tmp/comb.db", .{
+    //     .read = true,
+    // });
+    // defer mmap_file.close();
+    // try std.os.ftruncate(mmap_file.handle, backing_file_size);
+    // const mmap_mem = try std.os.mmap(
+    //     null, 
+    //     backing_file_size,
+    //     std.os.PROT.READ | std.os.PROT.WRITE,
+    //     std.os.MAP.SHARED, // | std.os.MAP.ANONYMOUS,
+    //     mmap_file.handle,
+    //     // -1,
+    //     0,
+    // );
+    // defer std.os.munmap(mmap_mem);
+
+    // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
+
+    // var a7r = fixed_a7r.threadSafeAllocator();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){
+        // .backing_allocator = fixed_a7r.allocator(),
+    };
     defer _ = gpa.deinit();
+
     var a7r = gpa.allocator();
     
     var index = Index.init(a7r);
@@ -66,70 +99,459 @@ pub fn main() !void {
     }
 }
 
+
 test {
     std.testing.refAllDecls(@This());
     _ = mod_gram;
     _ = mod_utils;
+    _ = mod_treewalking;
     _ = mod_plist;
     _ = mod_index;
-    _ = PlasticTree;
     // _ = mod_tpool;
-    _ = Tree;
+    // _ = BinarySearchTree;
+    _ = MmapPageAllocator;
 }
 
-fn FsEntry(comptime I: type) type {
-    return struct {
-        pub const Kind = std.fs.File.Kind;
-        name: []u8,
-        parent: I,
-        kind: Kind,
-        depth: usize,
-        size: u64,
-        inode: u64,
-        dev: u64,
-        mode: u32,
-        uid: u32,
-        gid: u32,
-        ctime: i64,
-        atime: i64,
-        mtime: i64,
+// fn BinarySearchTree(
+//     comptime T: type, 
+//     comptime Ctx: type, 
+//     comptime compare_fn: fn(context: Ctx, a: T, b: T) std.math.Order,
+//     comptime equal_fn: fn(context: Ctx, a: T, b: T) bool,
+// ) type {
+//     return struct {
+//         const Self = @This();
+//         const Node = struct {
+//             item: T,
+//             parent: usize,
+//             left_child: ?usize,
+//             right_child: ?usize,
+//         };
+//         nodes: std.ArrayList(Node),
 
-        fn clone(orig: @This(), a7r: Allocator) !@This() {
-            return @This() {
-                .name = try a7r.dupe(u8, orig.name),
-                .parent = orig.parent,
-                .kind = orig.kind,
-                .depth = orig.depth,
-                .size = orig.size,
-                .inode = orig.inode,
-                .dev = orig.dev,
-                .mode = orig.mode,
-                .uid = orig.uid,
-                .gid = orig.gid,
-                .ctime = orig.ctime,
-                .atime = orig.atime,
-                .mtime = orig.mtime,
+//         fn init(a7r: Allocator) Self {
+//             return Self {
+//                 .nodes = std.ArrayList(Node).init(a7r),
+//             };
+//         }
+
+//         fn deinit(self: *Self) void {
+//             self.nodes.deinit();
+//         }
+
+//         fn insert(self: *Self, item: T) void {
+//             if (self.nodes.items.len == 0 ) {
+//                 self.nodes.append(
+//                     Node {
+//                         .item = item,
+//                         .parent = 0,
+//                         .left_child = null,
+//                         .right_child = null,
+//                     }
+//                 );
+//             }
+//         }
+
+//         test "BST.insert" {
+//         }
+//     };
+// }
+
+// fn BTree(comptime order: usize) type {
+//      return struct {
+//         const Node = struct {
+//             children: [order]Node,
+//         };
+//         root: Node,
+//     };
+// }
+
+const MmapPageAllocator = struct {
+    const Self = @This();
+    const Config = struct {
+        page_size: usize = std.mem.page_size,
+    };
+
+    const Page = struct {
+        slice: ?[]align(std.mem.page_size)u8,
+        free: bool,
+    };
+    const PageId = usize;
+
+    // const Allocation = struct {
+    //     // the first page of the allocation
+    //     start: usize,
+    //     len: usize,
+    // };
+
+    const FreeList = std.PriorityQueue(
+        PageId,
+        void,
+        struct {
+            // we wan't earlier pages to be filled in earlier
+            fn cmp(ctx: void, a: PageId, b: PageId) std.math.Order {
+                _  = ctx;
+                return std.math.order(a, b);
+            }
+        }.cmp
+    );
+
+    config: Config,
+    a7r: Allocator,
+
+    backing_file: std.fs.File,
+    pages: std.ArrayListUnmanaged(Page),
+    slice_page_map: std.AutoHashMapUnmanaged(usize, PageId),
+    free_list: FreeList,
+
+    pub fn init(a7r: Allocator, backing_file_path: [] const u8, config: Config) !Self {
+        // const backing_file_size = 1024 * 1024 * 1024;
+        var mmap_file = try std.fs.createFileAbsolute(backing_file_path, .{
+            .read = true,
+        });
+        var self = Self {
+            .config = config,
+            .a7r = a7r,
+            .backing_file = mmap_file,
+            .pages = std.ArrayListUnmanaged(Page){},
+            .free_list = FreeList.init(a7r, .{}),
+            .slice_page_map = std.AutoHashMapUnmanaged(usize, PageId){},
+        };
+        return self;
+    }
+
+    fn deinit(self: *Self) void {
+        self.backing_file.close();
+        self.pages.deinit(self.a7r);
+        self.slice_page_map.deinit(self.a7r);
+        self.free_list.deinit();
+    }
+
+    fn alloc(self: *Self) !PageId {
+        if (self.free_list.removeOrNull()) |id|{
+            var page = &self.pages.items[id];
+            page.free = false;
+            return id;
+        } else {
+            // ensure capacity before trying anything
+            try self.pages.ensureUnusedCapacity(self.a7r, 1);
+            // ensure capacity on the free list to avoid error checking on free calls
+            try self.free_list.ensureUnusedCapacity(1);
+            try std.os.ftruncate(
+                self.backing_file.handle, 
+                (self.pages.items.len + 1) * self.config.page_size
+            );
+            try self.pages.append(
+                self.a7r, 
+                Page {
+                    .slice = null,
+                    .free = false,
+                }
+            );
+            return self.pages.items.len - 1;
+        }
+    }
+
+    fn swapAndFree(self: *Self, id: PageId) !void {
+        self.swapOut(id);
+        try self.free(id);
+    }
+
+    /// This doesn't swap out the page.
+    fn free(self: *Self, id: PageId) void {
+        if (id >= self.pages.items.len) {
+            return;
+        } 
+        var page = &self.pages.items[id];
+        page.free = true;
+
+        if (id == self.pages.items.len - 1) {
+            var ii = id - 1;
+            while (true) : ({ ii -= 1; }) {
+                _ = self.pages.popOrNull();
+                if (ii == 0 or !(self.pages.items[ii].free)) break;
+            }
+        } else {
+            // we've been growing the free list along the page list so it's ok
+            self.free_list.add(id) catch unreachable;
+        }
+    }
+
+    fn swapIn(self: *Self, id: PageId) ![]align(std.mem.page_size)u8 {
+        if (self.pages.items.len <= id) {
+            return error.PageNotAllocated;
+        }
+        var page = self.pages.items[id];
+        if (page.free) {
+            return error.PageNotAllocated;
+        }
+        if (page.slice) |slice| {
+            return slice;
+        } else {
+            var slice = try std.os.mmap(
+                null, 
+                self.config.page_size,
+                std.os.PROT.READ | std.os.PROT.WRITE,
+                std.os.MAP.SHARED, // | std.os.MAP.ANONYMOUS,
+                self.backing_file.handle,
+                // -1,
+                id * self.config.page_size,
+            );
+            errdefer std.os.munmap(slice);
+            try self.slice_page_map.put(self.a7r, @ptrToInt(slice.ptr), id);
+            page.slice = slice;
+            return slice;
+        }
+    }
+
+    fn swapOut(self: *Self, page_id: usize) void {
+        if (self.pages.items.len <= page_id) {
+            return; 
+        }
+        var page = self.pages.items[page_id];
+        if (page.slice) |slice| {
+            std.os.munmap(slice);
+            _ = self.slice_page_map.remove(@ptrToInt(slice.ptr));
+            page.slice = null;
+        }
+    }
+
+    test "MmapPageAllocator.usage" {
+        var a7r = std.testing.allocator;
+        const page_size = std.mem.page_size;
+        var pager = try MmapPageAllocator.init(a7r, "/tmp/MmmapUsage.test", .{
+            .page_size = page_size,
+        });
+        defer pager.deinit();
+
+        const item_per_page = page_size / @sizeOf(usize) ;
+        const page_count = 10;
+        var nums = [_]usize{0} ** (page_count * item_per_page);
+        for (nums) |*num, ii| {
+            num.* = ii;
+        }
+        var pages: [page_count]PageId = undefined;
+        for (pages) |*id, pii| {
+            id.* = try pager.alloc();
+            var bytes = try pager.swapIn(id.*);
+            defer pager.swapOut(id.*);
+            for (std.mem.bytesAsSlice(usize, bytes)) |*num, ii| {
+                num.* = nums[(pii * item_per_page) + ii];
+            }
+        }
+        for (pages) |id, pii| {
+            var bytes = try pager.swapIn(id);
+            defer pager.swapOut(id);
+            for (std.mem.bytesAsSlice(usize, bytes)) |num, ii| {
+                try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
+            }
+        }
+        {
+            const page_id = page_count / 2;
+            pager.free(pages[page_id]);
+            try std.testing.expectError(error.PageNotAllocated, pager.swapIn(pages[page_id]));
+
+            var new_stuff = [_]usize{0} ** item_per_page;
+            for (new_stuff) |*num, ii| {
+                num.* = item_per_page - ii;
+                nums[(page_id * item_per_page) + ii] = item_per_page - ii;
+            }
+
+            var id = try pager.alloc();
+            var bytes = try pager.swapIn(id);
+            defer pager.swapOut(id);
+            for (std.mem.bytesAsSlice(usize, bytes)) |*num, ii| {
+                num.* = new_stuff[ii];
+            }
+        }
+        for (pages) |id, pii| {
+            var bytes = try pager.swapIn(id);
+            defer pager.swapOut(id);
+            for (std.mem.bytesAsSlice(usize, bytes)) |num, ii| {
+                try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
+            }
+        }
+    }
+};
+
+
+fn SwappingList(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const PageId = MmapPageAllocator.PageId;
+
+        const PageCache = struct {
+            const InPage = struct {
+                idx: usize,
+                slice: []T,
+            };
+
+            in_page: ?InPage = null, 
+
+            fn new() PageCache {
+                return PageCache {
+                    .in_page = null
+                };
+            }
+
+            /// Panics if index is out of bound.
+            inline fn ptrTo(self: *PageCache, list: *const Self, index: usize) !*T {
+                const page_idx = list.pageIdxOf(index);
+                const page_slice = try self.swapIn(list, page_idx);
+                return &page_slice[index - (page_idx * list.per_page)];
+            }
+
+            fn swapIn(self: *PageCache, list: *const Self, page_idx: usize) ![]T {
+                if (self.in_page) |page| {
+                    if (page.idx == page_idx) {
+                        return page.slice;
+                    } else {
+                        list.pager.swapOut(list.pages.items[page.idx]);
+                        const bytes = try list.pager.swapIn(list.pages.items[page_idx]);
+                        const slice = std.mem.bytesAsSlice(T, bytes);
+                        self.in_page = InPage {
+                            .idx = page_idx,
+                            .slice = slice,
+                        };
+                        return slice;
+                    }
+                } else {
+                    const bytes = try list.pager.swapIn(list.pages.items[page_idx]);
+                    const slice = std.mem.bytesAsSlice(T, bytes);
+                    self.in_page = InPage {
+                        .idx = page_idx,
+                        .slice = slice,
+                    };
+                    return slice;
+                }
+            }
+
+            fn swapOut(self: *PageCache, list: *const Self) void {
+                if (self.in_page) |page| {
+                    list.pager.swapOut(list.pages.items[page.idx]);
+                    self.in_page = null;
+                }
+            }
+        };
+
+        a7r: Allocator,
+        pager: *MmapPageAllocator,
+        len: usize,
+        capacity: usize,
+        pages: std.ArrayListUnmanaged(PageId),
+        cache: PageCache,
+        /// items per page
+        per_page: usize,
+
+        fn init(a7r: Allocator, pager: *MmapPageAllocator) Self {
+            return Self {
+                .a7r = a7r,
+                .len = 0,
+                .capacity = 0,
+                .pager = pager,
+                .pages = std.ArrayListUnmanaged(PageId){},
+                .per_page = pager.config.page_size / @sizeOf(T),
+                .cache = PageCache.new(),
             };
         }
 
-        fn conv(orig: @This(), comptime P: type, new_parent: P) FsEntry(P) {
-            return FsEntry(P) {
-                .name = orig.name,
-                .parent = new_parent,
-                .kind = orig.kind,
-                .depth = orig.depth,
-                .size = orig.size,
-                .inode = orig.inode,
-                .dev = orig.dev,
-                .mode = orig.mode,
-                .uid = orig.uid,
-                .gid = orig.gid,
-                .ctime = orig.ctime,
-                .atime = orig.atime,
-                .mtime = orig.mtime,
-            };
+        fn deinit(self: *Self) void {
+            self.cache.swapOut(self);
+            for (self.pages.items) |id|{
+                self.pager.free(id);
+            }
+            self.pages.deinit(self.a7r);
+        }
+
+        fn ensureUnusedCapacity(self: *Self, n_items: usize) !void {
+            if (self.capacity > self.len + n_items) {
+                return;
+            }
+            const new_cap = if (self.capacity == 0) self.per_page else self.capacity * 2;
+            var new_pages_req = (new_cap - self.capacity) / self.per_page;
+            std.debug.assert(new_pages_req > 0);
+            try self.pages.ensureUnusedCapacity(self.a7r, new_pages_req);
+            while (new_pages_req > 0) : ({ new_pages_req -= 1; }) {
+                const id = try self.pager.alloc();
+                try self.pages.append(self.a7r, id);
+                self.capacity += self.per_page;
+            }
+            // std.debug.print("capacity increased to: {}\n",.{ self.capacity });
+        }
+
+        fn append(self: *Self, item: T) !void {
+            try self.ensureUnusedCapacity(1);
+            var ptr = try self.cache.ptrTo(self, self.len);
+            ptr.* = item;
+            self.len += 1;
+        }
+
+        fn pageIdxOf(self: Self, idx: usize) usize {
+            return idx / self.per_page;
+        }
+
+        const Iterator = struct {
+            cur: usize,
+            stop: usize,
+            cache: PageCache,
+            list: *const Self,
+
+            fn new(list: *const Self, from: usize, to: usize) Iterator {
+                return Iterator {
+                    .cur = from,
+                    .stop = to,
+                    .list = list,
+                    .cache = PageCache.new(),
+                };
+            }
+
+            fn close(self: *Iterator) void {
+                self.cache.swapOut(self.list);
+            }
+
+            fn next(self: *Iterator) !?*T {
+                if (self.cur == self.stop) {
+                    return null;
+                }
+                var ptr = try self.cache.ptrTo(self.list, self.cur);
+                self.cur += 1;
+                return ptr;
+            }
+        };
+
+        /// Might panic if the list is modified before the iterator is closed.
+        /// Be sure to close the iterator after usage.
+        fn iterator(self: *const Self) Iterator {
+            return Iterator.new(self, 0, self.len);
         }
     };
+}
+
+test "SwappingList.usage" {
+    const page_size = std.mem.page_size;
+    const a7r = std.testing.allocator;
+    var pager = try MmapPageAllocator.init(a7r, "/tmp/SwappingList.usage", .{
+        .page_size = page_size,
+    });
+    defer pager.deinit();
+    var list = SwappingList(usize).init(a7r, &pager);
+    defer list.deinit();
+
+    const item_per_page = page_size / @sizeOf(usize) ;
+    const page_count = 10;
+    var nums = [_]usize{0} ** (page_count * item_per_page);
+    for (nums) |*num, ii| {
+        num.* = ii;
+        try list.append(ii);
+    }
+    {
+        var it = list.iterator();
+        defer it.close();
+        var ii: usize = 0;
+        while (try it.next()) |num| {
+            try std.testing.expectEqual(ii, num.*);
+            ii += 1;
+        }
+    }
 }
 
 const mod_index = struct {
@@ -171,9 +593,9 @@ const mod_index = struct {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.table.items(.name)) |name|{
-                self.a7r.free(name);
-            }
+            // for (self.table.items(.name)) |name|{
+            //     self.a7r.free(name);
+            // }
             self.table.deinit(self.a7r);
             self.meta.deinit(self.a7r);
             self.free_slots.deinit();
@@ -298,7 +720,7 @@ const mod_index = struct {
         };
     };
 
-    test "index" {
+    test "Index.usage" {
         var a7r = std.testing.allocator;
 
         var index = Index.init(a7r);
@@ -332,453 +754,6 @@ const mod_index = struct {
     }
 };
 
-pub const Tree = struct {
-    pub fn walk(allocator: Allocator, path: []const u8, limit: ?usize) !Tree {
-        var walker = Tree.Walker.init(allocator, limit orelse std.math.maxInt(usize));
-        errdefer walker.deinit();
-        const dev = blk: {
-            var dir = try std.fs.openDirAbsolute(path, .{});
-            defer dir.close();
-            const meta = try dir.metadata();
-            break :blk Walker.makedev(meta.inner.statx);
-        };
-        try walker.scanDir(path, std.fs.cwd(), 0, 0, dev, );
-        return walker.toTree();
-    }
-
-    pub const Entry = FsEntry(usize);
-    list: std.ArrayList(Entry),
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator) Tree {
-        return Tree {
-            .allocator = allocator,
-            .list = std.ArrayList(Entry).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *Tree) void {
-        for (self.list.items) |entry| {
-            self.allocator.free(entry.name);
-        }
-        self.list.deinit();
-    }
-
-    pub const FullPathWeaver = struct {
-        pub const NameOfErr = error { NotFound };
-        buf: std.ArrayListUnmanaged(u8),
-
-        pub fn init() FullPathWeaver {
-            return FullPathWeaver {
-                .buf = std.ArrayListUnmanaged(u8){},
-            };
-        }
-        pub fn deinit(self: *FullPathWeaver, allocator: Allocator) void {
-            self.buf.deinit(allocator);
-        }
-        /// The returned slice is invalidated not long after.
-        pub fn pathOf(self: *FullPathWeaver, allocator: Allocator, tree: Tree, id: usize, delimiter: u8) ![]const u8 {
-            self.buf.clearRetainingCapacity();
-            var next_id = id;
-            while (true) {
-                const entry = tree.list.items[next_id];
-                try self.buf.appendSlice(allocator, entry.name);
-                std.mem.reverse(u8, self.buf.items[(self.buf.items.len - entry.name.len)..]);
-                try self.buf.append(allocator, delimiter);
-
-                next_id = entry.parent;
-                if(next_id == 0) {
-                    break;
-                }
-            }
-            std.mem.reverse(u8, self.buf.items[0..]);
-            return self.buf.items;
-        }
-    };
-
-    pub const Walker = struct {
-        remaining: usize,
-        tree: Tree,
-        weaver: FullPathWeaver,
-        // buf: std.ArrayList(u8),
-
-        log_interval: usize = 10_000,
-
-        pub const Error = 
-            Allocator.Error || 
-            std.fs.File.OpenError || 
-            std.fs.File.MetadataError || 
-            std.fs.Dir.Iterator.Error ||
-            std.os.UnexpectedError;
-
-        fn init(allocator: Allocator, limit: usize) @This() {
-            return @This() {
-                .remaining = limit,
-                .tree = Tree.init(allocator),
-                // .buf = std.ArrayList(u8).init(allocator),
-                .weaver = FullPathWeaver.init(),
-            };
-        }
-
-        fn deinit(self: *@This()) void{
-            self.tree.deinit();
-            // self.buf.deinit();
-            self.weaver.deinit(self.tree.allocator);
-        }
-
-        fn toTree(self: *@This()) Tree {
-            self.weaver.deinit(self.tree.allocator);
-            return self.tree;
-        }
-
-        fn append(self: *Walker, entry: Entry) !void {
-            try self.tree.list.append(entry);
-            self.remaining -= 1;
-            if (self.tree.list.items.len % self.log_interval == 0) {
-                const path = try self.weaver.pathOf(
-                    self.tree.allocator, 
-                    self.tree,
-                    self.tree.list.items.len - 1, 
-                    '/'
-                );
-                // std.debug.print(
-                std.log.info(
-                    "scanned {} items, now on: {s}", 
-                    .{ self.tree.list.items.len, path }
-                );
-            }
-        }
-
-        /// Lifted this from rust libc binidings
-        pub fn makedev(statx: std.os.linux.Statx) u64 {
-            // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
-            const major = @as(u64, statx.dev_major);
-            const minor = @as(u64, statx.dev_minor);
-            var dev: u64 = 0;
-            dev |= (major & 0x00000fff) << 8;
-            dev |= (major & 0xfffff000) << 32;
-            dev |= (minor & 0x000000ff) << 0;
-            dev |= (minor & 0xffffff00) << 12;
-            return dev;
-        }
-
-        fn scanDir(
-            self: *@This(), 
-            path: []const u8, 
-            parent: std.fs.Dir,
-            parent_id: usize, 
-            depth: usize, 
-            // parent_dev: std.meta.Tuple(&.{u32, u32}), 
-            parent_dev: u64, 
-        ) Error!void {
-            // std.debug.print("error happened at path = {s}\n", .{path});
-            var dir = parent.openDir(path,.{ .iterate = true, .no_follow = true }) catch |err| {
-                switch(err){
-                    std.fs.Dir.OpenError.AccessDenied => {
-                        const parent_path = try self.weaver.pathOf(
-                            self.tree.allocator, 
-                            self.tree,
-                            parent_id, 
-                            '/'
-                        );
-                        std.log.debug(
-                            "AccessDenied opening dir {s}/{s}", .{ parent_path, path, });
-                        return;
-                    },
-                    else => return err,
-                }
-            };
-            defer dir.close();
-
-            const dev = blk: {
-                const meta = try dir.metadata();
-                const statx = meta.inner.statx;
-                const dev = makedev(statx);
-                try self.append(Entry {
-                    .name = try self.tree.allocator.dupe(u8, path),
-                    .kind = .Directory,
-                    .depth = depth,
-                    .parent = parent_id,
-                    .size = statx.size,
-                    .inode = statx.ino,
-                    .dev = dev,
-                    .mode = statx.mode,
-                    .uid = statx.uid,
-                    .gid = statx.gid,
-                    .ctime = statx.ctime.tv_sec,
-                    .atime = statx.atime.tv_sec,
-                    .mtime = statx.mtime.tv_sec,
-                });
-
-                // we don't examine other devices
-                if (dev != parent_dev) {
-                    const parent_path = try self.weaver.pathOf(
-                        self.tree.allocator, 
-                        self.tree,
-                        parent_id, 
-                        '/'
-                    );
-                    std.log.debug(
-                        "device ({}) != parent dev ({}), skipping dir at = {s}/{s}", 
-                        .{ dev, parent_dev, parent_path, path },
-                    );
-                    return;
-                }
-                break :blk dev;
-            };
-            const dir_id = self.tree.list.items.len - 1;
-
-            var it = dir.iterate();
-            while (self.remaining > 0) {
-                // handle the error first
-                if (it.next()) |next| {
-                    // check if there's a file left in the dir
-                    const entry = next orelse break;
-                    if (entry.kind == .Directory) {
-                        try self.scanDir(entry.name, dir, dir_id, depth + 1, dev);
-                    } else {
-                        const posix_name = try std.os.toPosixPath(entry.name);
-                        const meta = meta_no_follow(dir.fd, &posix_name) catch |err| {
-                            const parent_path = try self.weaver.pathOf(
-                                self.tree.allocator, 
-                                self.tree,
-                                dir_id, 
-                                '/'
-                            );
-                            switch(err){
-                                std.os.OpenError.AccessDenied => {
-                                    std.log.debug(
-                                        "AccessDenied opening file {s}/{s}", .{ parent_path, entry.name, });
-                                    continue;
-                                },
-                                else => { 
-                                    std.debug.print(
-                                    // std.log.info(
-                                        "Unexpected err {} at {s}/{s}", .{ err, parent_path, entry.name, });
-                                    return err;
-                                },
-                            }
-                        };
-                        const statx = meta.statx;
-                        try self.append(Entry {
-                            .name = try self.tree.allocator.dupe(u8, entry.name),
-                            .kind = entry.kind,
-                            .depth = depth,
-                            .parent = parent_id,
-                            .size = statx.size,
-                            .inode = statx.ino,
-                            .dev = makedev(statx),
-                            .mode = statx.mode,
-                            .uid = statx.uid,
-                            .gid = statx.gid,
-                            .ctime = statx.ctime.tv_sec,
-                            .atime = statx.atime.tv_sec,
-                            .mtime = statx.mtime.tv_sec,
-                        });
-                    }
-                } else |err| switch (err) {
-                    std.fs.Dir.Iterator.Error.AccessDenied => {
-                        const parent_path = try self.weaver.pathOf(
-                            self.tree.allocator, 
-                            self.tree,
-                            parent_id, 
-                            '/'
-                        );
-                        std.log.debug(
-                            "AccessDenied on iteration for dir at: {s}/{s}", .{ parent_path, path, });
-                    },
-                    else => return err,
-                }
-            }
-        }
-    };
-
-    test "walk" {
-        if (true) return error.SkipZigTest;
-
-        const size: usize = 10_000;
-        var allocator = std.testing.allocator;
-        var tree = try walk(allocator, "/", size);
-        defer tree.deinit();
-        var weaver = FullPathWeaver.init();
-        defer weaver.deinit(allocator);
-        for (tree.list.items) |file, id| {
-            const path = try weaver.pathOf(allocator, tree, id, '/');
-            std.debug.print(
-                "{} | kind = {} | parent = {} | size = {} | path = {s}\n", 
-                .{ id, file.kind, file.parent, file.size, path }
-            );
-        }
-        try std.testing.expectEqual(size, tree.list.items.len);
-    }
-};
-
-const ReadMetaError = error {
-    UnsupportedSyscall
-};
-
-/// Name has to be sentinel terminated, I think.
-/// Modified from zig std lib
-fn meta_no_follow(dir_handle: std.os.fd_t, name: [*]const u8) !std.fs.File.MetadataLinux {
-    const os = std.os;
-    var stx = std.mem.zeroes(os.linux.Statx);
-    const rcx = os.linux.statx(
-        dir_handle, 
-        name,
-        os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, 
-        os.linux.STATX_BASIC_STATS | 
-        os.linux.STATX_BTIME, 
-        &stx
-    );
-
-    switch (os.errno(rcx)) {
-        .SUCCESS => {},
-        .ACCES => return os.OpenError.AccessDenied,
-        .BADF => unreachable,
-        .FAULT => unreachable,
-        .INVAL => unreachable,
-        .LOOP => unreachable,
-        .NOENT => return os.OpenError.FileNotFound,
-        .NAMETOOLONG => return os.OpenError.NameTooLong,
-        .NOTDIR => return os.OpenError.NotDir,
-        // NOSYS happens when `statx` is unsupported, which is the case on kernel versions before 4.11
-        // Here, we call `fstat` and fill `stx` with the data we need
-        .NOSYS => {
-            @panic("statx not spported in kernel");
-            // return ReadMetaError.UnsupportedSyscall;
-        },
-        .NOMEM => return os.OpenError.SystemResources,
-        else => |err| return os.unexpectedErrno(err),
-    }
-    return std.fs.File.MetadataLinux {
-        .statx = stx,
-    };
-}
-
-pub const PlasticTree = struct {
-    const Self = @This();
-
-    pub const Entry = struct {
-        name: []u8,
-        depth: usize,
-        parent: u64,
-    };
-
-    pub const Config = struct {
-        size: usize = 1_000_000,
-        max_dir_size: usize = 1_000,
-        file_v_dir: f64 = 0.7,
-        max_name_len: usize = 18,
-    };
-
-    arena_allocator: std.heap.ArenaAllocator,
-    list: std.ArrayList(Entry),
-    config: Config,
-
-    pub fn init(config: Config, allocer: Allocator) !Self {
-        var arena = std.heap.ArenaAllocator.init(allocer);
-        errdefer arena.deinit();
-        return Self {
-            .list = try std.ArrayList(Entry).initCapacity(arena.allocator(), config.size),
-            .arena_allocator = arena,
-            .config = config,
-        };
-    }
-
-    fn allocator(self: *Self) Allocator {
-        return self.arena_allocator.allocator();
-    }
-
-    pub fn deinit(self: *Self) void {
-        // for (self.list.items) |entry| {
-        //     // self.allocator.free(@ptrCast([*]u8, entry.name.ptr));
-        //     self.allocator.free(entry.name);
-        // }
-        // self.list.deinit();
-        
-        // deinit the arena allocator instead of...
-        self.arena_allocator.deinit();
-    }
-
-    pub fn gen(self: *Self) !void {
-        // the root node
-        var name = try self.allocator().alloc(u8, 1);
-        name[0] = '/';
-        try self.list.append(Entry { .name = name, .depth = 0, .parent = 0 });
-
-        // generate the rest
-        try self.gen_dir(0, 1, self.config.size - 1);
-    }
-
-    fn gen_name(self: *Self) ![]u8 {
-        var rng = std.crypto.random;
-
-        // random length
-        const len = 1 + rng.uintAtMost(usize, self.config.max_name_len - 1);
-        var name = try self.allocator().alloc(u8, len);
-
-        // random chars from ascii range
-        for (name[0..]) |*char| {
-            char.* = 32 + rng.uintAtMost(u8, 127 - 32);
-            // remove prohibited characters
-            // TODO: make this a config option
-            if (char.* == '/'){
-                char.* = '0';
-            }
-        }
-
-        return name;
-    }
-
-    fn gen_dir(self: *Self, dir_id: u64, depth: usize, share: usize) Allocator.Error!void {
-        var rng = std.crypto.random;
-
-        const child_count = rng.uintAtMost(usize, std.math.min(share, self.config.max_dir_size));
-
-        var remaining_share = share - child_count;
-        var ii: usize = 0;
-        while(ii < child_count): ({ ii += 1; }){
-            const name = try self.gen_name();
-            try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
-
-            if(remaining_share > 0 and rng.float(f64) > self.config.file_v_dir){
-                const sub_dir_share = @floatToInt(usize, rng.float(f64) * @intToFloat(f64, remaining_share));
-                remaining_share -= sub_dir_share;
-                try self.gen_dir(self.list.items.len - 1, depth + 1, sub_dir_share);
-            }
-        }
-        if (remaining_share > 0){
-            const name = try self.gen_name();
-            try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
-            try self.gen_dir(self.list.items.len - 1, depth + 1, remaining_share - 1);
-        }
-    }
-    test "plastic_tree" {
-        // var allocator = std.heap.GeneralPurposeAllocator(.{}){};
-        var list = try PlasticTree.init(.{ .size = 1_000 }, std.testing.allocator);
-        defer list.deinit();
-
-        try list.gen();
-        if (false) {
-            for (list.list.items[0..50]) |entry, id|{
-                std.debug.print(
-                    "id: {any} | depth: {any} | parent: {any} | name: {s}\n", 
-                    .{ id, entry.depth, entry.parent, entry.name }
-                );
-            }
-            var size = list.list.items.len * @sizeOf(PlasticTree.Entry);
-            var max_depth: usize = 0;
-            for (list.list.items) |entry|{
-                size += entry.name.len;
-                if (max_depth < entry.depth){
-                    max_depth = entry.depth;
-                }
-            }
-            std.debug.print("max depth = {}\n", .{ max_depth });
-            std.debug.print("total bytes = {}\n", .{ size });
-        }
-    }
-};
 
 pub const mod_plist = struct {
     pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
@@ -1004,7 +979,7 @@ pub const mod_plist = struct {
             var plist = TriPList.init();
             defer plist.deinit(allocator);
 
-            var matcher = try TriPList.str_matcher(allocator);
+            var matcher = TriPList.str_matcher(allocator);
             defer matcher.deinit();
 
             for (case.items) |name, id| {
@@ -1035,448 +1010,6 @@ pub const mod_plist = struct {
     }
 };
 
-pub const mod_gram = struct {
-    pub const TEC: u8 = 0;
-    pub const Appender = mod_utils.Appender;
-
-    pub fn Gram(comptime gram_len: u4) type {
-        return [gram_len]u8;
-    }
-
-    pub fn GramPos(comptime gram_len: u4) type {
-        return struct {
-            const Self = @This();
-            pos: usize,
-            gram: [gram_len]u8,
-
-            fn new(pos: usize, gram: [gram_len]u8) Self {
-                return Self{ .pos = pos, .gram = gram };
-            }
-        };
-    }
-
-    /// This will tokenize the string before gramming it according to the provided delimiter.
-    /// For example, provide std.ascii.spaces to tokenize using whitespace.
-    pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, delimiters: []const u8, out: Appender(GramPos(gram_len))) !void {
-        if (gram_len == 0) {
-            @compileError("gram_len is 0");
-        }
-        if (delimiters.len > 0) {
-            var iter = std.mem.tokenize(u8, string, delimiters);
-            while (iter.next()) |token| {
-                try token_grammer(gram_len, token, @ptrToInt(token.ptr) - @ptrToInt(string.ptr), boundary_grams, out);
-            }
-        } else {
-            try token_grammer(gram_len, string, 0, boundary_grams, out);
-        }
-    }
-    fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, boundary_grams: bool, out: Appender(GramPos(gram_len))) !void {
-        if (gram_len == 0) {
-            @compileError("gram_len is 0");
-        }
-        if (gram_len <= string.len) {
-            if (boundary_grams) {
-                try left_boundaries(gram_len, string, offset, out);
-            }
-            var pos: usize = 0;
-            while (pos + gram_len <= string.len) : ({
-                pos += 1;
-            }) {
-                var gram: [gram_len]u8 = undefined;
-                comptime var ii = 0;
-                inline while (ii < gram_len) : ({
-                    ii += 1;
-                }) {
-                    gram[ii] = string[pos + ii];
-                }
-                try out.append(GramPos(gram_len).new(offset + pos, gram));
-            }
-            if (boundary_grams) {
-                try right_boundaries(gram_len, string, offset, out);
-            }
-        } else {
-            // left boundaries
-            // we can't use the fn `left_boundaries`, which's partially comtime
-            // because we're constrained by the string.len now (which is shorter
-            // than gram_len)
-            if (boundary_grams) {
-                var ii: usize = 1;
-                // we'll emit it the `string.len - 1` times
-                while (ii < string.len) : ({
-                    ii += 1;
-                }) {
-                    // var gram = [1]u8{TEC} ** gram_len;
-                    // var gram_ii = gram_len - ii;
-                    // var str_ii = 0;
-                    // while (gram_ii < gram_len) : ({
-                    //     gram_ii += 1;
-                    //     str_ii += 1;
-                    // }) {
-                    //     gram[gram_ii] = string[str_ii];
-                    // }
-                    const gram = fill_gram(gram_len, string[0..ii], gram_len - ii);
-                    try out.append(GramPos(gram_len).new(offset, gram));
-                }
-            }
-            // fill it in from the right
-            // i.e TECs on the left
-            // this isn't a boundary since the string.len is shorter than gram_len
-            {
-                const gram = fill_gram(gram_len, string, gram_len - string.len);
-                try out.append(GramPos(gram_len).new(offset, gram));
-            }
-            // if it's short enough to have TECs on both side
-            if (boundary_grams) {
-                var ii = gram_len - string.len - 1;
-                while (ii > 0) : ({
-                    ii -= 1;
-                }) {
-                    const gram = fill_gram(gram_len, string, ii);
-                    try out.append(GramPos(gram_len).new(offset, gram));
-                }
-            }
-            // fill it in from the left
-            // i.e. TECS on the right
-            {
-                const gram = fill_gram(gram_len, string, 0);
-                try out.append(GramPos(gram_len).new(offset, gram));
-            }
-            // right boundaries
-            if (boundary_grams) {
-                var start: usize = 1;
-                // we'll emit it the `string.len - 1` times
-                while (start < string.len) : ({
-                    start += 1;
-                }) {
-                    const gram = fill_gram(gram_len, string[start..], 0);
-                    try out.append(GramPos(gram_len).new(offset + start, gram));
-                }
-            }
-        }
-    }
-    /// Panics if gram_len - start > string.len
-    inline fn fill_gram(comptime gram_len: u4, string: []const u8, start: usize) Gram(gram_len) {
-        var gram = [1]u8{TEC} ** gram_len;
-        for (string) |char, ii| {
-            gram[start + ii] = char;
-        }
-        // var ii = start;
-        // while(ii < gram_len): ({ ii += 1; }){
-        //     gram[ii] = string[ii - start];
-        // }
-        return gram;
-    }
-    inline fn left_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
-        // the following code will do something similar to what's shown below but for any gram_len
-        // the commented out example is how it'd look if gram_len is 3
-        // -- out.append(GramPos(2).new(0, .{ TEC, TEC, str[pos] }));
-        // -- out.append(GramPos(2).new(0, .{ TEC, str[pos], str[pos + 1] }));
-
-        // append `gram_len - 1` times where each gram is full of TEC
-        // this won't enter if gram_len == 1. One length grams can't have boundary grams
-        comptime var fill_count = 1; // i.e. the chars that are not TEC
-        inline while (fill_count < gram_len) : ({
-            fill_count += 1;
-        }) {
-            // create completely empty gram
-            var gram = [1]u8{TEC} ** gram_len;
-            // we start at an earlier index each iteration
-            // meaning, we progressively fill more of the last few gram positions
-            // from the string each iter
-            comptime var gram_ii = gram_len - fill_count;
-            comptime var str_ii = 0;
-            inline while (gram_ii < gram_len) : ({
-                gram_ii += 1;
-                str_ii += 1;
-            }) {
-                gram[gram_ii] = string[str_ii];
-            }
-            try out.append(GramPos(gram_len).new(offset, gram));
-        }
-    }
-    inline fn right_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
-        const pos = string.len - gram_len;
-        // the following code will do something similar to what's shown below but for any gram_len
-        // the commented out example is how it'd look if gram_len is 3
-        // -- out.append(GramPos(2).new(pos + 1, .{ string[pos + 1], string[pos + 2], TEC }));
-        // -- out.append(GramPos(2).new(pos + 2, .{ string[pos + 2], TEC, TEC }));
-
-        // similar to the right boundaries gram. Read those comments
-        comptime var tec_count = 1;
-        inline while (tec_count < gram_len) : ({
-            tec_count += 1;
-        }) {
-            var gram = [1]u8{TEC} ** gram_len;
-            // this time, we fill progressively less from the string
-            comptime var gram_ii = 0;
-            inline while (gram_ii < (gram_len - tec_count)) : ({
-                gram_ii += 1;
-            }) {
-                gram[gram_ii] = string[pos + tec_count + gram_ii];
-            }
-            try out.append(GramPos(gram_len).new(offset + pos + tec_count, gram));
-        }
-    }
-
-    test "grammer.trigram" {
-        // const Case = std.meta.Tuple(.{ []const u8, std.meta.Tuple(.{[]const u8, bool, []Gram(3)}) });
-        comptime var table = .{
-            .{ .name = "boundaries.3", .string = "etc", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(0, .{ TEC, TEC, 'e' }),
-                GramPos(3).new(0, .{ TEC, 'e', 't' }),
-                GramPos(3).new(0, .{ 'e', 't', 'c' }),
-                GramPos(3).new(1, .{ 't', 'c', TEC }),
-                GramPos(3).new(2, .{ 'c', TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.3", .string = "etc", .boundary_grams = false, .expected = &.{
-                GramPos(3).new(0, .{ 'e', 't', 'c' }),
-            } },
-            .{ .name = "boundaries.2", .string = ".h", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(0, .{ TEC, TEC, '.' }),
-                GramPos(3).new(0, .{ TEC, '.', 'h' }),
-                GramPos(3).new(0, .{ '.', 'h', TEC }),
-                GramPos(3).new(1, .{ 'h', TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.2", .string = ".h", .boundary_grams = false, .expected = &.{
-                GramPos(3).new(0, .{ TEC, '.', 'h' }),
-                GramPos(3).new(0, .{ '.', 'h', TEC }),
-            } },
-            .{ .name = "boundaries.1", .string = "h", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(0, .{ TEC, TEC, 'h' }),
-                GramPos(3).new(0, .{ TEC, 'h', TEC }),
-                GramPos(3).new(0, .{ 'h', TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.1", .string = "h", .boundary_grams = false, .expected = &.{
-                GramPos(3).new(0, .{ TEC, TEC, 'h' }),
-                GramPos(3).new(0, .{ 'h', TEC, TEC }),
-            } },
-            .{ .name = "boundaries.multi", .string = "homeuser", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(0, .{ TEC, TEC, 'h' }),
-                GramPos(3).new(0, .{ TEC, 'h', 'o' }),
-                GramPos(3).new(0, .{ 'h', 'o', 'm' }),
-                GramPos(3).new(1, .{ 'o', 'm', 'e' }),
-                GramPos(3).new(2, .{ 'm', 'e', 'u' }),
-                GramPos(3).new(3, .{ 'e', 'u', 's' }),
-                GramPos(3).new(4, .{ 'u', 's', 'e' }),
-                GramPos(3).new(5, .{ 's', 'e', 'r' }),
-                GramPos(3).new(6, .{ 'e', 'r', TEC }),
-                GramPos(3).new(7, .{ 'r', TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.multi", .string = "homeuser", .boundary_grams = false, .expected = &.{
-                GramPos(3).new(0, .{ 'h', 'o', 'm' }),
-                GramPos(3).new(1, .{ 'o', 'm', 'e' }),
-                GramPos(3).new(2, .{ 'm', 'e', 'u' }),
-                GramPos(3).new(3, .{ 'e', 'u', 's' }),
-                GramPos(3).new(4, .{ 'u', 's', 'e' }),
-                GramPos(3).new(5, .{ 's', 'e', 'r' }),
-            } },
-            .{ .name = "whitespace_is_boundary.1", .string = " home user", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(1, .{ TEC, TEC, 'h' }),
-                GramPos(3).new(1, .{ TEC, 'h', 'o' }),
-                GramPos(3).new(1, .{ 'h', 'o', 'm' }),
-                GramPos(3).new(2, .{ 'o', 'm', 'e' }),
-                GramPos(3).new(3, .{ 'm', 'e', TEC }),
-                GramPos(3).new(4, .{ 'e', TEC, TEC }),
-                GramPos(3).new(6, .{ TEC, TEC, 'u' }),
-                GramPos(3).new(6, .{ TEC, 'u', 's' }),
-                GramPos(3).new(6, .{ 'u', 's', 'e' }),
-                GramPos(3).new(7, .{ 's', 'e', 'r' }),
-                GramPos(3).new(8, .{ 'e', 'r', TEC }),
-                GramPos(3).new(9, .{ 'r', TEC, TEC }),
-            } },
-            .{ .name = "whitespace_is_boundary.2", .string = " home   user", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(1, .{ TEC, TEC, 'h' }),
-                GramPos(3).new(1, .{ TEC, 'h', 'o' }),
-                GramPos(3).new(1, .{ 'h', 'o', 'm' }),
-                GramPos(3).new(2, .{ 'o', 'm', 'e' }),
-                GramPos(3).new(3, .{ 'm', 'e', TEC }),
-                GramPos(3).new(4, .{ 'e', TEC, TEC }),
-                GramPos(3).new(8, .{ TEC, TEC, 'u' }),
-                GramPos(3).new(8, .{ TEC, 'u', 's' }),
-                GramPos(3).new(8, .{ 'u', 's', 'e' }),
-                GramPos(3).new(9, .{ 's', 'e', 'r' }),
-                GramPos(3).new(10, .{ 'e', 'r', TEC }),
-                GramPos(3).new(11, .{ 'r', TEC, TEC }),
-            } },
-            .{ .name = "whitespace_is_boundary.3", .string = " home\tuser", .boundary_grams = true, .expected = &.{
-                GramPos(3).new(1, .{ TEC, TEC, 'h' }),
-                GramPos(3).new(1, .{ TEC, 'h', 'o' }),
-                GramPos(3).new(1, .{ 'h', 'o', 'm' }),
-                GramPos(3).new(2, .{ 'o', 'm', 'e' }),
-                GramPos(3).new(3, .{ 'm', 'e', TEC }),
-                GramPos(3).new(4, .{ 'e', TEC, TEC }),
-                GramPos(3).new(6, .{ TEC, TEC, 'u' }),
-                GramPos(3).new(6, .{ TEC, 'u', 's' }),
-                GramPos(3).new(6, .{ 'u', 's', 'e' }),
-                GramPos(3).new(7, .{ 's', 'e', 'r' }),
-                GramPos(3).new(8, .{ 'e', 'r', TEC }),
-                GramPos(3).new(9, .{ 'r', TEC, TEC }),
-            } },
-            .{ .name = "pure_delimiter.1", .string = " ", .boundary_grams = true, .expected = &.{} },
-            .{ .name = "pure_delimiter.2", .string = "    ", .boundary_grams = true, .expected = &.{} },
-            .{ .name = "pure_delimiter.3", .string = "", .boundary_grams = true, .expected = &.{} },
-        };
-        inline for (table) |case| {
-            var list = std.ArrayList(GramPos(3)).init(std.testing.allocator);
-            defer list.deinit();
-            try grammer(3, case.string, case.boundary_grams, &std.ascii.spaces, Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append));
-            std.testing.expectEqualSlices(GramPos(3), case.expected, list.items) catch |err| {
-                std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, list.items });
-                return err;
-            };
-        }
-    }
-    test "grammer.quadgram" {
-        // const Case = std.meta.Tuple(.{ []const u8, std.meta.Tuple(.{[]const u8, bool, []Gram(3)}) });
-        comptime var table = .{
-            .{ .name = "boundaries.4", .string = "root", .boundary_grams = true, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, TEC, 'r' }),
-                GramPos(4).new(0, .{ TEC, TEC, 'r', 'o' }),
-                GramPos(4).new(0, .{ TEC, 'r', 'o', 'o' }),
-                GramPos(4).new(0, .{ 'r', 'o', 'o', 't' }),
-                GramPos(4).new(1, .{ 'o', 'o', 't', TEC }),
-                GramPos(4).new(2, .{ 'o', 't', TEC, TEC }),
-                GramPos(4).new(3, .{ 't', TEC, TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.4", .string = "root", .boundary_grams = false, .expected = &.{
-                GramPos(4).new(0, .{ 'r', 'o', 'o', 't' }),
-            } },
-            .{ .name = "boundaries.3", .string = "etc", .boundary_grams = true, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, TEC, 'e' }),
-                GramPos(4).new(0, .{ TEC, TEC, 'e', 't' }),
-                GramPos(4).new(0, .{ TEC, 'e', 't', 'c' }),
-                GramPos(4).new(0, .{ 'e', 't', 'c', TEC }),
-                GramPos(4).new(1, .{ 't', 'c', TEC, TEC }),
-                GramPos(4).new(2, .{ 'c', TEC, TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.3", .string = "etc", .boundary_grams = false, .expected = &.{
-                GramPos(4).new(0, .{ TEC, 'e', 't', 'c' }),
-                GramPos(4).new(0, .{ 'e', 't', 'c', TEC }),
-            } },
-            .{ .name = "boundaries.2", .string = ".h", .boundary_grams = true, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, TEC, '.' }),
-                GramPos(4).new(0, .{ TEC, TEC, '.', 'h' }),
-                GramPos(4).new(0, .{ TEC, '.', 'h', TEC }),
-                GramPos(4).new(0, .{ '.', 'h', TEC, TEC }),
-                GramPos(4).new(1, .{ 'h', TEC, TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.2", .string = ".h", .boundary_grams = false, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, '.', 'h' }),
-                GramPos(4).new(0, .{ '.', 'h', TEC, TEC }),
-            } },
-            .{ .name = "boundaries.1", .string = "h", .boundary_grams = true, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, TEC, 'h' }),
-                GramPos(4).new(0, .{ TEC, TEC, 'h', TEC }),
-                GramPos(4).new(0, .{ TEC, 'h', TEC, TEC }),
-                GramPos(4).new(0, .{ 'h', TEC, TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.1", .string = "h", .boundary_grams = false, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, TEC, 'h' }),
-                GramPos(4).new(0, .{ 'h', TEC, TEC, TEC }),
-            } },
-            .{ .name = "boundaries.multi", .string = "homeuser", .boundary_grams = true, .expected = &.{
-                GramPos(4).new(0, .{ TEC, TEC, TEC, 'h' }),
-                GramPos(4).new(0, .{ TEC, TEC, 'h', 'o' }),
-                GramPos(4).new(0, .{ TEC, 'h', 'o', 'm' }),
-                GramPos(4).new(0, .{ 'h', 'o', 'm', 'e' }),
-                GramPos(4).new(1, .{ 'o', 'm', 'e', 'u' }),
-                GramPos(4).new(2, .{ 'm', 'e', 'u', 's' }),
-                GramPos(4).new(3, .{ 'e', 'u', 's', 'e' }),
-                GramPos(4).new(4, .{ 'u', 's', 'e', 'r' }),
-                GramPos(4).new(5, .{ 's', 'e', 'r', TEC }),
-                GramPos(4).new(6, .{ 'e', 'r', TEC, TEC }),
-                GramPos(4).new(7, .{ 'r', TEC, TEC, TEC }),
-            } },
-            .{ .name = "no_boundaries.multi", .string = "homeuser", .boundary_grams = false, .expected = &.{
-                GramPos(4).new(0, .{ 'h', 'o', 'm', 'e' }),
-                GramPos(4).new(1, .{ 'o', 'm', 'e', 'u' }),
-                GramPos(4).new(2, .{ 'm', 'e', 'u', 's' }),
-                GramPos(4).new(3, .{ 'e', 'u', 's', 'e' }),
-                GramPos(4).new(4, .{ 'u', 's', 'e', 'r' }),
-            } },
-            .{ .name = "whitespace_is_boundary.1", .string = " home user", .boundary_grams = true, .expected = &.{
-                GramPos(4).new(1, .{ TEC, TEC, TEC, 'h' }),
-                GramPos(4).new(1, .{ TEC, TEC, 'h', 'o' }),
-                GramPos(4).new(1, .{ TEC, 'h', 'o', 'm' }),
-                GramPos(4).new(1, .{ 'h', 'o', 'm', 'e' }),
-                GramPos(4).new(2, .{ 'o', 'm', 'e', TEC }),
-                GramPos(4).new(3, .{ 'm', 'e', TEC, TEC }),
-                GramPos(4).new(4, .{ 'e', TEC, TEC, TEC }),
-                GramPos(4).new(6, .{ TEC, TEC, TEC, 'u' }),
-                GramPos(4).new(6, .{ TEC, TEC, 'u', 's' }),
-                GramPos(4).new(6, .{ TEC, 'u', 's', 'e' }),
-                GramPos(4).new(6, .{ 'u', 's', 'e', 'r' }),
-                GramPos(4).new(7, .{ 's', 'e', 'r', TEC }),
-                GramPos(4).new(8, .{ 'e', 'r', TEC, TEC }),
-                GramPos(4).new(9, .{ 'r', TEC, TEC, TEC }),
-            } },
-        };
-        inline for (table) |case| {
-            var arr = std.ArrayList(GramPos(4)).init(std.testing.allocator);
-            defer arr.deinit();
-            try grammer(4, case.string, case.boundary_grams, &std.ascii.spaces, Appender(GramPos(4)).new(&arr, std.ArrayList(GramPos(4)).append));
-            std.testing.expectEqualSlices(GramPos(4), case.expected, arr.items) catch |err| {
-                std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, arr.items });
-                return err;
-            };
-        }
-    }
-};
-
-pub const mod_utils = struct {
-    pub fn Appender(comptime T: type) type {
-        return struct {
-            const Self = @This();
-            const Err = Allocator.Error;
-
-            vptr: *anyopaque,
-            func: fn (*anyopaque, T) Err!void,
-
-            fn new(coll: anytype, func: fn (@TypeOf(coll), T) Err!void) Self {
-                if (!comptime std.meta.trait.isSingleItemPtr(@TypeOf(coll))) {
-                    @compileError("was expecting single item pointer, got type = " ++ @typeName(@TypeOf(coll)));
-                }
-                return Self{
-                    .vptr = @ptrCast(*anyopaque, coll),
-                    .func = @ptrCast(fn (*anyopaque, T) Err!void, func),
-                };
-            }
-
-            fn append(self: Self, item: T) Err!void {
-                try self.func(self.vptr, item);
-            }
-        };
-    }
-
-    test "appender.list" {
-        var list = std.ArrayList(u32).init(std.testing.allocator);
-        defer list.deinit();
-        var appender = Appender(u32).new(&list, std.ArrayList(u32).append);
-        try appender.append(10);
-        try appender.append(20);
-        try appender.append(30);
-        try appender.append(40);
-        try std.testing.expectEqualSlices(u32, ([_]u32{ 10, 20, 30, 40 })[0..], list.items);
-    }
-
-    test "appender.set" {
-        var set = std.AutoHashMap(u32, void).init(std.testing.allocator);
-        defer set.deinit();
-        const curry = struct {
-            fn append(ptr: *std.AutoHashMap(u32, void), item: u32) !void {
-                try ptr.put(item, {});
-            }
-        };
-        var appender = Appender(u32).new(&set, curry.append);
-        try appender.append(10);
-        try appender.append(20);
-        try appender.append(30);
-        try appender.append(40);
-        inline for (([_]u32{ 10, 20, 30, 40 })[0..]) |item| {
-            try std.testing.expect(set.contains(item));
-        }
-    }
-};
 
 // test "anyopaque.fn"{
 //     const inner = struct {

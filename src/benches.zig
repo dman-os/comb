@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 const comb = @import("main.zig");
 const mod_plist = comb.mod_plist;
 const mod_gram = comb.mod_gram;
+const Tree = comb.mod_treewalking.Tree;
+const PlasticTree = comb.mod_treewalking.PlasticTree;
 
 const mod_bench = struct {
     const BenchConfig = struct {
@@ -168,7 +170,7 @@ fn bench_plist(
         .allocator = allocator, 
         .plist = plist,
         .search_str = search_str,
-        .matcher = try mod_plist.PostingListUnmanaged(I, gram_len).str_matcher(allocator),
+        .matcher = mod_plist.PostingListUnmanaged(I, gram_len).str_matcher(allocator),
     };
     defer {
         ctx.matcher.deinit();
@@ -188,7 +190,7 @@ test "rowscan.bench.gen" {
     // defer _ = gp.deinit();
     // var allocator = gp.allocator();
 
-    var tree = try comb.PlasticTree.init(.{ .size = size }, allocator);
+    var tree = try PlasticTree.init(.{ .size = size }, allocator);
     defer tree.deinit();
 
     try tree.gen();
@@ -197,7 +199,7 @@ test "rowscan.bench.gen" {
     const BenchCtx = struct {
         const Self = @This();
         allocator: Allocator,
-        tree: *comb.PlasticTree,
+        tree: *PlasticTree,
         search_str: []const u8,
         matches: std.ArrayList(usize),
         fn do(self: *Self) void {
@@ -237,7 +239,7 @@ test "plist.bench.gen" {
     // defer _ = gp.deinit();
     // var allocator = gp.allocator();
     
-    var tree = try comb.PlasticTree.init(.{ .size = size }, allocator);
+    var tree = try PlasticTree.init(.{ .size = size }, allocator);
     defer tree.deinit();
 
     try tree.gen();
@@ -280,10 +282,10 @@ test "plist.bench.walk" {
     defer _ = gp.deinit();
     var allocator = gp.allocator();
 
-    var tree = try comb.Tree.walk(allocator, "/", size);
+    var tree = try Tree.walk(allocator, "/", size);
     defer tree.deinit();
     std.debug.print("done walking tree for {} items\n", .{ tree.list.items.len });
-    var weaver = comb.Tree.FullPathWeaver.init();
+    var weaver = Tree.FullPathWeaver.init();
     defer weaver.deinit(allocator);
 
     var plist = mod_plist.PostingListUnmanaged(id_t, gram_len).init();
