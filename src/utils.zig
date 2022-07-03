@@ -1,6 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub fn dbg(val: anytype) @TypeOf(val){
+    std.debug.print("{any}\n", .{val});
+    return val;
+}
+
 pub fn Appender(comptime T: type) type {
     return struct {
         const Self = @This();

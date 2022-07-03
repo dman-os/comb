@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 pub const mod_utils = @import("utils.zig");
 pub const mod_gram = @import("gram.zig");
 pub const mod_treewalking = @import("treewalking.zig");
+pub const mod_mmap = @import("mmap.zig");
 
 const FsEntry = mod_treewalking.FsEntry;
 const Tree = mod_treewalking.Tree;
@@ -13,27 +14,14 @@ const PlasticTree = mod_treewalking.PlasticTree;
 const log_level = std.log.Level.debug;
 
 pub fn main() !void {
-    const Index = mod_index.Index;
+    // try in_mem();
+    try swapping();
+}
 
-    // const backing_file_size = 1024 * 1024 * 1024;
-    // var mmap_file = try std.fs.createFileAbsolute("/tmp/comb.db", .{
-    //     .read = true,
-    // });
-    // defer mmap_file.close();
-    // try std.os.ftruncate(mmap_file.handle, backing_file_size);
-    // const mmap_mem = try std.os.mmap(
-    //     null, 
-    //     backing_file_size,
-    //     std.os.PROT.READ | std.os.PROT.WRITE,
-    //     std.os.MAP.SHARED, // | std.os.MAP.ANONYMOUS,
-    //     mmap_file.handle,
-    //     // -1,
-    //     0,
-    // );
-    // defer std.os.munmap(mmap_mem);
+fn swapping () !void {
+    const Index = mod_index.SwappingIndex;
 
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
-
     // var a7r = fixed_a7r.threadSafeAllocator();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){
@@ -43,8 +31,14 @@ pub fn main() !void {
 
     var a7r = gpa.allocator();
     
-    var index = Index.init(a7r);
+    var pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
+    defer pager.deinit();
+
+    var index = Index.init(a7r, &pager);
     defer index.deinit();
+
+    var name_arena = std.heap.ArenaAllocator.init(a7r);
+    defer name_arena.deinit();
 
     var timer = try std.time.Timer.start();
     {
@@ -61,11 +55,11 @@ pub fn main() !void {
             .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
         );
 
-        var new_ids = try a7r.alloc(Index.Id, tree.list.items.len);
-        defer a7r.free(new_ids);
+        var new_ids = try arena.allocator().alloc(Index.Id, tree.list.items.len);
+        defer arena.allocator().free(new_ids);
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
-            const i_entry = try t_entry.conv(Index.Id, new_ids[t_entry.parent]).clone(a7r);
+            const i_entry = try t_entry.conv(Index.Id, new_ids[t_entry.parent]).clone(name_arena.allocator());
             new_ids[ii] = try index.file_created(i_entry);
         }
         const index_elapsed = timer.read();
@@ -74,11 +68,24 @@ pub fn main() !void {
             .{ @divFloor(index_elapsed, std.time.ns_per_s) }
         );
     }
+    // std.debug.print("file size: {} KiB\n", .{ (pager.pages.items.len * pager.config.page_size) / 1024 });
+    // std.debug.print("page count: {} pages\n", .{ pager.pages.items.len });
+    // std.debug.print("page meta bytes: {} KiB\n", .{ (pager.pages.items.len * @sizeOf(mod_mmap.MmapPager.Page)) / 1024  });
+    // std.debug.print("free pages: {} pages\n", .{ pager.free_list.len });
+    // std.debug.print("free pages bytes: {} KiB\n", .{ (pager.free_list.len * @sizeOf(usize)) / 1024});
+    // std.debug.print("index table pages: {} pages\n", .{ index.table.pages.items.len });
+    // std.debug.print("index table bytes: {} KiB\n", .{ (index.table.pages.items.len * @sizeOf(usize)) / 1024});
+    // std.debug.print("index meta pages: {} pages\n", .{ index.meta.pages.items.len });
+    // std.debug.print("index meta bytes: {} KiB\n", .{ (index.meta.pages.items.len * @sizeOf(Index.RowMeta)) / 1024});
+
     var stdin = std.io.getStdIn();
     var stdin_rdr = stdin.reader();
     var phrase = std.ArrayList(u8).init(a7r);
+    defer phrase.deinit();
     var matcher = index.matcher();
+    defer matcher.deinit();
     var weaver = Index.FullPathWeaver.init();
+    defer weaver.deinit(index.a7r);
     while (true) {
         std.debug.print("Ready to search: ", .{});
         try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
@@ -99,6 +106,83 @@ pub fn main() !void {
     }
 }
 
+fn in_mem() !void {
+    const Index = mod_index.Index;
+
+    // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
+
+    // var a7r = fixed_a7r.threadSafeAllocator();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){
+        // .backing_allocator = fixed_a7r.allocator(),
+    };
+    defer _ = gpa.deinit();
+
+    var a7r = gpa.allocator();
+
+    var index = Index.init(a7r);
+    defer index.deinit();
+    defer {
+        for(index.table.items(.name)) |name|{
+            a7r.free(name);
+        }
+    }
+
+    var timer = try std.time.Timer.start();
+    {
+        std.log.info("Walking tree from /", . {});
+
+        var arena = std.heap.ArenaAllocator.init(a7r);
+        defer arena.deinit();
+        timer.reset();
+        var tree = try Tree.walk(arena.allocator(), "/", null);
+        // defer tree.deinit();
+        const walk_elapsed = timer.read();
+        std.log.info(
+            "Done walking tree with {} items in {d} seconds", 
+            .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
+        );
+
+        var new_ids = try arena.allocator().alloc(Index.Id, tree.list.items.len);
+        defer arena.allocator().free(new_ids);
+        timer.reset();
+        for (tree.list.items) |t_entry, ii| {
+            const i_entry = try t_entry.conv(Index.Id, new_ids[t_entry.parent]).clone(a7r);
+            new_ids[ii] = try index.file_created(i_entry);
+        }
+        const index_elapsed = timer.read();
+        std.log.info(
+            "Done adding items to index in {d} seconds", 
+            .{ @divFloor(index_elapsed, std.time.ns_per_s) }
+        );
+    }
+    var stdin = std.io.getStdIn();
+    var stdin_rdr = stdin.reader();
+    var phrase = std.ArrayList(u8).init(a7r);
+    defer phrase.deinit();
+    var matcher = index.matcher();
+    defer matcher.deinit();
+    var weaver = Index.FullPathWeaver.init();
+    defer weaver.deinit(index.a7r);
+    while (true) {
+        std.debug.print("Ready to search: ", .{});
+        try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
+        std.log.info("Searching...", .{});
+        _ = timer.reset();
+        var matches = try matcher.str_match(phrase.items);
+        const elapsed = timer.read();
+        var ii:usize = 0;
+        for (matches) |id| {
+            ii += 1;
+            const path = try weaver.pathOf(&index, id, '/');
+            std.debug.print("{}. {s}\n", .{ ii, path });
+        }
+        std.log.info(
+            "{} results in {d} seconds", 
+            .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},
+        );
+    }
+}
 
 test {
     std.testing.refAllDecls(@This());
@@ -107,9 +191,9 @@ test {
     _ = mod_treewalking;
     _ = mod_plist;
     _ = mod_index;
+    _ = mod_mmap;
     // _ = mod_tpool;
     // _ = BinarySearchTree;
-    _ = MmapPageAllocator;
 }
 
 // fn BinarySearchTree(
@@ -165,397 +249,11 @@ test {
 //     };
 // }
 
-const MmapPageAllocator = struct {
-    const Self = @This();
-    const Config = struct {
-        page_size: usize = std.mem.page_size,
-    };
+pub const mod_index = struct {
+    const MmapPager = mod_mmap.MmapPager;
+    const SwappingList = mod_mmap.SwappingList;
 
-    const Page = struct {
-        slice: ?[]align(std.mem.page_size)u8,
-        free: bool,
-    };
-    const PageId = usize;
-
-    // const Allocation = struct {
-    //     // the first page of the allocation
-    //     start: usize,
-    //     len: usize,
-    // };
-
-    const FreeList = std.PriorityQueue(
-        PageId,
-        void,
-        struct {
-            // we wan't earlier pages to be filled in earlier
-            fn cmp(ctx: void, a: PageId, b: PageId) std.math.Order {
-                _  = ctx;
-                return std.math.order(a, b);
-            }
-        }.cmp
-    );
-
-    config: Config,
-    a7r: Allocator,
-
-    backing_file: std.fs.File,
-    pages: std.ArrayListUnmanaged(Page),
-    slice_page_map: std.AutoHashMapUnmanaged(usize, PageId),
-    free_list: FreeList,
-
-    pub fn init(a7r: Allocator, backing_file_path: [] const u8, config: Config) !Self {
-        // const backing_file_size = 1024 * 1024 * 1024;
-        var mmap_file = try std.fs.createFileAbsolute(backing_file_path, .{
-            .read = true,
-        });
-        var self = Self {
-            .config = config,
-            .a7r = a7r,
-            .backing_file = mmap_file,
-            .pages = std.ArrayListUnmanaged(Page){},
-            .free_list = FreeList.init(a7r, .{}),
-            .slice_page_map = std.AutoHashMapUnmanaged(usize, PageId){},
-        };
-        return self;
-    }
-
-    fn deinit(self: *Self) void {
-        self.backing_file.close();
-        self.pages.deinit(self.a7r);
-        self.slice_page_map.deinit(self.a7r);
-        self.free_list.deinit();
-    }
-
-    fn alloc(self: *Self) !PageId {
-        if (self.free_list.removeOrNull()) |id|{
-            var page = &self.pages.items[id];
-            page.free = false;
-            return id;
-        } else {
-            // ensure capacity before trying anything
-            try self.pages.ensureUnusedCapacity(self.a7r, 1);
-            // ensure capacity on the free list to avoid error checking on free calls
-            try self.free_list.ensureUnusedCapacity(1);
-            try std.os.ftruncate(
-                self.backing_file.handle, 
-                (self.pages.items.len + 1) * self.config.page_size
-            );
-            try self.pages.append(
-                self.a7r, 
-                Page {
-                    .slice = null,
-                    .free = false,
-                }
-            );
-            return self.pages.items.len - 1;
-        }
-    }
-
-    fn swapAndFree(self: *Self, id: PageId) !void {
-        self.swapOut(id);
-        try self.free(id);
-    }
-
-    /// This doesn't swap out the page.
-    fn free(self: *Self, id: PageId) void {
-        if (id >= self.pages.items.len) {
-            return;
-        } 
-        var page = &self.pages.items[id];
-        page.free = true;
-
-        if (id == self.pages.items.len - 1) {
-            var ii = id - 1;
-            while (true) : ({ ii -= 1; }) {
-                _ = self.pages.popOrNull();
-                if (ii == 0 or !(self.pages.items[ii].free)) break;
-            }
-        } else {
-            // we've been growing the free list along the page list so it's ok
-            self.free_list.add(id) catch unreachable;
-        }
-    }
-
-    fn swapIn(self: *Self, id: PageId) ![]align(std.mem.page_size)u8 {
-        if (self.pages.items.len <= id) {
-            return error.PageNotAllocated;
-        }
-        var page = self.pages.items[id];
-        if (page.free) {
-            return error.PageNotAllocated;
-        }
-        if (page.slice) |slice| {
-            return slice;
-        } else {
-            var slice = try std.os.mmap(
-                null, 
-                self.config.page_size,
-                std.os.PROT.READ | std.os.PROT.WRITE,
-                std.os.MAP.SHARED, // | std.os.MAP.ANONYMOUS,
-                self.backing_file.handle,
-                // -1,
-                id * self.config.page_size,
-            );
-            errdefer std.os.munmap(slice);
-            try self.slice_page_map.put(self.a7r, @ptrToInt(slice.ptr), id);
-            page.slice = slice;
-            return slice;
-        }
-    }
-
-    fn swapOut(self: *Self, page_id: usize) void {
-        if (self.pages.items.len <= page_id) {
-            return; 
-        }
-        var page = self.pages.items[page_id];
-        if (page.slice) |slice| {
-            std.os.munmap(slice);
-            _ = self.slice_page_map.remove(@ptrToInt(slice.ptr));
-            page.slice = null;
-        }
-    }
-
-    test "MmapPageAllocator.usage" {
-        var a7r = std.testing.allocator;
-        const page_size = std.mem.page_size;
-        var pager = try MmapPageAllocator.init(a7r, "/tmp/MmmapUsage.test", .{
-            .page_size = page_size,
-        });
-        defer pager.deinit();
-
-        const item_per_page = page_size / @sizeOf(usize) ;
-        const page_count = 10;
-        var nums = [_]usize{0} ** (page_count * item_per_page);
-        for (nums) |*num, ii| {
-            num.* = ii;
-        }
-        var pages: [page_count]PageId = undefined;
-        for (pages) |*id, pii| {
-            id.* = try pager.alloc();
-            var bytes = try pager.swapIn(id.*);
-            defer pager.swapOut(id.*);
-            for (std.mem.bytesAsSlice(usize, bytes)) |*num, ii| {
-                num.* = nums[(pii * item_per_page) + ii];
-            }
-        }
-        for (pages) |id, pii| {
-            var bytes = try pager.swapIn(id);
-            defer pager.swapOut(id);
-            for (std.mem.bytesAsSlice(usize, bytes)) |num, ii| {
-                try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
-            }
-        }
-        {
-            const page_id = page_count / 2;
-            pager.free(pages[page_id]);
-            try std.testing.expectError(error.PageNotAllocated, pager.swapIn(pages[page_id]));
-
-            var new_stuff = [_]usize{0} ** item_per_page;
-            for (new_stuff) |*num, ii| {
-                num.* = item_per_page - ii;
-                nums[(page_id * item_per_page) + ii] = item_per_page - ii;
-            }
-
-            var id = try pager.alloc();
-            var bytes = try pager.swapIn(id);
-            defer pager.swapOut(id);
-            for (std.mem.bytesAsSlice(usize, bytes)) |*num, ii| {
-                num.* = new_stuff[ii];
-            }
-        }
-        for (pages) |id, pii| {
-            var bytes = try pager.swapIn(id);
-            defer pager.swapOut(id);
-            for (std.mem.bytesAsSlice(usize, bytes)) |num, ii| {
-                try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
-            }
-        }
-    }
-};
-
-
-fn SwappingList(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const PageId = MmapPageAllocator.PageId;
-
-        const PageCache = struct {
-            const InPage = struct {
-                idx: usize,
-                slice: []T,
-            };
-
-            in_page: ?InPage = null, 
-
-            fn new() PageCache {
-                return PageCache {
-                    .in_page = null
-                };
-            }
-
-            /// Panics if index is out of bound.
-            inline fn ptrTo(self: *PageCache, list: *const Self, index: usize) !*T {
-                const page_idx = list.pageIdxOf(index);
-                const page_slice = try self.swapIn(list, page_idx);
-                return &page_slice[index - (page_idx * list.per_page)];
-            }
-
-            fn swapIn(self: *PageCache, list: *const Self, page_idx: usize) ![]T {
-                if (self.in_page) |page| {
-                    if (page.idx == page_idx) {
-                        return page.slice;
-                    } else {
-                        list.pager.swapOut(list.pages.items[page.idx]);
-                        const bytes = try list.pager.swapIn(list.pages.items[page_idx]);
-                        const slice = std.mem.bytesAsSlice(T, bytes);
-                        self.in_page = InPage {
-                            .idx = page_idx,
-                            .slice = slice,
-                        };
-                        return slice;
-                    }
-                } else {
-                    const bytes = try list.pager.swapIn(list.pages.items[page_idx]);
-                    const slice = std.mem.bytesAsSlice(T, bytes);
-                    self.in_page = InPage {
-                        .idx = page_idx,
-                        .slice = slice,
-                    };
-                    return slice;
-                }
-            }
-
-            fn swapOut(self: *PageCache, list: *const Self) void {
-                if (self.in_page) |page| {
-                    list.pager.swapOut(list.pages.items[page.idx]);
-                    self.in_page = null;
-                }
-            }
-        };
-
-        a7r: Allocator,
-        pager: *MmapPageAllocator,
-        len: usize,
-        capacity: usize,
-        pages: std.ArrayListUnmanaged(PageId),
-        cache: PageCache,
-        /// items per page
-        per_page: usize,
-
-        fn init(a7r: Allocator, pager: *MmapPageAllocator) Self {
-            return Self {
-                .a7r = a7r,
-                .len = 0,
-                .capacity = 0,
-                .pager = pager,
-                .pages = std.ArrayListUnmanaged(PageId){},
-                .per_page = pager.config.page_size / @sizeOf(T),
-                .cache = PageCache.new(),
-            };
-        }
-
-        fn deinit(self: *Self) void {
-            self.cache.swapOut(self);
-            for (self.pages.items) |id|{
-                self.pager.free(id);
-            }
-            self.pages.deinit(self.a7r);
-        }
-
-        fn ensureUnusedCapacity(self: *Self, n_items: usize) !void {
-            if (self.capacity > self.len + n_items) {
-                return;
-            }
-            const new_cap = if (self.capacity == 0) self.per_page else self.capacity * 2;
-            var new_pages_req = (new_cap - self.capacity) / self.per_page;
-            std.debug.assert(new_pages_req > 0);
-            try self.pages.ensureUnusedCapacity(self.a7r, new_pages_req);
-            while (new_pages_req > 0) : ({ new_pages_req -= 1; }) {
-                const id = try self.pager.alloc();
-                try self.pages.append(self.a7r, id);
-                self.capacity += self.per_page;
-            }
-            // std.debug.print("capacity increased to: {}\n",.{ self.capacity });
-        }
-
-        fn append(self: *Self, item: T) !void {
-            try self.ensureUnusedCapacity(1);
-            var ptr = try self.cache.ptrTo(self, self.len);
-            ptr.* = item;
-            self.len += 1;
-        }
-
-        fn pageIdxOf(self: Self, idx: usize) usize {
-            return idx / self.per_page;
-        }
-
-        const Iterator = struct {
-            cur: usize,
-            stop: usize,
-            cache: PageCache,
-            list: *const Self,
-
-            fn new(list: *const Self, from: usize, to: usize) Iterator {
-                return Iterator {
-                    .cur = from,
-                    .stop = to,
-                    .list = list,
-                    .cache = PageCache.new(),
-                };
-            }
-
-            fn close(self: *Iterator) void {
-                self.cache.swapOut(self.list);
-            }
-
-            fn next(self: *Iterator) !?*T {
-                if (self.cur == self.stop) {
-                    return null;
-                }
-                var ptr = try self.cache.ptrTo(self.list, self.cur);
-                self.cur += 1;
-                return ptr;
-            }
-        };
-
-        /// Might panic if the list is modified before the iterator is closed.
-        /// Be sure to close the iterator after usage.
-        fn iterator(self: *const Self) Iterator {
-            return Iterator.new(self, 0, self.len);
-        }
-    };
-}
-
-test "SwappingList.usage" {
-    const page_size = std.mem.page_size;
-    const a7r = std.testing.allocator;
-    var pager = try MmapPageAllocator.init(a7r, "/tmp/SwappingList.usage", .{
-        .page_size = page_size,
-    });
-    defer pager.deinit();
-    var list = SwappingList(usize).init(a7r, &pager);
-    defer list.deinit();
-
-    const item_per_page = page_size / @sizeOf(usize) ;
-    const page_count = 10;
-    var nums = [_]usize{0} ** (page_count * item_per_page);
-    for (nums) |*num, ii| {
-        num.* = ii;
-        try list.append(ii);
-    }
-    {
-        var it = list.iterator();
-        defer it.close();
-        var ii: usize = 0;
-        while (try it.next()) |num| {
-            try std.testing.expectEqual(ii, num.*);
-            ii += 1;
-        }
-    }
-}
-
-const mod_index = struct {
-    const Index = struct {
+    pub const SwappingIndex = struct {
         const Self = @This();
         pub const Id = packed struct {
             id: u24,
@@ -567,27 +265,232 @@ const mod_index = struct {
             gen: u8,
         };
         const FreeSlot = Id;
+        const FreeSlots = std.PriorityQueue(
+            FreeSlot, 
+            void, 
+            struct {
+                fn cmp(_: void, a: FreeSlot, b: FreeSlot) std.math.Order {
+                    return std.math.order(a.gen, b.gen);
+                }
+            }.cmp
+        );
+
+        a7r: Allocator,
+        table: SwappingList(Entry),
+        meta: SwappingList(RowMeta),
+        free_slots: FreeSlots,
+
+        pub fn init(allocator: Allocator, pager: *MmapPager) Self {
+            var self = Self {
+                .a7r = allocator,
+                .table = SwappingList(Entry).init(allocator, pager),
+                .meta = SwappingList(RowMeta).init(allocator, pager),
+                .free_slots = FreeSlots.init(allocator, .{}),
+            };
+            return self;
+        }
+
+        pub fn deinit(self: *Self) void {
+            // for (self.table.items(.name)) |name|{
+            //     self.a7r.free(name);
+            // }
+            self.table.deinit();
+            self.meta.deinit();
+            self.free_slots.deinit();
+        }
+
+        pub fn file_created(self: *Self, entry: Entry) !Id {
+            if (self.free_slots.removeOrNull()) |id| {
+                var row = try self.meta.get(id.id);
+                try self.table.set(id.id, entry);
+                row.gen += 1;
+                row.free = false;
+                return Id {
+                    .id = id.id,
+                    .gen = row.gen,
+                };
+            } else {
+                const id = self.meta.len;
+                try self.meta.append(RowMeta {
+                    .free = false,
+                    .gen = 0,
+                });
+                // TODO: this shit 
+                errdefer _ = self.meta.pop() catch unreachable;
+                try self.table.append(entry);
+                return Id {
+                    .id = @intCast(u24, id),
+                    .gen = 0,
+                };
+            }
+        }
+
+        const IndexGetErr = error { StaleHandle,};
+
+        pub fn isStale(self: *Self, id: Id) !bool {
+            const row = try self.meta.get(id.id);
+            return row.gen > id.gen;
+        }
+
+        /// Be sure to clone the returned result
+        pub fn get(self: *Self, id: Id) !*Entry {
+            if (try self.isStale(id)) return IndexGetErr.StaleHandle;
+            return try self.table.get(id.id);
+        }
+
+        pub fn idAt(self: *Self, idx: usize) !Id {
+            const row = try self.meta.get(idx);
+            return Id {
+                .id = @intCast(u24, idx),
+                .gen = row.gen,
+            };
+        }
+
+        pub const FullPathWeaver = struct {
+            pub const NameOfErr = error { NotFound };
+            buf: std.ArrayListUnmanaged(u8),
+
+            pub fn init() FullPathWeaver {
+                return FullPathWeaver {
+                    .buf = std.ArrayListUnmanaged(u8){},
+                };
+            }
+            pub fn deinit(self: *FullPathWeaver, allocator: Allocator) void {
+                self.buf.deinit(allocator);
+            }
+            /// The returned slice is invalidated not long after.
+            pub fn pathOf(self: *FullPathWeaver, index: *SwappingIndex, id: Id, delimiter: u8) ![]const u8 {
+                self.buf.clearRetainingCapacity();
+                var next_id = id;
+                // const names = index.table.items(.name);
+                // const parents = index.table.items(.parent);
+                while (true) {
+                    if (try index.isStale(next_id)) return IndexGetErr.StaleHandle;
+
+                    const entry = try index.table.get(next_id.id);
+                    try self.buf.appendSlice(index.a7r, entry.name);
+                    std.mem.reverse(u8, self.buf.items[(self.buf.items.len - entry.name.len)..]);
+                    try self.buf.append(index.a7r, delimiter);
+                    next_id = entry.parent;
+                    // FIXME: a better sentinel
+                    if (next_id.id == 0) {
+                        break;
+                    }
+                }
+                std.mem.reverse(u8, self.buf.items[0..]);
+                return self.buf.items;
+            }
+        };
+
+        pub fn matcher(self: *Self) StrMatcher {
+            return StrMatcher.init(self.a7r, self);
+        }
+
+        pub const StrMatcher = struct {
+            // allocator: Allocator,
+            out_vec: std.ArrayList(Id),
+            index: *Self,
+            
+            pub fn init(allocator: Allocator, index: *Self) StrMatcher {
+                return StrMatcher{
+                    .out_vec = std.ArrayList(Id).init(allocator),
+                    .index = index,
+                };
+            }
+
+            pub fn deinit(self: *StrMatcher) void {
+                self.out_vec.deinit();
+            }
+
+            pub fn str_match(
+                self: *StrMatcher, 
+                string: []const u8, 
+            ) ![]const Id {
+                self.out_vec.clearRetainingCapacity();
+                var it = self.index.table.iterator();
+                var ii: usize = 0;
+                while (try it.next()) |entry| {
+                    if (std.mem.indexOf(u8, entry.name, string)) |_| {
+                        try self.out_vec.append(try self.index.idAt(ii));
+                    }
+                    ii += 1;
+                }
+                return self.out_vec.items;
+            }
+        };
+    };
+
+    test "SwappingIndex.usage" {
+        var a7r = std.testing.allocator;
+        var pager = try MmapPager.init(a7r, "/tmp/SwappingIndex.usage", .{});
+        defer pager.deinit();
+
+        var index = SwappingIndex.init(a7r, &pager);
+        defer index.deinit();
+
+        defer {
+            var it = index.table.iterator();
+            while (it.next() catch unreachable) |entry|{
+                a7r.free(entry.name);
+            }
+        }
+
+        var entry = SwappingIndex.Entry {
+            // .name = try a7r.dupe(u8, "manameisjeff"),
+            .name = try a7r.dupe(u8, "/"),
+            .parent = SwappingIndex.Id { .id = 0, .gen = 0 },
+            .kind = SwappingIndex.Entry.Kind.Directory,
+            .depth = 0,
+            .size = 0,
+            .inode = 0,
+            .dev = 0,
+            .mode = 0,
+            .uid = 0,
+            .gid = 0,
+            .ctime = 0,
+            .atime = 0,
+            .mtime = 0,
+        };
+        const id = try index.file_created(entry);
+        var ret = try index.get(id);
+        try std.testing.expectEqual(entry, ret.*);
+    }
+
+    const Index = struct {
+        const Self = @This();
+        pub const Id = packed struct {
+            id: u24,
+            gen: u8,
+        };
+        pub const Entry = FsEntry(Id);
+        const RowMeta = struct {
+            free: bool,
+            gen: u8,
+        };
+
+        const FreeSlot = Id;
+        const FreeSlots = std.PriorityQueue(
+            FreeSlot, 
+            void, 
+            struct {
+                fn cmp(_: void, a: FreeSlot, b: FreeSlot) std.math.Order {
+                    return std.math.order(a.gen, b.gen);
+                }
+            }.cmp
+        );
 
         a7r: Allocator,
         table: std.MultiArrayList(Entry),
         meta: std.ArrayListUnmanaged(RowMeta),
-        free_slots: std.PriorityQueue(FreeSlot, void, free_slot_cmp),
+        free_slots: FreeSlots,
 
-        fn free_slot_cmp(_: void, a: FreeSlot, b: FreeSlot) std.math.Order {
-            return std.math.order(a.gen, b.gen);
-        }
-        // fn slot_gen_cmp(ctx: *Self, a: usize, b: usize) std.PriorityQueue.Order {
-        //     const row_a = ctx.meta[a];
-        //     const row_b = ctx.meta[b];
-        //     return std.math.order(row_a.gen, row_b.gen);
-        // }
 
         pub fn init(allocator: Allocator) Self {
             var self = Self {
                 .a7r = allocator,
                 .table = std.MultiArrayList(Entry){},
                 .meta = std.ArrayListUnmanaged(RowMeta){},
-                .free_slots = std.PriorityQueue(FreeSlot, void, free_slot_cmp).init(allocator, .{}),
+                .free_slots = FreeSlots.init(allocator, .{}),
             };
             return self;
         }

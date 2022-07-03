@@ -398,7 +398,7 @@ pub const PlasticTree = struct {
         size: usize = 1_000_000,
         max_dir_size: usize = 1_000,
         file_v_dir: f64 = 0.7,
-        max_name_len: usize = 18,
+        max_name_len: usize = 25,
     };
 
     arena_allocator: std.heap.ArenaAllocator,

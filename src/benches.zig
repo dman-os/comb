@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const comb = @import("main.zig");
 const mod_plist = comb.mod_plist;
 const mod_gram = comb.mod_gram;
+const mod_mmap = comb.mod_mmap;
 const Tree = comb.mod_treewalking.Tree;
 const PlasticTree = comb.mod_treewalking.PlasticTree;
 
@@ -222,6 +223,91 @@ test "rowscan.bench.gen" {
         ctx.matches.deinit();
     }
     try mod_bench.bench("rowscan", &ctx, BenchCtx.do, .{});
+}
+
+test "rowscan.bench.SwappingIndex" {
+    const Index = comb.mod_index.SwappingIndex;
+    const size: usize = 1_000_000;
+
+    var a7r = std.testing.allocator;
+
+    const file_p = "/tmp/comb.bench.SwappingIndex.rowscan";
+    var pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
+    defer {
+        pager.deinit();
+        std.fs.deleteFileAbsolute(file_p) catch unreachable;
+    }
+
+    var index = Index.init(a7r, &pager);
+    defer index.deinit();
+
+    var name_arena = std.heap.ArenaAllocator.init(a7r);
+    defer name_arena.deinit();
+    var name_a7r = name_arena.allocator();
+
+    var timer = try std.time.Timer.start();
+    {
+        var arena = std.heap.ArenaAllocator.init(a7r);
+        defer arena.deinit();
+        var allocator = arena.allocator();
+
+        var tree = try PlasticTree.init(.{ .size = size }, allocator);
+        defer tree.deinit();
+
+        timer.reset();
+        try tree.gen();
+        std.log.info(
+            "Done generating tree of size {} items in {d} seconds", 
+            .{ size, @divFloor(timer.read(), std.time.ns_per_s) }
+        );
+
+        var new_ids = try allocator.alloc(Index.Id, tree.list.items.len);
+        defer allocator.free(new_ids);
+        timer.reset();
+        for (tree.list.items) |t_entry, ii| {
+            // const i_entry = try t_entry.conv(Index.Id, ).clone(name_arena.allocator());
+            const i_entry = Index.Entry {
+                .name = try name_a7r.dupe(u8, t_entry.name),
+                .parent = new_ids[t_entry.parent],
+                .depth = t_entry.depth,
+                .kind = Index.Entry.Kind.File,
+                .size = 1024 * 1024,
+                .inode = ii,
+                .dev = 01,
+                .mode = 6,
+                .uid = 1000,
+                .gid = 10001,
+                .ctime = 02,
+                .atime = 02,
+                .mtime = 02,
+            };
+            new_ids[ii] = try index.file_created(i_entry);
+        }
+        std.log.info(
+            "Done adding items to index in {d} seconds", 
+            .{ @divFloor(timer.read(), std.time.ns_per_s) }
+        );
+    }
+
+    var matcher = index.matcher();
+    defer matcher.deinit();
+    // var weaver = Index.FullPathWeaver.init();
+    // defer weaver.deinit(index.a7r);
+    const BenchCtx = struct {
+        const Self = @This();
+        matcher: *Index.StrMatcher,
+        fn do(self: *Self) void {
+            _ = self.matcher.str_match("abc") catch {
+                std.debug.print("fucked\n", .{});
+                std.debug.dumpStackTrace(@errorReturnTrace() orelse unreachable);
+                @panic("wtf");
+            };
+        }
+    };
+    var ctx = BenchCtx{ 
+        .matcher = &matcher,
+    };
+    try mod_bench.bench("SwappingIndex.rowscan", &ctx, BenchCtx.do, .{});
 }
 
 test "plist.bench.gen" {
