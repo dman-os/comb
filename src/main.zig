@@ -11,7 +11,7 @@ const FsEntry = mod_treewalking.FsEntry;
 const Tree = mod_treewalking.Tree;
 const PlasticTree = mod_treewalking.PlasticTree;
 
-const log_level = std.log.Level.debug;
+pub const log_level = std.log.Level.debug;
 
 pub fn main() !void {
     // try in_mem();
@@ -47,7 +47,7 @@ fn swapping () !void {
         var arena = std.heap.ArenaAllocator.init(a7r);
         defer arena.deinit();
         timer.reset();
-        var tree = try Tree.walk(arena.allocator(), "/", null);
+        var tree = try Tree.walk(arena.allocator(), "/run/media/asdf/Windows/", null);
         // defer tree.deinit();
         const walk_elapsed = timer.read();
         std.log.info(
@@ -59,7 +59,9 @@ fn swapping () !void {
         defer arena.allocator().free(new_ids);
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
-            const i_entry = try t_entry.conv(Index.Id, new_ids[t_entry.parent]).clone(name_arena.allocator());
+            const i_entry = try t_entry
+                .conv(Index.Id, new_ids[t_entry.parent])
+                .clone(name_arena.allocator());
             new_ids[ii] = try index.file_created(i_entry);
         }
         const index_elapsed = timer.read();
@@ -462,6 +464,20 @@ pub const mod_index = struct {
             id: u24,
             gen: u8,
         };
+
+        comptime {
+            // TODO: THiS gets fucked if usize bytes are above 255
+            if (@sizeOf(Id) != @sizeOf(u32)) {
+                var buf = [_]u8{0} ** 64;
+                var msg = std.fmt.bufPrint(
+                    &buf, 
+                    "Ptr size mismatch: {} !=  {}", 
+                    .{ @sizeOf(Id), @sizeOf(u32) }
+                ) catch @panic("wtf");
+                @compileError(msg);
+            }
+        }
+
         pub const Entry = FsEntry(Id);
         const RowMeta = struct {
             free: bool,
