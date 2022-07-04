@@ -1,16 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+usingnamespace @import("utils.zig");
 
 test {
     _ = PlasticTree;
     _ = Tree;
 }
 
-
-pub fn FsEntry(comptime I: type) type {
+pub fn FsEntry(comptime I: type, comptime N: type) type {
     return struct {
         pub const Kind = std.fs.File.Kind;
-        name: []u8,
+        name: N,
         parent: I,
         kind: Kind,
         depth: usize,
@@ -24,9 +24,10 @@ pub fn FsEntry(comptime I: type) type {
         atime: i64,
         mtime: i64,
 
-        pub fn clone(orig: @This(), a7r: Allocator) !@This() {
+        pub fn clone(orig: *const @This(), new_name: N) !@This() {
             return @This() {
-                .name = try a7r.dupe(u8, orig.name),
+                // .name = try a7r.dupe(u8, orig.name),
+                .name = new_name,
                 .parent = orig.parent,
                 .kind = orig.kind,
                 .depth = orig.depth,
@@ -42,9 +43,16 @@ pub fn FsEntry(comptime I: type) type {
             };
         }
 
-        pub fn conv(orig: @This(), comptime P: type, new_parent: P) FsEntry(P) {
-            return FsEntry(P) {
-                .name = orig.name,
+        // This clones it fo sure
+        pub fn conv(
+            orig: *const @This(), 
+            comptime P: type, 
+            comptime NN: type, 
+            new_parent: P,
+            new_name: NN,
+        ) FsEntry(P, NN) {
+            return FsEntry(P, NN) {
+                .name = new_name,
                 .parent = new_parent,
                 .kind = orig.kind,
                 .depth = orig.depth,
@@ -76,7 +84,7 @@ pub const Tree = struct {
         return walker.toTree();
     }
 
-    pub const Entry = FsEntry(usize);
+    pub const Entry = FsEntry(usize, []u8);
     list: std.ArrayList(Entry),
     allocator: Allocator,
 

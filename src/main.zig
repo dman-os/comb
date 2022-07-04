@@ -20,6 +20,7 @@ pub fn main() !void {
 
 fn swapping () !void {
     const Index = mod_index.SwappingIndex;
+    const SwappingAllocator = mod_mmap.SwappingAllocator;
 
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
@@ -34,7 +35,11 @@ fn swapping () !void {
     var pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
     defer pager.deinit();
 
-    var index = Index.init(a7r, &pager);
+    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, &pager);
+    defer ma7r.deinit();
+    var sa7r = ma7r.allocator();
+
+    var index = Index.init(a7r, &pager, sa7r);
     defer index.deinit();
 
     var name_arena = std.heap.ArenaAllocator.init(a7r);
@@ -47,7 +52,8 @@ fn swapping () !void {
         var arena = std.heap.ArenaAllocator.init(a7r);
         defer arena.deinit();
         timer.reset();
-        var tree = try Tree.walk(arena.allocator(), "/run/media/asdf/Windows/", null);
+        // var tree = try Tree.walk(arena.allocator(), "/run/media/asdf/Windows/", null);
+        var tree = try Tree.walk(arena.allocator(), "/", null);
         // defer tree.deinit();
         const walk_elapsed = timer.read();
         std.log.info(
@@ -59,9 +65,13 @@ fn swapping () !void {
         defer arena.allocator().free(new_ids);
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
-            const i_entry = try t_entry
-                .conv(Index.Id, new_ids[t_entry.parent])
-                .clone(name_arena.allocator());
+            const i_entry = t_entry
+                .conv(
+                    Index.Id, 
+                    SwappingAllocator.Ptr, 
+                    new_ids[t_entry.parent], 
+                    (try sa7r.dupe(t_entry.name)).ptr,
+                );
             new_ids[ii] = try index.file_created(i_entry);
         }
         const index_elapsed = timer.read();
@@ -88,6 +98,7 @@ fn swapping () !void {
     defer matcher.deinit();
     var weaver = Index.FullPathWeaver.init();
     defer weaver.deinit(index.a7r);
+
     while (true) {
         std.debug.print("Ready to search: ", .{});
         try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
@@ -149,7 +160,12 @@ fn in_mem() !void {
         defer arena.allocator().free(new_ids);
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
-            const i_entry = try t_entry.conv(Index.Id, new_ids[t_entry.parent]).clone(a7r);
+            const i_entry = try t_entry.conv(
+                Index.Id, 
+                []u8, 
+                new_ids[t_entry.parent], 
+                try a7r.dupe(u8, t_entry.name)
+            );
             new_ids[ii] = try index.file_created(i_entry);
         }
         const index_elapsed = timer.read();
@@ -254,6 +270,7 @@ test {
 pub const mod_index = struct {
     const MmapPager = mod_mmap.MmapPager;
     const SwappingList = mod_mmap.SwappingList;
+    const Ptr = mod_mmap.SwappingAllocator.Ptr;
 
     pub const SwappingIndex = struct {
         const Self = @This();
@@ -261,7 +278,7 @@ pub const mod_index = struct {
             id: u24,
             gen: u8,
         };
-        pub const Entry = FsEntry(Id);
+        pub const Entry = FsEntry(Id, Ptr);
         const RowMeta = struct {
             free: bool,
             gen: u8,
@@ -278,13 +295,15 @@ pub const mod_index = struct {
         );
 
         a7r: Allocator,
+        sa7r: mod_mmap.SwappingAllocator,
         table: SwappingList(Entry),
         meta: SwappingList(RowMeta),
         free_slots: FreeSlots,
 
-        pub fn init(allocator: Allocator, pager: *MmapPager) Self {
+        pub fn init(allocator: Allocator, pager: *MmapPager, sa7r: mod_mmap.SwappingAllocator) Self {
             var self = Self {
                 .a7r = allocator,
+                .sa7r = sa7r,
                 .table = SwappingList(Entry).init(allocator, pager),
                 .meta = SwappingList(RowMeta).init(allocator, pager),
                 .free_slots = FreeSlots.init(allocator, .{}),
@@ -302,6 +321,9 @@ pub const mod_index = struct {
         }
 
         pub fn file_created(self: *Self, entry: Entry) !Id {
+            // const i_entry = try t_entry
+            //     .conv(Index.Id, new_ids[t_entry.parent])
+            //     .clone(name_arena.allocator());
             if (self.free_slots.removeOrNull()) |id| {
                 var row = try self.meta.get(id.id);
                 try self.table.set(id.id, entry);
@@ -370,8 +392,11 @@ pub const mod_index = struct {
                     if (try index.isStale(next_id)) return IndexGetErr.StaleHandle;
 
                     const entry = try index.table.get(next_id.id);
-                    try self.buf.appendSlice(index.a7r, entry.name);
-                    std.mem.reverse(u8, self.buf.items[(self.buf.items.len - entry.name.len)..]);
+                    const name = try index.sa7r.swapIn(entry.name);
+                    defer index.sa7r.swapOut(entry.name);
+
+                    try self.buf.appendSlice(index.a7r, name);
+                    std.mem.reverse(u8, self.buf.items[(self.buf.items.len - name.len)..]);
                     try self.buf.append(index.a7r, delimiter);
                     next_id = entry.parent;
                     // FIXME: a better sentinel
@@ -412,7 +437,9 @@ pub const mod_index = struct {
                 var it = self.index.table.iterator();
                 var ii: usize = 0;
                 while (try it.next()) |entry| {
-                    if (std.mem.indexOf(u8, entry.name, string)) |_| {
+                    const name = try self.index.sa7r.swapIn(entry.name);
+                    defer self.index.sa7r.swapOut(entry.name);
+                    if (std.mem.indexOf(u8, name, string)) |_| {
                         try self.out_vec.append(try self.index.idAt(ii));
                     }
                     ii += 1;
@@ -427,19 +454,23 @@ pub const mod_index = struct {
         var pager = try MmapPager.init(a7r, "/tmp/SwappingIndex.usage", .{});
         defer pager.deinit();
 
-        var index = SwappingIndex.init(a7r, &pager);
+        var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, &pager);
+        defer ma7r.deinit();
+
+        var sa7r = ma7r.allocator();
+        var index = SwappingIndex.init(a7r, &pager, sa7r);
         defer index.deinit();
 
         defer {
             var it = index.table.iterator();
             while (it.next() catch unreachable) |entry|{
-                a7r.free(entry.name);
+                sa7r.free(entry.name);
             }
         }
 
         var entry = SwappingIndex.Entry {
             // .name = try a7r.dupe(u8, "manameisjeff"),
-            .name = try a7r.dupe(u8, "/"),
+            .name = (try sa7r.dupe("/")).ptr,
             .parent = SwappingIndex.Id { .id = 0, .gen = 0 },
             .kind = SwappingIndex.Entry.Kind.Directory,
             .depth = 0,
@@ -478,7 +509,7 @@ pub const mod_index = struct {
             }
         }
 
-        pub const Entry = FsEntry(Id);
+        pub const Entry = FsEntry(Id, []u8);
         const RowMeta = struct {
             free: bool,
             gen: u8,
@@ -675,6 +706,8 @@ pub const mod_index = struct {
 
 
 pub const mod_plist = struct {
+    const Appender = mod_utils.Appender;
+
     pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
         if (gram_len == 0) {
             @compileError("gram_len is 0");
@@ -719,7 +752,7 @@ pub const mod_plist = struct {
                             try this.map.put(this.allocator, item, {});
                         }
                     };
-                    break :blk mod_utils.Appender(GramPos).new(&curry{ .map = &self.cache, .allocator = allocator }, curry.append);
+                    break :blk Appender(GramPos).new(&curry{ .map = &self.cache, .allocator = allocator }, curry.append);
                 };
                 try mod_gram.grammer(gram_len, name, true, delimiters, appender);
 
@@ -797,7 +830,7 @@ pub const mod_plist = struct {
                         string, 
                         false, 
                         delimiters, 
-                        mod_utils.Appender(GramPos).new(&self.grams, std.ArrayList(GramPos).append)
+                        Appender(GramPos).new(&self.grams, std.ArrayList(GramPos).append)
                     );
                     var is_init = false;
                     for (self.grams.items) |gpos| {

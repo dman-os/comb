@@ -2,6 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
+pub const mod_utils = @import("utils.zig");
+const println = mod_utils.println;
+const dbg = mod_utils.println;
+
 const comb = @import("main.zig");
 const mod_plist = comb.mod_plist;
 const mod_gram = comb.mod_gram;
@@ -238,12 +242,16 @@ test "rowscan.bench.SwappingIndex" {
         std.fs.deleteFileAbsolute(file_p) catch unreachable;
     }
 
-    var index = Index.init(a7r, &pager);
+    var ma7r = comb.mod_mmap.MmapSwappingAllocator(.{}).init(a7r, &pager);
+    defer ma7r.deinit();
+    var sa7r = ma7r.allocator();
+
+    var index = Index.init(a7r, &pager, sa7r);
     defer index.deinit();
 
-    var name_arena = std.heap.ArenaAllocator.init(a7r);
-    defer name_arena.deinit();
-    var name_a7r = name_arena.allocator();
+    // var name_arena = std.heap.ArenaAllocator.init(a7r);
+    // defer name_arena.deinit();
+    // var name_a7r = name_arena.allocator();
 
     var timer = try std.time.Timer.start();
     {
@@ -267,7 +275,7 @@ test "rowscan.bench.SwappingIndex" {
         for (tree.list.items) |t_entry, ii| {
             // const i_entry = try t_entry.conv(Index.Id, ).clone(name_arena.allocator());
             const i_entry = Index.Entry {
-                .name = try name_a7r.dupe(u8, t_entry.name),
+                .name = (try sa7r.dupe(t_entry.name)).ptr,
                 .parent = new_ids[t_entry.parent],
                 .depth = t_entry.depth,
                 .kind = Index.Entry.Kind.File,

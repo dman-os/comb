@@ -6,6 +6,15 @@ pub fn dbg(val: anytype) @TypeOf(val){
     return val;
 }
 
+pub fn println(comptime fmt: []const u8, args: anytype) void {
+    var stderr_mutex = std.debug.getStderrMutex();
+    stderr_mutex.lock();
+    defer stderr_mutex.unlock();
+    const stderr = std.io.getStdErr().writer();
+    nosuspend stderr.print(fmt, args) catch return;
+    nosuspend stderr.write(fmt, "\n") catch return;
+}
+
 pub fn Appender(comptime T: type) type {
     return struct {
         const Self = @This();

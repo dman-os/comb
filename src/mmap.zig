@@ -1,7 +1,12 @@
+//! TODO: remove dependence on heap allocator
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-// TODO: remove dependence on heap allocator
+
+pub const mod_utils = @import("utils.zig");
+const println = mod_utils.println;
+const dbg = mod_utils.println;
 
 pub const MmapPager = struct {
     const Self = @This();
@@ -64,7 +69,13 @@ pub const MmapPager = struct {
         self.free_list.deinit();
     }
 
-    pub fn alloc(self: *Self) !PageId {
+    const AllocError = error {
+        FileTooBig,
+        FileBusy,
+        InputOutput,
+    } || Allocator.Error || std.os.UnexpectedError;
+
+    pub fn alloc(self: *Self) AllocError!PageId {
         if (self.free_list.removeOrNull()) |id| {
             var page = &self.pages.items[id];
             page.free = false;
@@ -74,7 +85,14 @@ pub const MmapPager = struct {
             try self.pages.ensureUnusedCapacity(self.a7r, 1);
             // ensure capacity on the free list to avoid error checking on free calls
             try self.free_list.ensureUnusedCapacity(1);
-            try std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + 1) * self.config.page_size);
+            try std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + 1) * self.config.page_size)
+                catch |err| switch (err) {
+                    std.os.TruncateError.AccessDenied => unreachable,
+                    std.os.TruncateError.FileTooBig => error.FileTooBig,
+                    std.os.TruncateError.InputOutput=> error.InputOutput,
+                    std.os.TruncateError.FileBusy=> error.FileBusy,
+                    std.os.UnexpectedError.Unexpected => std.os.UnexpectedError.Unexpected,
+                };
             try self.pages.append(self.a7r, Page{
                 .slice = null,
                 .free = false,
@@ -110,7 +128,12 @@ pub const MmapPager = struct {
         }
     }
 
-    pub fn swapIn(self: *Self, id: PageId) ![]align(std.mem.page_size) u8 {
+    const SwapInError = error {
+        OutOfMemory,
+        LockedMemoryLimitExceeded,
+    } || std.os.UnexpectedError;
+
+    pub fn swapIn(self: *Self, id: PageId) SwapInError![]align(std.mem.page_size) u8 {
         var page = &self.pages.items[id];
         if (page.free) {
             // return error.PageNotAllocated;
@@ -127,7 +150,14 @@ pub const MmapPager = struct {
                 self.backing_file.handle,
                 // -1,
                 id * self.config.page_size,
-            );
+            ) catch |err| switch(err) {
+                std.os.MMapError.MemoryMappingNotSupported => @panic("system doesn't support mmaping"),
+                std.os.MMapError.AccessDenied => unreachable,
+                std.os.MMapError.PermissionDenied => unreachable,
+                std.os.MMapError.LockedMemoryLimitExceeded => error.LockedMemoryLimitExceeded,
+                std.os.MMapError.OutOfMemory => error.OutOfMemory,
+                std.os.UnexpectedError.Unexpected => std.os.UnexpectedError.Unexpected,
+            };
             errdefer std.os.munmap(slice);
             // try self.slice_page_map.put(self.a7r, @ptrToInt(slice.ptr), id);
             page.slice = slice;
@@ -141,6 +171,7 @@ pub const MmapPager = struct {
         }
         var page = &self.pages.items[page_id];
         if (page.slice) |slice| {
+            // _ = slice;
             std.os.munmap(slice);
             // _ = self.slice_page_map.remove(@ptrToInt(slice.ptr));
             page.slice = null;
@@ -255,30 +286,150 @@ pub const AllocatorConfig = struct {
     page_size: usize = std.mem.page_size,
 };
 
-pub fn SwappingAllocator(config: AllocatorConfig) type {
+// fn Trait(
+//     comptime required: []type,
+//     // comptime required: fn (type) type,
+// ) type {
+//     return struct {
+//         fn impl(comptime T: type) type {
+
+//         }
+//     };
+// }
+// const Swapalloc = Trait(struct {
+// });
+
+pub const SwappingAllocator = struct {
+    pub const Ptr = usize;
+    // TODO: clean me up
+    pub const Error = error {
+        PageNotAllocated,
+    } || std.mem.Allocator.Error || MmapPager.AllocError || MmapPager.SwapInError;
+
+    const VTable = struct {
+        alloc: fn (self: *anyopaque, len: usize) Error!Ptr,
+        swapIn: fn (self: *anyopaque, ptr: Ptr) Error![]u8,
+        swapOut: fn (self: *anyopaque, ptr: Ptr) void,
+        free: fn (self: *anyopaque, ptr: Ptr) void,
+    };
+
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub fn alloc(self: *SwappingAllocator, len: usize) Error!Ptr {
+        return self.vtable.alloc(self.ptr, len);
+    }
+
+    pub fn swapIn(self: *SwappingAllocator, ptr: Ptr) Error![]u8 {
+        return self.vtable.swapIn(self.ptr, ptr);
+    }
+
+    pub fn swapOut(self: *SwappingAllocator, ptr: Ptr) void {
+        return self.vtable.swapOut(self.ptr, ptr);
+    }
+
+    pub fn free(self: *SwappingAllocator, ptr: Ptr) void {
+        return self.vtable.free(self.ptr, ptr);
+    }
+
+    pub const DupeRes = struct {
+        ptr: Ptr,
+        slice: []u8,
+    };
+
+    pub fn dupe(self: *SwappingAllocator, bytes: []const u8) Error!DupeRes {
+        const ptr = try self.alloc(bytes.len);
+        var slice = try self.swapIn(ptr);
+        std.mem.copy(u8, slice, bytes);
+        return DupeRes {
+            .ptr = ptr,
+            .slice = slice,
+        };
+    }
+
+    /// Modified from std.mem.Allocator
+    pub fn init(
+        pointer: anytype,
+        comptime allocFn: fn (ptr: @TypeOf(pointer), len: usize) Error!Ptr,
+        comptime swapInFn: fn (ptr: @TypeOf(pointer), ptr: Ptr) Error![]u8,
+        comptime swapOutFn: fn (ptr: @TypeOf(pointer), ptr: Ptr) void,
+        comptime freeFn: fn (ptr: @TypeOf(pointer), ptr: Ptr) void,
+    ) SwappingAllocator {
+        const AllocPtr = @TypeOf(pointer);
+        const ptr_info = @typeInfo(AllocPtr);
+        std.debug.assert(ptr_info == .Pointer); // Must be a pointer
+        std.debug.assert(ptr_info.Pointer.size == .One); // Must be a single-item pointer
+
+        const alignment = ptr_info.Pointer.alignment;
+
+        const gen = struct {
+            fn allocImpl(alloc_ptr: *anyopaque, len: usize) Error!Ptr {
+                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
+                return @call(.{ .modifier = .always_inline }, allocFn, .{ self, len,  });
+            }
+
+            fn swapInImpl(alloc_ptr: *anyopaque, ptr: Ptr) Error![]u8 {
+                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
+                return @call(.{ .modifier = .always_inline }, swapInFn, .{ self, ptr,  });
+            }
+
+            fn swapOutImpl(alloc_ptr: *anyopaque, ptr: Ptr) void {
+                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
+                return @call(.{ .modifier = .always_inline }, swapOutFn, .{ self, ptr, });
+            }
+
+            fn freeImpl(alloc_ptr: *anyopaque, ptr: Ptr) void {
+                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
+                return @call(.{ .modifier = .always_inline }, freeFn, .{ self, ptr, });
+            }
+
+            const vtable = VTable{
+                .alloc = allocImpl,
+                .swapIn = swapInImpl,
+                .swapOut = swapOutImpl,
+                .free = freeImpl,
+            };
+        };
+
+        return .{
+            .ptr = pointer,
+            .vtable = &gen.vtable,
+        };
+    }
+};
+
+pub fn MmapSwappingAllocator(config: AllocatorConfig) type {
     return struct {
         const Self = @This();
 
         const bucket_count = std.math.log2(config.page_size);
-        const BuckIndex = std.meta.Int(.unsigned, std.math.log2(bucket_count));
+        const BuckIndex = std.meta.Int(.unsigned, std.math.log2(std.math.ceilPowerOfTwoAssert(u16, bucket_count)));
+        const SlotIndex = std.meta.Int(
+            .unsigned, 
+            @typeInfo(SwappingAllocator.Ptr).Int.bits - @typeInfo(BuckIndex).Int.bits
+        );
         /// TODO: consider using a usize and bittweedling to improve performance
-        pub const Ptr = packed struct {
-            const SlotIndex = std.meta.Int(
-                .unsigned, 
-                @typeInfo(usize).Int.bits - @typeInfo(BuckIndex).Int.bits
-            );
+        /// TODO: hate the name
+        pub const CustomPtr = packed struct {
             buck: BuckIndex,
             slot: SlotIndex,
+
+            fn toGpPtr(self: CustomPtr) SwappingAllocator.Ptr {
+                return @bitCast(SwappingAllocator.Ptr, self);
+            }
+            fn fromGpPtr(ptr: SwappingAllocator.Ptr) CustomPtr {
+                return @bitCast(CustomPtr, ptr);
+            }
         };
 
         comptime {
             // TODO: THiS gets fucked if usize bytes are above 255
-            if (@sizeOf(Ptr) != @sizeOf(usize)) {
+            if (@sizeOf(CustomPtr) != @sizeOf(SwappingAllocator.Ptr)) {
                 var buf = [_]u8{0} ** 64;
                 var msg = std.fmt.bufPrint(
                     &buf, 
-                    "Ptr size mismatch: {} !=  {}", 
-                    .{ @sizeOf(Ptr), @sizeOf(usize) }
+                    "CustomPtr size mismatch: {} !=  {}", 
+                    .{ @sizeOf(CustomPtr), @sizeOf(SwappingAllocator.Ptr) }
                 ) catch @panic("wtf");
                 @compileError(msg);
             }
@@ -293,10 +444,10 @@ pub fn SwappingAllocator(config: AllocatorConfig) type {
                 len: usize, // FIXME: usize is too big for this purpose
             };
             const FreeList = std.PriorityQueue(
-                Ptr.SlotIndex,
+                SlotIndex,
                 void,
                 struct {
-                    fn cmp(_: void, a: Ptr.SlotIndex, b: Ptr.SlotIndex) std.math.Order {
+                    fn cmp(_: void, a: SlotIndex, b: SlotIndex) std.math.Order {
                         return std.math.order(a, b);
                     }
                 }.cmp,
@@ -320,42 +471,43 @@ pub fn SwappingAllocator(config: AllocatorConfig) type {
                 };
             }
 
-            fn deinit(self: *Bucket, ma7r: *Self) void{
-                self.allocs.deinit(ma7r.ha7r);
+            fn deinit(self: *Bucket, sa6r: *Self) void{
+                self.allocs.deinit(sa6r.ha7r);
                 for (self.pages.items) |id| {
-                    ma7r.pager.free(id);
+                    sa6r.pager.free(id);
                 }
-                self.pages.deinit(ma7r.ha7r);
+                self.pages.deinit(sa6r.ha7r);
                 self.free_list.deinit();
             }
 
-            fn addOne(self: *Bucket, alloc_len: usize, ma7r: *Self) !Ptr.SlotIndex {
-                std.debug.print("alloc_len = {}, slot_size = {}\n", .{ alloc_len, (ma7r.pager.config.page_size / self.per_page)});
-                std.debug.assert(alloc_len < (ma7r.pager.config.page_size / self.per_page));
+            fn addOne(self: *Bucket, alloc_len: usize, sa6r: *Self) !SlotIndex {
+                // std.debug.print("alloc_len = {}, slot_size = {}\n", .{ alloc_len, (sa6r.pager.config.page_size / self.per_page)});
+                std.debug.assert(alloc_len <= (sa6r.pager.config.page_size / self.per_page));
                 if (self.free_list.removeOrNull()) |slot| {
                     self.allocs.items[slot].free = false;
+                    self.allocs.items[slot].len = alloc_len;
                     return slot;
                 } else {
                     const len = self.allocs.items.len;
-                    if (len == std.math.maxInt(Ptr.SlotIndex)) @panic(@typeName(Bucket) ++ " is full");
+                    if (len == std.math.maxInt(SlotIndex)) @panic(@typeName(Bucket) ++ " is full");
                     const cap = self.pages.items.len * self.per_page;
                     if (len >= cap) {
                         // check if our heap's in good shape before talking to swap
-                        try self.pages.ensureUnusedCapacity(ma7r.ha7r, 1);
-                        const new_page = try ma7r.pager.alloc();
-                        _ = try self.pages.append(ma7r.ha7r, new_page);
+                        try self.pages.ensureUnusedCapacity(sa6r.ha7r, 1);
+                        const new_page = try sa6r.pager.alloc();
+                        _ = try self.pages.append(sa6r.ha7r, new_page);
                     }
-                    try self.allocs.ensureUnusedCapacity(ma7r.ha7r, 1);
-                    try self.allocs.append(ma7r.ha7r, Allocation {
+                    try self.allocs.ensureUnusedCapacity(sa6r.ha7r, 1);
+                    try self.allocs.append(sa6r.ha7r, Allocation {
                         // .gen = 0,
                         .free = false,
                         .len = alloc_len,
                     });
-                    return @intCast(Ptr.SlotIndex, self.allocs.items.len - 1);
+                    return @intCast(SlotIndex, self.allocs.items.len - 1);
                 }
             }
 
-            pub fn swapIn(self: *Bucket, slot: Ptr.SlotIndex, pager: *MmapPager, cache: *PageCache) ![]u8 {
+            pub fn swapIn(self: *Bucket, slot: SlotIndex, pager: *MmapPager, cache: *PageCache) ![]u8 {
                 const meta = self.allocs.items[slot];
                 if (meta.free) @panic("Ptr points to free allocation");
                 const page_idx = slot / self.per_page;
@@ -364,6 +516,18 @@ pub fn SwappingAllocator(config: AllocatorConfig) type {
                 const size = @divExact(pager.config.page_size, self.per_page);
                 const page_slot = slot - (page_idx * self.per_page);
                 return page_slice[page_slot * size..(page_slot * size) + meta.len];
+            }
+
+            pub fn swapOut(self: *Bucket, slot: SlotIndex, pager: *MmapPager, cache: *PageCache) void {
+                if (self.allocs.items[slot].free) @panic("Ptr points to free allocation");
+                cache.swapOut(pager);
+            }
+
+            pub fn free(self: *Bucket, slot: SlotIndex) void {
+                var meta = &self.allocs.items[slot];
+                if (meta.free) @panic("Double free");
+                meta.free = true;
+                self.free_list.add(slot) catch @panic("so, this happened");
             }
         };
 
@@ -396,8 +560,12 @@ pub fn SwappingAllocator(config: AllocatorConfig) type {
             //     }
             // }
         }
+        pub fn allocator(self: *Self) SwappingAllocator {
+            return SwappingAllocator.init(self, alloc, swapIn, swapOut, free);
+        }
 
-        pub fn swapIn(self: *Self, ptr: Ptr) ![]u8 {
+        pub fn swapIn(self: *Self, gpptr: SwappingAllocator.Ptr) SwappingAllocator.Error![]u8 {
+            const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
             if (self.buckets[buck_idx]) |*buck|{
                 return try buck.swapIn(ptr.slot, self.pager, &self.cache);
@@ -406,13 +574,35 @@ pub fn SwappingAllocator(config: AllocatorConfig) type {
             }
         }
 
-        pub fn alloc(self: *Self, len: usize) !Ptr {
-            const buck_idx = std.math.log2(std.math.ceilPowerOfTwo(usize, len) catch @panic("fuck no"));
-            if (buck_idx >= self.buckets.len) {
-                std.debug.todo("large allocations");
+        pub fn swapOut(self: *Self, gpptr: SwappingAllocator.Ptr) void {
+            const ptr = CustomPtr.fromGpPtr(gpptr);
+            const buck_idx = ptr.buck;
+            if (self.buckets[buck_idx]) |*buck|{
+                buck.swapOut(ptr.slot, self.pager, &self.cache);
+            } else {
+                @panic("Ptr points to empty bucket");
+            }
+        }
+
+        pub fn free(self: *Self, gpptr: SwappingAllocator.Ptr) void {
+            const ptr = CustomPtr.fromGpPtr(gpptr);
+            const buck_idx = ptr.buck;
+            if (self.buckets[buck_idx]) |*buck|{
+                buck.free(ptr.slot);
+            } else {
+                @panic("Ptr points to empty bucket");
+            }
+        }
+
+        pub fn alloc(self: *Self, len: usize) SwappingAllocator.Error!SwappingAllocator.Ptr {
+            const buck_idx = std.math.log2(std.math.ceilPowerOfTwoAssert(usize, len));
+            if (buck_idx > std.math.maxInt(BuckIndex)) {
+                std.debug.print("we got a big one boys. len = {}, buck_idx = {}, buck_count = {}, idx type = {any}\n", .{ len, buck_idx, bucket_count, @typeInfo(BuckIndex) });
+                // std.debug.todo("large allocations");
+                @panic("todo");
             } else {
                 const buck_idx_fit = @intCast(BuckIndex, buck_idx);
-                std.debug.print("buck for len {} == {}\n", .{ len, @as(usize, 1) << buck_idx_fit });
+                // std.debug.print("buck for len {} == {}\n", .{ len, @as(usize, 1) << buck_idx_fit });
                 if (self.buckets[buck_idx_fit] == null) {
                     const slot_size = @as(usize, 1) << buck_idx_fit;
                     self.buckets[buck_idx_fit] = Bucket.init(
@@ -422,13 +612,13 @@ pub fn SwappingAllocator(config: AllocatorConfig) type {
                 }
                 var buck = &(self.buckets[buck_idx_fit].?);
                 var slot = try buck.addOne(len, self);
-                return Ptr{ .buck = buck_idx_fit, .slot = slot };
+                return (CustomPtr{ .buck = buck_idx_fit, .slot = slot }).toGpPtr();
             }
         }
     };
 }
 
-test "SwappingAllocator.usage" {
+test "MmapSwappingAllocator.usage" {
     const page_size = std.mem.page_size;
     const ha7r = std.testing.allocator;
     var pager = try MmapPager.init(ha7r, "/tmp/comb.test.SwappingAllocator.usage", .{
@@ -436,30 +626,46 @@ test "SwappingAllocator.usage" {
     });
     defer pager.deinit();
     
-    var ma74 = SwappingAllocator(.{}).init(ha7r, &pager);
-    defer ma74.deinit();
+    var ma7r = MmapSwappingAllocator(.{}).init(ha7r, &pager);
+    defer ma7r.deinit();
 
-    std.debug.print("Size MPA: {}\n", .{@sizeOf(SwappingAllocator(.{ .page_size = 4 * 1024 }))});
+    var sa7r = ma7r.allocator();
+
+    std.debug.print("Size MPA: {}\n", .{@sizeOf(MmapSwappingAllocator(.{ .page_size = 4 * 1024 }))});
     std.debug.print("Size GPA: {}\n", .{@sizeOf(std.heap.GeneralPurposeAllocator(.{}))});
 
     const table = [_][]const u8{
         "i wondered all night"[0..],
         "i wondered all night"[0..],
-        "i wondered all night about you"[0..],
+        "i wondered all night all about you"[0..],
         "i've been here for years just wondering around the neighborhood"[0..],
     };
-    var ptrs: [table.len]SwappingAllocator(.{}).Ptr = undefined;
+    var ptrs: [table.len]SwappingAllocator.Ptr = undefined;
 
     for (&table) |case, ii| {
-        ptrs[ii] = try ma74.alloc(case.len);
-        var string = try ma74.swapIn(ptrs[ii]);
+        ptrs[ii] = try sa7r.alloc(case.len);
+        var string = try sa7r.swapIn(ptrs[ii]);
         std.mem.copy(u8, string, case);
     }
 
-    // std.debug.print("Allocer\n{any}\n", .{ ma74.buckets });
+    // std.debug.print("Allocer\n{any}\n", .{ sa7r.buckets });
     for (&ptrs) |ptr, ii| {
-        const string = try ma74.swapIn(ptr);
+        const string = try sa7r.swapIn(ptr);
+        defer sa7r.swapOut(ptr);
         try std.testing.expectEqualSlices(u8, table[ii], string);
+    }
+
+    const replacement = "i wonder still oh I doo";
+    {
+        sa7r.free(ptrs[1]);
+        ptrs[1] = try sa7r.alloc(replacement.len);
+        var string = try sa7r.swapIn(ptrs[1]);
+        std.mem.copy(u8, string, replacement);
+    }
+    {
+        const string = try sa7r.swapIn(ptrs[1]);
+        defer sa7r.swapOut(ptrs[1]);
+        try std.testing.expectEqualSlices(u8, replacement, string);
     }
 }
 

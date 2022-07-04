@@ -1,7 +1,9 @@
 const std = @import("std");
-const utils = @import("utils.zig");
 
-pub const Appender = utils.Appender;
+pub const mod_utils = @import("utils.zig");
+const println = mod_utils.println;
+const dbg = mod_utils.println;
+const Appender = mod_utils.Appender;
 
 pub const TEC: u8 = 0;
 
