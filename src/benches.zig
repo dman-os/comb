@@ -18,7 +18,7 @@ const mod_bench = struct {
         min_warmup_time_ns: usize = 5_000_000_000,
         // min_warmup_iterations: usize = 50,
         min_measure_time_ns: usize = 30_000_000_000,
-        min_measure_iterations: usize =  60,
+        // min_measure_iterations: usize =  60,
     };
 
     fn bench(name: []const u8, payload: anytype, func: fn(@TypeOf(payload))void, config: BenchConfig) !void {
@@ -53,9 +53,9 @@ const mod_bench = struct {
         //         @divTrunc(config.min_measure_time_ns, expected_avg)
         //     else config.min_measure_iterations;
         var msr_time = config.min_measure_time_ns;
-        if (expected_avg * config.min_measure_iterations > msr_time) {
-            msr_time = config.min_measure_iterations * expected_avg;
-        }
+        // if (expected_avg * config.min_measure_iterations > msr_time) {
+        //     msr_time = config.min_measure_iterations * expected_avg;
+        // }
         const iterations_est = @divTrunc(msr_time, expected_avg);
         std.debug.print(
             "Measuring for {d} ms with {} iterations\n", 
@@ -236,19 +236,28 @@ test "rowscan.bench.SwappingIndex" {
     var a7r = std.testing.allocator;
 
     const file_p = "/tmp/comb.bench.SwappingIndex.rowscan";
-    var pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
-    defer {
-        pager.deinit();
-        std.fs.deleteFileAbsolute(file_p) catch unreachable;
-    }
+    var mmap_pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
+    defer mmap_pager.deinit();
 
-    var ma7r = comb.mod_mmap.MmapSwappingAllocator(.{}).init(a7r, &pager);
+    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
+    defer lru.deinit();
+
+    var pager = lru.pager();
+
+    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 
-    var index = Index.init(a7r, &pager, sa7r);
+    var index = Index.init(a7r, pager, sa7r);
     defer index.deinit();
 
+    defer {
+        var it = index.table.iterator();
+        defer it.close();
+        while (it.next() catch unreachable) |entry|{
+            sa7r.free(entry.name);
+        }
+    }
     // var name_arena = std.heap.ArenaAllocator.init(a7r);
     // defer name_arena.deinit();
     // var name_a7r = name_arena.allocator();
@@ -275,7 +284,7 @@ test "rowscan.bench.SwappingIndex" {
         for (tree.list.items) |t_entry, ii| {
             // const i_entry = try t_entry.conv(Index.Id, ).clone(name_arena.allocator());
             const i_entry = Index.Entry {
-                .name = (try sa7r.dupe(t_entry.name)).ptr,
+                .name = try sa7r.dupeJustPtr(t_entry.name),
                 .parent = new_ids[t_entry.parent],
                 .depth = t_entry.depth,
                 .kind = Index.Entry.Kind.File,
@@ -299,6 +308,7 @@ test "rowscan.bench.SwappingIndex" {
 
     var matcher = index.matcher();
     defer matcher.deinit();
+
     // var weaver = Index.FullPathWeaver.init();
     // defer weaver.deinit(index.a7r);
     const BenchCtx = struct {

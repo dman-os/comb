@@ -12,7 +12,7 @@ pub fn println(comptime fmt: []const u8, args: anytype) void {
     defer stderr_mutex.unlock();
     const stderr = std.io.getStdErr().writer();
     nosuspend stderr.print(fmt, args) catch return;
-    nosuspend stderr.write(fmt, "\n") catch return;
+    nosuspend _ = stderr.write("\n") catch return;
 }
 
 pub fn Appender(comptime T: type) type {
@@ -75,3 +75,16 @@ test "Appender.set" {
         try std.testing.expect(set.contains(item));
     }
 }
+
+// fn Trait(
+//     comptime required: []type,
+//     // comptime required: fn (type) type,
+// ) type {
+//     return struct {
+//         fn impl(comptime T: type) type {
+
+//         }
+//     };
+// }
+// const Swapalloc = Trait(struct {
+// });

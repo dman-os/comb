@@ -3,6 +3,9 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 pub const mod_utils = @import("utils.zig");
+pub const println = mod_utils.println;
+pub const dbg = mod_utils.dbg;
+
 pub const mod_gram = @import("gram.zig");
 pub const mod_treewalking = @import("treewalking.zig");
 pub const mod_mmap = @import("mmap.zig");
@@ -32,14 +35,20 @@ fn swapping () !void {
 
     var a7r = gpa.allocator();
     
-    var pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
-    defer pager.deinit();
+    var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
+    defer mmap_pager.deinit();
 
-    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, &pager);
+    // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
+    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
+    defer lru.deinit();
+
+    var pager = lru.pager();
+
+    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 
-    var index = Index.init(a7r, &pager, sa7r);
+    var index = Index.init(a7r, pager, sa7r);
     defer index.deinit();
 
     var name_arena = std.heap.ArenaAllocator.init(a7r);
@@ -70,7 +79,7 @@ fn swapping () !void {
                     Index.Id, 
                     SwappingAllocator.Ptr, 
                     new_ids[t_entry.parent], 
-                    (try sa7r.dupe(t_entry.name)).ptr,
+                    try sa7r.dupeJustPtr(t_entry.name),
                 );
             new_ids[ii] = try index.file_created(i_entry);
         }
@@ -268,7 +277,6 @@ test {
 // }
 
 pub const mod_index = struct {
-    const MmapPager = mod_mmap.MmapPager;
     const SwappingList = mod_mmap.SwappingList;
     const Ptr = mod_mmap.SwappingAllocator.Ptr;
 
@@ -300,7 +308,7 @@ pub const mod_index = struct {
         meta: SwappingList(RowMeta),
         free_slots: FreeSlots,
 
-        pub fn init(allocator: Allocator, pager: *MmapPager, sa7r: mod_mmap.SwappingAllocator) Self {
+        pub fn init(allocator: Allocator, pager: mod_mmap.Pager, sa7r: mod_mmap.SwappingAllocator) Self {
             var self = Self {
                 .a7r = allocator,
                 .sa7r = sa7r,
@@ -435,6 +443,7 @@ pub const mod_index = struct {
             ) ![]const Id {
                 self.out_vec.clearRetainingCapacity();
                 var it = self.index.table.iterator();
+                defer it.close();
                 var ii: usize = 0;
                 while (try it.next()) |entry| {
                     const name = try self.index.sa7r.swapIn(entry.name);
@@ -451,26 +460,31 @@ pub const mod_index = struct {
 
     test "SwappingIndex.usage" {
         var a7r = std.testing.allocator;
-        var pager = try MmapPager.init(a7r, "/tmp/SwappingIndex.usage", .{});
-        defer pager.deinit();
+        var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/SwappingIndex.usage", .{});
+        defer mmap_pager.deinit();
 
-        var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, &pager);
+        var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
+        defer lru.deinit();
+
+        var pager = lru.pager();
+
+        var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
         defer ma7r.deinit();
 
         var sa7r = ma7r.allocator();
-        var index = SwappingIndex.init(a7r, &pager, sa7r);
+        var index = SwappingIndex.init(a7r, pager, sa7r);
         defer index.deinit();
 
         defer {
             var it = index.table.iterator();
+            defer it.close();
             while (it.next() catch unreachable) |entry|{
                 sa7r.free(entry.name);
             }
         }
 
         var entry = SwappingIndex.Entry {
-            // .name = try a7r.dupe(u8, "manameisjeff"),
-            .name = (try sa7r.dupe("/")).ptr,
+            .name = try sa7r.dupeJustPtr("/"),
             .parent = SwappingIndex.Id { .id = 0, .gen = 0 },
             .kind = SwappingIndex.Entry.Kind.Directory,
             .depth = 0,
