@@ -509,6 +509,14 @@ pub const LRUSwapCache = struct {
         self.cold.deinit(self.a7r);
     }
 
+    pub fn hot_count(self: *const Self) u32 {
+        return self.hot.count();
+    }
+    
+    pub fn cold_count(self: *const Self) u32 {
+        return self.cold.map.count();
+    }
+
     pub fn pager(self: *Self) Pager {
         return Pager.init(
             self, 
@@ -1279,6 +1287,7 @@ pub fn SwappingList(comptime T: type) type {
         pub fn set(self: *Self, idx: usize, item: T) !void {
             if (idx >= self.len) @panic("out of bounds bich");
             var ptr = try self.ptrTo(idx);
+            defer self.pager.swapOutResident();
             ptr.* = item;
         }
 
@@ -1292,6 +1301,7 @@ pub fn SwappingList(comptime T: type) type {
         pub fn append(self: *Self, item: T) !void {
             try self.ensureUnusedCapacity(1);
             var ptr = try self.ptrTo(self.len);
+            defer self.pager.swapOutResident();
             ptr.* = item;
             self.len += 1;
         }

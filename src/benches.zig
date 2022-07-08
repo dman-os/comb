@@ -456,3 +456,146 @@ test "plist.bench.walk" {
     };
     try bench_plist(id_t, gram_len, &plist, allocator, search_str);
 }
+
+fn bench_plist_swapping(
+    comptime I: type,
+    comptime gram_len: u4,
+    plist: *mod_plist.SwappingPostingListUnmanaged(I, gram_len), 
+    allocator: Allocator, 
+    pager: mod_mmap.Pager,
+    search_str: [] const u8
+) !void {
+    const PList = mod_plist.SwappingPostingListUnmanaged(I, gram_len);
+    {
+        var max: usize = 0;
+        var max_gram = [_]u8{mod_gram.TEC} ** gram_len;
+        var min: usize = std.math.maxInt(usize);
+        var min_gram = [_]u8{mod_gram.TEC} ** gram_len;
+        var bucket_count: usize = 0;
+        var entry_count: usize = 0;
+        var avg_len_list: f64 = 0.0;
+        var dist_list_len = std.AutoArrayHashMap(usize, usize).init(allocator);
+        defer dist_list_len.deinit();
+
+        var it = plist.map.iterator();
+        while(it.next()) |*pair|{
+            const gram = pair.key_ptr.*;
+            const list = pair.value_ptr;
+            const len = list.len;
+
+            var occ = try dist_list_len.getOrPutValue(len, 0);
+            occ.value_ptr.* += 1;
+
+            bucket_count += 1;
+            entry_count += len;
+
+            if (len > max){
+                max = len;
+                max_gram = gram;
+            }
+            if (len < min){
+                min = len;
+                min_gram = gram;
+            }
+            avg_len_list = (avg_len_list + @intToFloat(f64, len)) * 0.5;
+        }
+        const mode_list_len = blk: {
+            var max_occ: usize = 0;
+            var max_occ_count: usize = 0;
+            var iter = dist_list_len.iterator();
+            while (iter.next()) |pair|{
+                const occ = pair.value_ptr.*;
+                if (occ > max_occ_count) { 
+                    max_occ_count = occ;
+                    max_occ = pair.key_ptr.*;
+                }
+            }
+            break :blk max_occ;
+        };
+
+        std.debug.print(
+            \\gram_count = {}
+            \\entry_count = {}
+            \\max with {} = {s}
+            \\min with {} = {s}
+            \\list len avg = {}
+            \\list len mode = {}
+            \\
+            , .{ bucket_count, entry_count, max, max_gram, min, min_gram, avg_len_list, mode_list_len }
+        );
+    }
+
+    const BenchCtx = struct {
+        const Self = @This();
+        allocator: Allocator,
+        plist: *PList,
+        search_str: []const u8,
+        matcher: PList.StrMatcher,
+        fn do(self: *Self) void {
+            _ = self.matcher.str_match(
+                    self.plist, 
+                    self.search_str,
+                    std.ascii.spaces[0..]
+            ) catch @panic("wtf");
+        }
+    };
+    var ctx = BenchCtx{ 
+        .allocator = allocator, 
+        .plist = plist,
+        .search_str = search_str,
+        .matcher = PList.str_matcher(allocator, pager),
+    };
+    defer {
+        ctx.matcher.deinit();
+    }
+    try mod_bench.bench("str_match", &ctx, BenchCtx.do, .{});
+}
+
+test "SwappingPList.bench.gen" {
+    const size: usize = 1_000_00;
+    const id_t = u32;
+    const gram_len = 3;
+
+    // var allocator = std.testing.allocator;
+    
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
+    const file_p = "/tmp/comb.bench.SwappingPList";
+    var mmap_pager = try mod_mmap.MmapPager.init(allocator, file_p, .{});
+    defer mmap_pager.deinit();
+    // var pager = mmap_pager.pager();
+
+    var lru = try mod_mmap.LRUSwapCache.init(allocator, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
+    defer lru.deinit();
+    var pager = lru.pager();
+    
+    var tree = try PlasticTree.init(.{ .size = size }, allocator);
+    defer tree.deinit();
+
+    try tree.gen();
+    std.debug.print("done generating fake tree of size {}\n", .{ size });
+
+    var plist = mod_plist.SwappingPostingListUnmanaged(id_t, gram_len).init(pager);
+    // defer plist.deinit(allocator);
+
+    var longest: usize = 0;
+    var longest_name = try allocator.alloc(u8, 1);
+    defer allocator.free(longest_name);
+    for (tree.list.items) |entry, id|{
+        try plist.insert(allocator, @intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
+        if (id % 10_000 == 0 ) {
+            println("added {} items to plist, now at {s}", .{ id, entry.name });
+            // println("{} hot pages and {} cold pages items to plist", .{ lru.hot_count(), lru.cold_count() });
+        }
+        if (entry.name.len > longest){
+            longest = entry.name.len;
+            std.debug.print("got long at {s}\n", .{entry.name});
+            allocator.free(longest_name);
+            longest_name = try allocator.dupe(u8, entry.name);
+        }
+    }
+    std.debug.print("done adding to plist {} items\n", .{ size });
+    try bench_plist_swapping(id_t, gram_len, &plist, allocator, pager, longest_name);
+}
