@@ -434,59 +434,66 @@ pub const LRUSwapCache = struct {
     };
 
     const ColdPage = struct {
+        no: PageNo,
         /// timestamp from our monotonic timer
         last_used: usize, 
         slice: PageSlice,
     };
-    // const EvictQueue = struct {
-    //     const LruQueue = std.PriorityQueue(
-    //         ColdPage,
-    //         void,
-    //         struct {
-    //             // we wan't those with the farthest last used to be evicted earlier
-    //             fn cmp(_: void, a: ColdPage, b: ColdPage) std.math.Order {
-    //                 return std.math.order(a.last_used, b.last_used);
-    //             }
-    //         }.cmp,
-    //     );
-
-    //     lru_que: LruQueue,
-
-    //     fn init(a7r: Allocator) !EvictQueue {
-    //         return EvictQueue {
-    //             .timer = try std.time.Timer.start(),
-    //             .lru_que = LruQueue.init(a7r, .{}),
-    //         };
-    //     }
-    // };
 
     const HotList = std.AutoHashMapUnmanaged(PageNo, HotPage);
-    const ColdList = std.AutoArrayHashMapUnmanaged(PageNo, ColdPage);
+    const ColdList = struct {
+        const Que = std.TailQueue(ColdPage);
+        const Vec = std.ArrayListUnmanaged(Que.Node); 
+        // Mpas to the an index in the Vec
+        const Map = std.AutoHashMapUnmanaged(PageNo, usize);
+
+        que: Que,
+        vec: Vec,
+        map: Map,
+        free_list: std.ArrayListUnmanaged(usize),
+
+        fn init(a7r: Allocator, max_cold: u32) !ColdList {
+            if (max_cold == 0) @panic("max_cold set too low on " ++ @typeName(Self));
+            var self = ColdList {
+                .vec = Vec{},
+                .map = Map{},
+                .que = Que{},
+                .free_list = std.ArrayListUnmanaged(usize){},
+            };
+            try self.vec.ensureTotalCapacity(a7r, max_cold);
+            try self.map.ensureTotalCapacity(a7r, max_cold);
+            try self.free_list.ensureTotalCapacity(a7r, max_cold);
+            return self;
+        }
+
+        fn deinit(self: *ColdList, a7r: Allocator) void {
+            self.map.deinit(a7r);
+            self.vec.deinit(a7r);
+            self.free_list.deinit(a7r);
+        }
+    };
+
 
     a7r: Allocator,
     backing_pager: Pager,
-    max_cold: u32,
     hot: HotList,
     cold: ColdList,
     timer: std.time.Timer,
-    // evict_que: EvictQueue,
+    max_cold: u32,
 
     pub fn init(
         a7r: Allocator, 
         backing_pager: Pager, 
         max_cold: u32,
     ) !Self {
-        if (max_cold == 0) @panic("max_cold set too low on " ++ @typeName(LRUSwapCache));
         var self = Self {
             .a7r = a7r,
             .backing_pager = backing_pager,
-            .max_cold = max_cold,
             .hot = HotList{},
-            .cold = ColdList{},
+            .cold = try ColdList.init(a7r, max_cold),
             .timer = try std.time.Timer.start(),
-            // .evict_que = try EvictQueue.init(a7r),
+            .max_cold = max_cold,
         };
-        try self.cold.ensureTotalCapacity(a7r, max_cold);
         return self;
     }
     
@@ -494,8 +501,9 @@ pub const LRUSwapCache = struct {
         if (self.hot.count() > 0) {
             std.log.warn("{} hot pages in " ++ @typeName(Self) ++ " at time of deinit", .{ self.hot.count() });
         }
-        for (self.cold.keys()) |no| {
-            self.backing_pager.swapOut(no);
+        var it = self.cold.map.keyIterator();
+        while (it.next()) |no| {
+            self.backing_pager.swapOut(no.*);
         }
         self.hot.deinit(self.a7r);
         self.cold.deinit(self.a7r);
@@ -526,7 +534,10 @@ pub const LRUSwapCache = struct {
         // println("freeing page {}", .{no});
         // TODO: consider adding a wrning if page is hot
         // instead of relying on the backing pager behavior
-        if (self.cold.swapRemove(no)) {
+        if (self.cold.map.fetchRemove(no)) |pair| {
+            const idx = pair.value;
+            self.cold.que.remove(&self.cold.vec.items[idx]);
+            self.cold.free_list.append(self.a7r, idx) catch @panic("impossible");
             // println("swapping out page {} from cold cache to free", .{no});
             self.backing_pager.swapOut(no);
         }
@@ -538,12 +549,11 @@ pub const LRUSwapCache = struct {
             hot.swap_ins += 1;
             // println("swappingIn already active page {}", .{ no });
             return hot.slice;
-        } else if (self.cold.fetchSwapRemove(no)) |pair| {
+        } else if (self.cold.map.getEntry(no)) |pair| {
             // println("swappingIn cold page {}", .{ no });
-            const cold_p = pair.value;
+            const idx = pair.value_ptr.*;
+            const cold_p = self.cold.vec.items[idx].data;
             const slice = cold_p.slice;
-            // put back into cold list incase putting into hot fails
-            errdefer self.cold.put(self.a7r, no, cold_p) catch @panic("impossible");
             std.debug.assert(
                 (
                     try self.hot.fetchPut(
@@ -553,6 +563,9 @@ pub const LRUSwapCache = struct {
                     )
                 ) == null
             );
+            self.cold.que.remove(&self.cold.vec.items[idx]);
+            self.cold.map.removeByPtr(pair.key_ptr);
+            self.cold.free_list.append(self.a7r, idx) catch @panic("impossible");
             return slice;
         } else {
             // println("swappingIn fresh page {}", .{ no });
@@ -578,27 +591,43 @@ pub const LRUSwapCache = struct {
             if (hot.swap_ins == 0) {
                 const slice = hot.slice;
                 // NOTE: remove after you get the slice
-                _ = self.hot.remove(no); // TODO: prolly can remove this call
-                if (self.cold.count() == self.max_cold) {
-                    var min: usize = std.math.maxInt(usize);
-                    var min_k: PageNo = undefined;
-                    var it = self.cold.iterator();
-                    while (it.next()) |pair| {
-                        if (pair.value_ptr.last_used < min) {
-                            min_k = pair.key_ptr.*;
-                        }
-                    }
+                _ = self.hot.remove(no); // TODO: prolly can optimize this call
+
+                // if cold list is full, evict the oldest entry
+                if (self.cold.map.count() == self.max_cold) {
+                    const min = self.cold.que.popFirst().?;
+                    const min_no = min.data.no;
+                    const idx = self.cold.map.fetchRemove(min_no).?.value;
+                    self.cold.free_list.append(self.a7r, idx) catch @panic("impossible");
                     // println("swapping out page {} FROM cold list", .{ min_k });
-                    self.backing_pager.swapOut(min_k);
-                    _ = self.cold.swapRemove(min_k); 
+                    self.backing_pager.swapOut(min_no);
                 }
-                self.cold.put(
+
+                // check the free list for free spots
+                const idx = if (self.cold.free_list.popOrNull()) |idx| blk: {
+                    self.cold.vec.items[idx] = ColdList.Que.Node {
+                        .data = ColdPage { 
+                            .no = no,
+                            .last_used  = self.timer.read(),
+                            .slice = slice,
+                        },
+                    };
+                    break :blk idx;
+                } else blk: {
+                    self.cold.vec.append(self.a7r, ColdList.Que.Node {
+                        .data = ColdPage { 
+                            .no = no,
+                            .last_used  = self.timer.read(),
+                            .slice = slice,
+                        },
+                    }) catch @panic("impossible");
+                    break :blk self.cold.vec.items.len - 1;
+                };
+                self.cold.que.append(&self.cold.vec.items[idx]);
+                self.cold.map.put(
                     self.a7r, 
                     no, 
-                    ColdPage { 
-                        .last_used  = self.timer.read(),
-                        .slice = slice,
-                    },
+                    idx,
                 ) catch @panic("impossible");
             } else {
                 // println("deceasing swap in ctr for page {}", .{ no });
@@ -993,7 +1022,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
                             // check if our heap's in good shape before talking to swap
                             try self.pages.ensureUnusedCapacity(sa6r.ha7r, 1);
                             const new_page = try sa6r.pager.alloc();
-                            // println("bucket of class {} allocated page {}", .{ config.page_size / self.per_page, new_page });
+                            // println("bucket of class {} allocated page {}", .{ config.page_size / self.per_page, new_page });;
                             _ = try self.pages.append(sa6r.ha7r, new_page);
                         }
                     }

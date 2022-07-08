@@ -238,10 +238,10 @@ test "rowscan.bench.SwappingIndex" {
     const file_p = "/tmp/comb.bench.SwappingIndex.rowscan";
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
     defer mmap_pager.deinit();
+    // var pager = mmap_pager.pager();
 
     var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
     defer lru.deinit();
-
     var pager = lru.pager();
 
     var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);

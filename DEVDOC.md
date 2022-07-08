@@ -45,3 +45,15 @@ RUBBER DUCKING!
 ### Doubling Mapping
 
 What happens if I mmap the same range of a file to differents bits of process memory? Sherlock Holmes this.
+
+### LRU cache completely devastates performance
+
+My initial thinking was the `mmap` call was the bottlneck and putting a LRU cache
+in front of that might improve performance. It turns out, the hash map look ups are
+actually worse. This doesn't happen wieh it's an LRU that only holds on to 1 object.
+It's the multi thousand long LRU that's giving me shit. What gives?
+
+---
+
+Right, this was my bad. I'd implemented the LRU Cache wrong. It now improves performance
+by a factor of 2x to 10x.

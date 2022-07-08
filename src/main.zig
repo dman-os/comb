@@ -38,8 +38,8 @@ fn swapping () !void {
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
     defer mmap_pager.deinit();
 
-    // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
-    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
+    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
+    // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
     var pager = lru.pager();
