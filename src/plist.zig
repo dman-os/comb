@@ -43,7 +43,7 @@ pub fn SwappingPostingListUnmanaged(comptime I: type, comptime gram_len: u4) typ
         pub fn deinit(self: *Self, ha7r: Allocator) void {
             var it = self.map.valueIterator();
             while (it.next()) |list| {
-                list.deinit();
+                list.deinit(ha7r);
             }
             self.map.deinit(ha7r);
             self.cache.deinit(ha7r);
@@ -72,12 +72,12 @@ pub fn SwappingPostingListUnmanaged(comptime I: type, comptime gram_len: u4) typ
                     if (entry.found_existing) {
                         break :blk entry.value_ptr;
                     } else {
-                        entry.value_ptr.* = SwappingList(I).init(a7r, self.pager);
+                        entry.value_ptr.* = SwappingList(I).init(self.pager);
                         break :blk entry.value_ptr;
                     }
                 };
                 // try list.append(allocator, .{ .id = id, .pos = gpos.pos });
-                try list.append(id);
+                try list.append(a7r, id);
             }
         }
 

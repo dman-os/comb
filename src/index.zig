@@ -35,36 +35,30 @@ pub const SwappingIndex = struct {
         }.cmp
     );
 
-    a7r: Allocator,
+    ha7r: Allocator,
     sa7r: mod_mmap.SwappingAllocator,
     table: SwappingList(Entry),
     meta: SwappingList(RowMeta),
     free_slots: FreeSlots,
 
-    pub fn init(allocator: Allocator, pager: mod_mmap.Pager, sa7r: mod_mmap.SwappingAllocator) Self {
+    pub fn init(ha7r: Allocator, pager: mod_mmap.Pager, sa7r: mod_mmap.SwappingAllocator) Self {
         var self = Self {
-            .a7r = allocator,
+            .ha7r = ha7r,
             .sa7r = sa7r,
-            .table = SwappingList(Entry).init(allocator, pager),
-            .meta = SwappingList(RowMeta).init(allocator, pager),
-            .free_slots = FreeSlots.init(allocator, .{}),
+            .table = SwappingList(Entry).init(pager),
+            .meta = SwappingList(RowMeta).init(pager),
+            .free_slots = FreeSlots.init(ha7r, .{}),
         };
         return self;
     }
 
     pub fn deinit(self: *Self) void {
-        // for (self.table.items(.name)) |name|{
-        //     self.a7r.free(name);
-        // }
-        self.table.deinit();
-        self.meta.deinit();
+        self.table.deinit(self.ha7r);
+        self.meta.deinit(self.ha7r);
         self.free_slots.deinit();
     }
 
     pub fn file_created(self: *Self, entry: Entry) !Id {
-        // const i_entry = try t_entry
-        //     .conv(Index.Id, new_ids[t_entry.parent])
-        //     .clone(name_arena.allocator());
         if (self.free_slots.removeOrNull()) |id| {
             var row = try self.meta.get(id.id);
             try self.table.set(id.id, entry);
@@ -76,13 +70,13 @@ pub const SwappingIndex = struct {
             };
         } else {
             const id = self.meta.len;
-            try self.meta.append(RowMeta {
+            try self.meta.append(self.ha7r, RowMeta {
                 .free = false,
                 .gen = 0,
             });
             // TODO: this shit 
             errdefer _ = self.meta.pop() catch unreachable;
-            try self.table.append(entry);
+            try self.table.append(self.ha7r, entry);
             return Id {
                 .id = @intCast(u24, id),
                 .gen = 0,
@@ -136,9 +130,9 @@ pub const SwappingIndex = struct {
                 const name = try index.sa7r.swapIn(entry.name);
                 defer index.sa7r.swapOut(entry.name);
 
-                try self.buf.appendSlice(index.a7r, name);
+                try self.buf.appendSlice(index.ha7r, name);
                 std.mem.reverse(u8, self.buf.items[(self.buf.items.len - name.len)..]);
-                try self.buf.append(index.a7r, delimiter);
+                try self.buf.append(index.ha7r, delimiter);
                 next_id = entry.parent;
                 // FIXME: a better sentinel
                 if (next_id.id == 0) {
@@ -151,7 +145,7 @@ pub const SwappingIndex = struct {
     };
 
     pub fn matcher(self: *Self) StrMatcher {
-        return StrMatcher.init(self.a7r, self);
+        return StrMatcher.init(self.ha7r, self);
     }
 
     pub const StrMatcher = struct {

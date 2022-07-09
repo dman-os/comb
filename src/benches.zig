@@ -599,3 +599,99 @@ test "SwappingPList.bench.gen" {
     std.debug.print("done adding to plist {} items\n", .{ size });
     try bench_plist_swapping(id_t, gram_len, &plist, allocator, pager, longest_name);
 }
+
+test "SwappingPList.bench.walk" {
+    const size: usize = 1_000_000;
+    const id_t = usize;
+    const gram_len = 1;
+
+    // var allocator = std.testing.allocator;
+
+    // var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    // defer arena.deinit();
+    // var allocator = arena.allocator();
+
+    var gp = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gp.deinit();
+    var allocator = gp.allocator();
+
+    var tree = try Tree.walk(allocator, "/", size);
+    defer tree.deinit();
+    std.debug.print("done walking tree for {} items\n", .{ tree.list.items.len });
+    var weaver = Tree.FullPathWeaver.init();
+    defer weaver.deinit(allocator);
+
+    const file_p = "/tmp/comb.bench.SwappingPList";
+    var mmap_pager = try mod_mmap.MmapPager.init(allocator, file_p, .{});
+    defer mmap_pager.deinit();
+    // var pager = mmap_pager.pager();
+
+    var lru = try mod_mmap.LRUSwapCache.init(allocator, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
+    defer lru.deinit();
+    var pager = lru.pager();
+
+    var plist = mod_plist.SwappingPostingListUnmanaged(id_t, gram_len).init(pager);
+    defer plist.deinit(allocator);
+
+    const search_str = ss: {
+        var deepest: usize = 0;
+        var deepest_name = try allocator.alloc(u8, 1);
+        defer allocator.free(deepest_name);
+
+        var longest: usize = 0;
+        var longest_name = try allocator.alloc(u8, 1);
+        defer allocator.free(longest_name);
+
+        var dist_name_len = std.AutoArrayHashMap(usize, usize).init(allocator);
+        defer dist_name_len.deinit();
+
+        var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
+        for (tree.list.items) |entry, id| {
+            try plist.insert(allocator, id, entry.name, std.ascii.spaces[0..]);
+            if (id % 10_000 == 0 ) {
+                std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
+            }
+            if (entry.depth > deepest) {
+                deepest = entry.depth;
+                allocator.free(deepest_name);
+                const path = try weaver.pathOf(allocator, tree, id, '/');
+                deepest_name = try allocator.dupe(u8, path);
+            }
+            avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
+            if (entry.name.len > longest) {
+                longest = entry.name.len;
+                allocator.free(longest_name);
+                const path = try weaver.pathOf(allocator, tree, id, '/');
+                longest_name = try allocator.dupe(u8, path);
+            }
+            var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);
+            occ.value_ptr.* += 1;
+        }
+        std.debug.print("done adding to plist for {} items\n", .{ tree.list.items.len });
+
+        const mode_name_len = blk: {
+            var max_occ: usize = 0;
+            var max_occ_count: usize = 0;
+            var it = dist_name_len.iterator();
+            while (it.next()) |pair|{
+                const occ = pair.value_ptr.*;
+                if (occ > max_occ_count) { 
+                    max_occ_count = occ;
+                    max_occ = pair.key_ptr.*;
+                }
+            }
+            break :blk max_occ;
+        };
+        std.debug.print(
+            \\deepest at depth {} == {s}
+            \\longest name len at length {} == {s}
+            \\name len avg = {}
+            \\name len mode = {}
+            \\
+            , .{ deepest, deepest_name, longest, longest_name, avg_len, mode_name_len },
+        );
+
+        break :ss longest_name;
+    };
+    try bench_plist_swapping(id_t, gram_len, &plist, allocator, pager, search_str);
+}

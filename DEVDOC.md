@@ -57,3 +57,11 @@ It's the multi thousand long LRU that's giving me shit. What gives?
 
 Right, this was my bad. I'd implemented the LRU Cache wrong. It now improves performance
 by a factor of 2x to 10x.
+
+### MMAP HELL
+
+The insophistication of my mmaping scheme has finally caught up with me. Let's 
+redo it. First of all, here's what we want:
+
+- Avoid fragmentation and minimaize disk size usage.
+- Scheme for small lists to be able to share pages.

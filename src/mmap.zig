@@ -1154,17 +1154,6 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
     };
 }
 
-// test "dummy" {
-//     std.debug.print("1\n", .{});
-//     defer { 
-//         var x: usize = 1;
-//         std.debug.print("2\n", .{});
-//         x += 2;
-//     }
-//     std.debug.print("3\n", .{});
-//     return error.Shit;
-// }
-
 test "MmapSwappingAllocator.usage" {
     const page_size = std.mem.page_size;
     const ha7r = std.testing.allocator;
@@ -1234,7 +1223,6 @@ pub fn SwappingList(comptime T: type) type {
         //     slice: ?[]u8
         // };
 
-        ha7r: Allocator,
         pager: SinglePageCache,
         /// items per page
         per_page: usize,
@@ -1243,22 +1231,21 @@ pub fn SwappingList(comptime T: type) type {
         small_vec: ?std.ArrayListUnmanaged(T) = null,
         pages: std.ArrayListUnmanaged(PageNo) = .{},
 
-        pub fn init(ha7r: Allocator, pager: Pager) Self {
+        pub fn init(pager: Pager) Self {
             return Self {
-                .ha7r = ha7r,
                 .pager = SinglePageCache.init(pager),
                 .per_page = pager.pageSize() / @sizeOf(T),
             };
         }
 
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self, ha7r: Allocator) void {
             self.pager.swapOutResident();
             for (self.pages.items) |no| {
                 self.pager.free(no);
             }
-            self.pages.deinit(self.ha7r);
+            self.pages.deinit(ha7r);
             if (self.small_vec) |*vec| {
-                vec.deinit(self.ha7r);
+                vec.deinit(ha7r);
             }
         }
 
@@ -1291,7 +1278,7 @@ pub fn SwappingList(comptime T: type) type {
         }
 
 
-        pub fn ensureUnusedCapacity(self: *Self, n_items: usize) !void {
+        pub fn ensureUnusedCapacity(self: *Self, ha7r: Allocator, n_items: usize) !void {
             const cap = self.capacity();
             const desired_cap = self.len + n_items;
             if (cap >= desired_cap) {
@@ -1309,10 +1296,10 @@ pub fn SwappingList(comptime T: type) type {
                 );
             if (new_cap < self.per_page) {
                 if (self.small_vec) |*vec| {
-                    try vec.resize(self.ha7r, new_cap);
+                    try vec.resize(ha7r, new_cap);
                 } else {
                     self.small_vec = std.ArrayListUnmanaged(T){};
-                    try self.small_vec.?.resize(self.ha7r, new_cap);
+                    try self.small_vec.?.resize(ha7r, new_cap);
                 }
             } else {
                 var new_pages_req = 
@@ -1324,14 +1311,14 @@ pub fn SwappingList(comptime T: type) type {
                 //     .{ new_cap, cap, new_pages_req, desired_cap }
                 // );
                 std.debug.assert(new_pages_req > 0);
-                try self.pages.ensureUnusedCapacity(self.ha7r, new_pages_req);
+                try self.pages.ensureUnusedCapacity(ha7r, new_pages_req);
                 while (new_pages_req > 0) : ({
                     new_pages_req -= 1;
                 }) {
                     const no = try self.pager.alloc();
                     errdefer self.pager.free(no);
                     // println("allocated page {} for " ++ @typeName(T) ++ " list", .{ no });
-                    try self.pages.append(self.ha7r, no);
+                    try self.pages.append(ha7r, no);
                 }
                 // NOTE: we won't necessarily double the first time we ditch the 
                 // small_list since the old capacity might not be page flush
@@ -1340,7 +1327,7 @@ pub fn SwappingList(comptime T: type) type {
                     defer self.pager.swapOut(self.pages.items[0]);
                     const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
                     std.mem.copy(T, page_slice, vec.items);
-                    vec.deinit(self.ha7r);
+                    vec.deinit(ha7r);
                     self.small_vec = null;
                 }
                 std.debug.assert(self.pages.items.len * self.per_page > desired_cap);
@@ -1366,8 +1353,8 @@ pub fn SwappingList(comptime T: type) type {
             return ptr.*;
         }
 
-        pub fn append(self: *Self, item: T) !void {
-            try self.ensureUnusedCapacity(1);
+        pub fn append(self: *Self, ha7r: Allocator, item: T) !void {
+            try self.ensureUnusedCapacity(ha7r, 1);
             var ptr = try self.ptrTo(self.len);
             defer self.pager.swapOutResident();
             ptr.* = item;
@@ -1444,15 +1431,15 @@ test "SwappingList.usage" {
     var lru = try LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
-    var list = SwappingList(usize).init(ha7r, lru.pager());
-    defer list.deinit();
+    var list = SwappingList(usize).init(lru.pager());
+    defer list.deinit(ha7r);
 
     const item_per_page = page_size / @sizeOf(usize);
     const page_count = 10;
     var nums = [_]usize{0} ** (page_count * item_per_page);
     for (nums) |*num, ii| {
         num.* = ii;
-        try list.append(ii);
+        try list.append(ha7r, ii);
     }
     {
         var it = list.iterator();

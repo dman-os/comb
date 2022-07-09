@@ -110,7 +110,7 @@ fn swapping () !void {
     var matcher = index.matcher();
     defer matcher.deinit();
     var weaver = Index.FullPathWeaver.init();
-    defer weaver.deinit(index.a7r);
+    defer weaver.deinit(index.ha7r);
 
     while (true) {
         std.debug.print("Ready to search: ", .{});
