@@ -43,7 +43,7 @@ pub fn SwappingPostingListUnmanaged(comptime I: type, comptime gram_len: u4) typ
         pub fn deinit(self: *Self, ha7r: Allocator) void {
             var it = self.map.valueIterator();
             while (it.next()) |list| {
-                list.deinit(ha7r);
+                list.deinit(ha7r, self.pager);
             }
             self.map.deinit(ha7r);
             self.cache.deinit(ha7r);
@@ -72,12 +72,12 @@ pub fn SwappingPostingListUnmanaged(comptime I: type, comptime gram_len: u4) typ
                     if (entry.found_existing) {
                         break :blk entry.value_ptr;
                     } else {
-                        entry.value_ptr.* = SwappingList(I).init(self.pager);
+                        entry.value_ptr.* = SwappingList(I).init(self.pager.pageSize());
                         break :blk entry.value_ptr;
                     }
                 };
                 // try list.append(allocator, .{ .id = id, .pos = gpos.pos });
-                try list.append(a7r, id);
+                try list.append(a7r, self.pager, id);
             }
         }
 
@@ -157,7 +157,7 @@ pub fn SwappingPostingListUnmanaged(comptime I: type, comptime gram_len: u4) typ
 
                             self.out_vec.clearRetainingCapacity();
 
-                            var it = list.iteratorWithCache(self.pager);
+                            var it = list.iterator(self.pager);
                             defer it.close();
                             while (try it.next()) |ptr| {
                                 const id = ptr.*;
@@ -173,7 +173,7 @@ pub fn SwappingPostingListUnmanaged(comptime I: type, comptime gram_len: u4) typ
                             }
                         } else {
                             // alll items satisfying first gram are elgiible
-                            var it = list.iteratorWithCache(self.pager);
+                            var it = list.iterator(self.pager);
                             defer it.close();
                             while (try it.next()) |ptr| {
                                 const id = ptr.*;
@@ -277,7 +277,7 @@ test "SwappingPlist.str_match" {
                         var gram_items = try ha7r.alloc(usize, pair.value_ptr.len);
                         defer ha7r.free(gram_items);
                         var ii: usize = 0;
-                        var it2 = pair.value_ptr.iterator();
+                        var it2 = pair.value_ptr.iterator(pager);
                         defer it2.close();
                         while (try it2.next()) |id| {
                             gram_items[ii] = id.*;

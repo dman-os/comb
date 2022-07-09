@@ -37,31 +37,44 @@ pub const SwappingIndex = struct {
 
     ha7r: Allocator,
     sa7r: mod_mmap.SwappingAllocator,
+    pager: mod_mmap.Pager,
     table: SwappingList(Entry),
     meta: SwappingList(RowMeta),
     free_slots: FreeSlots,
+
+    swapped_in_table: ?usize = null,
 
     pub fn init(ha7r: Allocator, pager: mod_mmap.Pager, sa7r: mod_mmap.SwappingAllocator) Self {
         var self = Self {
             .ha7r = ha7r,
             .sa7r = sa7r,
-            .table = SwappingList(Entry).init(pager),
-            .meta = SwappingList(RowMeta).init(pager),
+            .pager = pager,
+            .table = SwappingList(Entry).init(pager.pageSize()),
+            .meta = SwappingList(RowMeta).init(pager.pageSize()),
             .free_slots = FreeSlots.init(ha7r, .{}),
         };
         return self;
     }
 
+    fn swapOutTableCache(self: *Self) void {
+        if (self.swapped_in_table) |idx| {
+            self.table.swapOut(self.pager, idx);
+            self.swapped_in_table = null;
+        }
+    }
+
     pub fn deinit(self: *Self) void {
-        self.table.deinit(self.ha7r);
-        self.meta.deinit(self.ha7r);
+        self.swapOutTableCache();
+        self.table.deinit(self.ha7r, self.pager);
+        self.meta.deinit(self.ha7r, self.pager);
         self.free_slots.deinit();
     }
 
     pub fn file_created(self: *Self, entry: Entry) !Id {
         if (self.free_slots.removeOrNull()) |id| {
-            var row = try self.meta.get(id.id);
-            try self.table.set(id.id, entry);
+            var row = try self.meta.swapIn(self.pager, id.id);
+            defer self.meta.swapOut(self.pager, id.id);
+            try self.table.set(self.pager, id.id, entry);
             row.gen += 1;
             row.free = false;
             return Id {
@@ -70,13 +83,13 @@ pub const SwappingIndex = struct {
             };
         } else {
             const id = self.meta.len;
-            try self.meta.append(self.ha7r, RowMeta {
+            try self.meta.append(self.ha7r, self.pager, RowMeta {
                 .free = false,
                 .gen = 0,
             });
             // TODO: this shit 
-            errdefer _ = self.meta.pop() catch unreachable;
-            try self.table.append(self.ha7r, entry);
+            errdefer _ = self.meta.pop(self.pager) catch unreachable;
+            try self.table.append(self.ha7r, self.pager, entry);
             return Id {
                 .id = @intCast(u24, id),
                 .gen = 0,
@@ -87,18 +100,23 @@ pub const SwappingIndex = struct {
     const IndexGetErr = error { StaleHandle,};
 
     pub fn isStale(self: *Self, id: Id) !bool {
-        const row = try self.meta.get(id.id);
+        const row = try self.meta.swapIn(self.pager, id.id);
+        defer self.meta.swapOut(self.pager, id.id);
         return row.gen > id.gen;
     }
 
     /// Be sure to clone the returned result
     pub fn get(self: *Self, id: Id) !*Entry {
         if (try self.isStale(id)) return IndexGetErr.StaleHandle;
-        return try self.table.get(id.id);
+        self.swapOutTableCache();
+        const item = try self.table.swapIn(self.pager, id.id);
+        self.swapped_in_table = id.id;
+        return item;
     }
 
     pub fn idAt(self: *Self, idx: usize) !Id {
-        const row = try self.meta.get(idx);
+        const row = try self.meta.swapIn(self.pager, idx);
+        defer self.meta.swapOut(self.pager, idx);
         return Id {
             .id = @intCast(u24, idx),
             .gen = row.gen,
@@ -126,7 +144,10 @@ pub const SwappingIndex = struct {
             while (true) {
                 if (try index.isStale(next_id)) return IndexGetErr.StaleHandle;
 
-                const entry = try index.table.get(next_id.id);
+                const cur_id = next_id.id;
+                const entry = try index.table.swapIn(index.pager, cur_id);
+                defer index.table.swapOut(index.pager, cur_id);
+
                 const name = try index.sa7r.swapIn(entry.name);
                 defer index.sa7r.swapOut(entry.name);
 
@@ -203,7 +224,7 @@ test "SwappingIndex.usage" {
     defer index.deinit();
 
     defer {
-        var it = index.table.iterator();
+        var it = index.table.iterator(pager);
         defer it.close();
         while (it.next() catch unreachable) |entry|{
             sa7r.free(entry.name);

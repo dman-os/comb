@@ -42,32 +42,32 @@ pub const Pager = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    pub inline fn alloc(self: *Self) AllocError!Pager.PageNo {
+    pub inline fn alloc(self: Self) AllocError!Pager.PageNo {
         return self.vtable.alloc(self.ptr);
     }
 
     /// This doesn't swap out the page.
-    pub inline fn free(self: *Self, no: Pager.PageNo) void {
+    pub inline fn free(self: Self, no: Pager.PageNo) void {
         return self.vtable.free(self.ptr, no);
     }
 
-    pub inline fn swapIn(self: *Self, no: Pager.PageNo) SwapInError!Pager.PageSlice {
+    pub inline fn swapIn(self: Self, no: Pager.PageNo) SwapInError!Pager.PageSlice {
         return self.vtable.swapIn(self.ptr, no);
     }
 
-    pub inline fn isSwappedIn(self: *const Self, no: Pager.PageNo) bool {
+    pub inline fn isSwappedIn(self: Self, no: Pager.PageNo) bool {
         return self.vtable.isSwappedIn(self.ptr, no);
     }
 
-    pub inline fn swapOut(self: *Self, no: Pager.PageNo) void {
+    pub inline fn swapOut(self: Self, no: Pager.PageNo) void {
         return self.vtable.swapOut(self.ptr, no);
     }
 
-    pub inline fn pageSize(self: *const Self) usize {
+    pub inline fn pageSize(self: Self) usize {
         return self.vtable.pageSize(self.ptr);
     }
 
-    pub inline fn swapAndFree(self: *Self, no: Pager.PageNo) void {
+    pub inline fn swapAndFree(self: Self, no: Pager.PageNo) void {
         self.swapOut(no);
         self.free(no);
     }
@@ -346,7 +346,7 @@ pub const MmapPager = struct {
     pub fn swapOut(self: *Self, no: PageNo) void {
         if (self.pages.items.len <= no) {
             std.log.warn(@typeName(Self) ++ " received swapOut for unrecognized page no {}", .{no});
-            return;
+            @panic("eawoo");
         }
         var page = &self.pages.items[no];
         if (page.slice) |slice| {
@@ -355,6 +355,7 @@ pub const MmapPager = struct {
             page.slice = null;
         } else {
             std.log.warn(@typeName(Self) ++ " received swapOut for page not in memory at no {}", .{no});
+            @panic("eawoo");
         }
     }
 
@@ -834,19 +835,19 @@ pub const SwappingAllocator = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    pub fn alloc(self: *SwappingAllocator, len: usize) Error!Ptr {
+    pub fn alloc(self: SwappingAllocator, len: usize) Error!Ptr {
         return self.vtable.alloc(self.ptr, len);
     }
 
-    pub fn swapIn(self: *SwappingAllocator, ptr: Ptr) Error![]u8 {
+    pub fn swapIn(self: SwappingAllocator, ptr: Ptr) Error![]u8 {
         return self.vtable.swapIn(self.ptr, ptr);
     }
 
-    pub fn swapOut(self: *SwappingAllocator, ptr: Ptr) void {
+    pub fn swapOut(self: SwappingAllocator, ptr: Ptr) void {
         return self.vtable.swapOut(self.ptr, ptr);
     }
 
-    pub fn free(self: *SwappingAllocator, ptr: Ptr) void {
+    pub fn free(self: SwappingAllocator, ptr: Ptr) void {
         return self.vtable.free(self.ptr, ptr);
     }
 
@@ -856,7 +857,7 @@ pub const SwappingAllocator = struct {
     };
 
     /// Don't forget to swap out the ptr if you don't need the slice.
-    pub fn dupe(self: *SwappingAllocator, bytes: []const u8) Error!DupeRes {
+    pub fn dupe(self: SwappingAllocator, bytes: []const u8) Error!DupeRes {
         const ptr = try self.alloc(bytes.len);
         var slice = try self.swapIn(ptr);
         std.mem.copy(u8, slice, bytes);
@@ -866,7 +867,7 @@ pub const SwappingAllocator = struct {
         };
     }
 
-    pub fn dupeJustPtr(self: *SwappingAllocator, bytes: []const u8) Error!Ptr {
+    pub fn dupeJustPtr(self: SwappingAllocator, bytes: []const u8) Error!Ptr {
         const ptr = try self.alloc(bytes.len);
         var slice = try self.swapIn(ptr);
         defer self.swapOut(ptr);
@@ -1223,7 +1224,6 @@ pub fn SwappingList(comptime T: type) type {
         //     slice: ?[]u8
         // };
 
-        pager: SinglePageCache,
         /// items per page
         per_page: usize,
 
@@ -1231,17 +1231,15 @@ pub fn SwappingList(comptime T: type) type {
         small_vec: ?std.ArrayListUnmanaged(T) = null,
         pages: std.ArrayListUnmanaged(PageNo) = .{},
 
-        pub fn init(pager: Pager) Self {
+        pub fn init(page_size: usize) Self {
             return Self {
-                .pager = SinglePageCache.init(pager),
-                .per_page = pager.pageSize() / @sizeOf(T),
+                .per_page = page_size / @sizeOf(T),
             };
         }
 
-        pub fn deinit(self: *Self, ha7r: Allocator) void {
-            self.pager.swapOutResident();
+        pub fn deinit(self: *Self, ha7r: Allocator, pager: Pager) void {
             for (self.pages.items) |no| {
-                self.pager.free(no);
+                pager.free(no);
             }
             self.pages.deinit(ha7r);
             if (self.small_vec) |*vec| {
@@ -1249,27 +1247,7 @@ pub fn SwappingList(comptime T: type) type {
             }
         }
 
-        /// Panics if index is out of bound.
-        inline fn ptrTo(self: *Self, index: usize) !*T {
-            if (self.small_vec) |vec| {
-                return &vec.items[index];
-            } else {
-                // println(
-                //     "page count: {}, capacity: {}, idx: {}", 
-                //     .{ 
-                //         self.pages.items.len, 
-                //         self.capacity(), 
-                //         index
-                //     }
-                // );
-                const page_idx = index / self.per_page;
-                const bytes = try self.pager.swapIn(self.pages.items[page_idx]);
-                const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
-                return &page_slice[index - (page_idx * self.per_page)];
-            }
-        }
-
-        pub fn capacity(self: *const Self) usize {
+        pub inline fn capacity(self: *const Self) usize {
             if (self.small_vec) |vec| {
                 return vec.items.len;
             } else {
@@ -1277,8 +1255,12 @@ pub fn SwappingList(comptime T: type) type {
             }
         }
 
-
-        pub fn ensureUnusedCapacity(self: *Self, ha7r: Allocator, n_items: usize) !void {
+        pub fn ensureUnusedCapacity(
+            self: *Self, 
+            ha7r: Allocator, 
+            pager: Pager, 
+            n_items: usize
+        ) !void {
             const cap = self.capacity();
             const desired_cap = self.len + n_items;
             if (cap >= desired_cap) {
@@ -1315,16 +1297,16 @@ pub fn SwappingList(comptime T: type) type {
                 while (new_pages_req > 0) : ({
                     new_pages_req -= 1;
                 }) {
-                    const no = try self.pager.alloc();
-                    errdefer self.pager.free(no);
+                    const no = try pager.alloc();
+                    errdefer pager.free(no);
                     // println("allocated page {} for " ++ @typeName(T) ++ " list", .{ no });
                     try self.pages.append(ha7r, no);
                 }
                 // NOTE: we won't necessarily double the first time we ditch the 
                 // small_list since the old capacity might not be page flush
                 if (self.small_vec) |*vec| {
-                    var bytes = try self.pager.swapIn(self.pages.items[0]);
-                    defer self.pager.swapOut(self.pages.items[0]);
+                    var bytes = try pager.swapIn(self.pages.items[0]);
+                    defer pager.swapOut(self.pages.items[0]);
                     const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
                     std.mem.copy(T, page_slice, vec.items);
                     vec.deinit(ha7r);
@@ -1334,29 +1316,57 @@ pub fn SwappingList(comptime T: type) type {
             }
         }
 
-        pub fn get(self: *Self, idx: usize) !*T {
+        pub fn swapIn(self: *const Self, pager: Pager, idx: usize) !*T {
             if (idx >= self.len) @panic("out of bounds bich");
-            return try self.ptrTo(idx);
+            return try self.swapInUnchecked(pager, idx);
         }
 
-        pub fn set(self: *Self, idx: usize, item: T) !void {
+        /// Does no bound checking. Use to access slots with-in capacity
+        /// but not necessarily length. Use `swapIn` for safer alternative.
+        fn swapInUnchecked(self: *const Self, pager: Pager, idx: usize) !*T {
+            if (self.small_vec) |vec| {
+                return &vec.items[idx];
+            } else {
+                const page_idx = idx / self.per_page;
+                const bytes = try pager.swapIn(self.pages.items[page_idx]);
+                const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
+                return &page_slice[idx - (page_idx * self.per_page)];
+            }
+        }
+
+        pub fn swapOut(self: *const Self, pager: Pager, idx: usize) void {
+            if (idx >= self.len) @panic("out of bounds");
+            self.swapOutUnchecked(pager, idx);
+        }
+
+        fn swapOutUnchecked(self: *const Self, pager: Pager, idx: usize) void {
+            if (self.small_vec == null) {
+                const page_idx = idx / self.per_page;
+                pager.swapOut(self.pages.items[page_idx]);
+            }
+        }
+
+        pub fn set(self: *const Self, pager: Pager, idx: usize, item: T) !void {
             if (idx >= self.len) @panic("out of bounds bich");
-            var ptr = try self.ptrTo(idx);
-            defer self.pager.swapOutResident();
+            var ptr = try self.swapIn(pager, idx);
+            defer self.swapOut(pager, idx);
             ptr.* = item;
         }
 
-        pub fn pop(self: *Self) !T {
+        pub fn pop(self: *Self, pager: Pager) !T {
             if (self.len == 0) @panic("iss empty");
-            var ptr = try self.ptrTo(self.len - 1);
+            const idx = self.len - 1;
+            var item = (try self.swapIn(pager, idx)).*;
+            defer self.swapOut(pager, idx);
             self.len -= 1;
-            return ptr.*;
+            return item;
         }
 
-        pub fn append(self: *Self, ha7r: Allocator, item: T) !void {
-            try self.ensureUnusedCapacity(ha7r, 1);
-            var ptr = try self.ptrTo(self.len);
-            defer self.pager.swapOutResident();
+        pub fn append(self: *Self, ha7r: Allocator, pager: Pager, item: T) !void {
+            try self.ensureUnusedCapacity(ha7r, pager, 1);
+            const idx = self.len;
+            var ptr = try self.swapInUnchecked(pager, idx);
+            defer self.swapOut(pager, idx);
             ptr.* = item;
             self.len += 1;
         }
@@ -1364,57 +1374,49 @@ pub fn SwappingList(comptime T: type) type {
         const Iterator = struct {
             cur: usize,
             stop: usize,
-            pager: SinglePageCache,
+            pager: Pager,
             list: *const Self,
+            in_idx: ?usize = null,
 
             pub fn new(list: *const Self, from: usize, to: usize, pager: Pager) Iterator {
                 return Iterator{
                     .cur = from,
                     .stop = to,
                     .list = list,
-                    .pager = SinglePageCache.init(pager),
+                    .pager = pager,
                 };
             }
 
             pub fn close(self: *Iterator) void {
-                self.pager.swapOutResident();
-                self.pager.deinit();
+                self.swapOutResident();
             }
+
+            fn swapOutResident(self: *Iterator) void {
+                if (self.in_idx) |idx| {
+                    self.list.swapOut(self.pager, idx);
+                    self.in_idx = null;
+                }
+            }
+
 
             pub fn next(self: *Iterator) !?*T {
                 if (self.cur == self.stop) {
                     return null;
                 }
-                var ptr = try self.ptrTo(self.cur);
+                self.swapOutResident();
+                var ptr = try self.list.swapIn(self.pager, self.cur);
+                self.in_idx = self.cur;
                 self.cur += 1;
                 return ptr;
-            }
-
-            /// Panics if index is out of bound.
-            inline fn ptrTo(self: *Iterator, index: usize) !*T {
-                if (self.list.small_vec) |vec| {
-                    return &vec.items[index];
-                } else {
-                    const page_idx = index / self.list.per_page;
-                    const bytes = try self.pager.swapIn(self.list.pages.items[page_idx]);
-                    const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
-                    return &page_slice[index - (page_idx * self.list.per_page)];
-                }
             }
         };
 
         /// Might panic if the list is modified before the iterator is closed.
         /// Be sure to close the iterator after usage.
         /// This reuses the list's built in pager.
-        pub fn iterator(self: *const Self) Iterator {
+        pub fn iterator(self: *const Self, pager: Pager) Iterator {
             // we give it the backing pager since we don't want it sharing our
             // single page cache in case of simultaneous usage
-            return Iterator.new(self, 0, self.len, self.pager.backing_pager);
-        }
-
-        /// Might panic if the list is modified before the iterator is closed.
-        /// Be sure to close the iterator after usage.
-        pub fn iteratorWithCache(self: *const Self, pager: Pager) Iterator {
             return Iterator.new(self, 0, self.len, pager);
         }
     };
@@ -1431,18 +1433,20 @@ test "SwappingList.usage" {
     var lru = try LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
-    var list = SwappingList(usize).init(lru.pager());
-    defer list.deinit(ha7r);
+    var pager = lru.pager();
+
+    var list = SwappingList(usize).init(pager.pageSize());
+    defer list.deinit(ha7r, pager);
 
     const item_per_page = page_size / @sizeOf(usize);
     const page_count = 10;
     var nums = [_]usize{0} ** (page_count * item_per_page);
     for (nums) |*num, ii| {
         num.* = ii;
-        try list.append(ha7r, ii);
+        try list.append(ha7r, pager, ii);
     }
     {
-        var it = list.iterator();
+        var it = list.iterator(pager);
         defer it.close();
         var ii: usize = 0;
         while (try it.next()) |num| {
