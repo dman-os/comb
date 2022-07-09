@@ -1,5 +1,6 @@
 //! TODO: remove dependence on heap allocator
 //! FIXME: none of these are threadsafe
+//! FIXME: this is too complex. Get rid of Pager and just use the Allocator
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -145,6 +146,9 @@ pub const Pager = struct {
 const PageNo = Pager.PageNo;
 const PageSlice = Pager.PageSlice;
 
+// TODO: add support for page ranges
+//  - the free_list is going to be tricky; we'd need to recognize and adjacent 
+//    free pages
 pub const MmapPager = struct {
     const Self = @This();
 
@@ -160,6 +164,7 @@ pub const MmapPager = struct {
     const Page = struct {
         slice: ?PageSlice,
         free: bool,
+        // len: usize,
     };
 
     const FreeList = std.PriorityQueue(
@@ -1224,29 +1229,24 @@ pub fn SwappingList(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        a7r: Allocator,
+        // const SmallList = struct {
+        //     ptr: SwappingAllocator.Ptr,
+        //     slice: ?[]u8
+        // };
+
+        ha7r: Allocator,
         pager: SinglePageCache,
-        len: usize,
-        capacity: usize,
-        pages: std.ArrayListUnmanaged(PageNo),
         /// items per page
         per_page: usize,
 
-        /// Panics if index is out of bound.
-        inline fn ptrTo(self: *Self, index: usize) !*T {
-            const page_idx = index / self.per_page;
-            const bytes = try self.pager.swapIn(self.pages.items[page_idx]);
-            const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
-            return &page_slice[index - (page_idx * self.per_page)];
-        }
+        len: usize = 0,
+        small_vec: ?std.ArrayListUnmanaged(T) = null,
+        pages: std.ArrayListUnmanaged(PageNo) = .{},
 
-        pub fn init(a7r: Allocator, pager: Pager) Self {
-            return Self{
-                .a7r = a7r,
-                .len = 0,
-                .capacity = 0,
+        pub fn init(ha7r: Allocator, pager: Pager) Self {
+            return Self {
+                .ha7r = ha7r,
                 .pager = SinglePageCache.init(pager),
-                .pages = std.ArrayListUnmanaged(PageNo){},
                 .per_page = pager.pageSize() / @sizeOf(T),
             };
         }
@@ -1256,27 +1256,95 @@ pub fn SwappingList(comptime T: type) type {
             for (self.pages.items) |no| {
                 self.pager.free(no);
             }
-            self.pages.deinit(self.a7r);
+            self.pages.deinit(self.ha7r);
+            if (self.small_vec) |*vec| {
+                vec.deinit(self.ha7r);
+            }
         }
 
+        /// Panics if index is out of bound.
+        inline fn ptrTo(self: *Self, index: usize) !*T {
+            if (self.small_vec) |vec| {
+                return &vec.items[index];
+            } else {
+                // println(
+                //     "page count: {}, capacity: {}, idx: {}", 
+                //     .{ 
+                //         self.pages.items.len, 
+                //         self.capacity(), 
+                //         index
+                //     }
+                // );
+                const page_idx = index / self.per_page;
+                const bytes = try self.pager.swapIn(self.pages.items[page_idx]);
+                const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
+                return &page_slice[index - (page_idx * self.per_page)];
+            }
+        }
+
+        pub fn capacity(self: *const Self) usize {
+            if (self.small_vec) |vec| {
+                return vec.items.len;
+            } else {
+                return self.pages.items.len * self.per_page;
+            }
+        }
+
+
         pub fn ensureUnusedCapacity(self: *Self, n_items: usize) !void {
-            if (self.capacity > self.len + n_items) {
+            const cap = self.capacity();
+            const desired_cap = self.len + n_items;
+            if (cap >= desired_cap) {
                 return;
             }
-            const new_cap = if (self.capacity == 0) self.per_page else self.capacity * 2;
-            var new_pages_req = (new_cap - self.capacity) / self.per_page;
-            std.debug.assert(new_pages_req > 0);
-            try self.pages.ensureUnusedCapacity(self.a7r, new_pages_req);
-            while (new_pages_req > 0) : ({
-                new_pages_req -= 1;
-            }) {
-                const no = try self.pager.alloc();
-                errdefer self.pager.free(no);
-                // println("allocated page {} for " ++ @typeName(T) ++ " list", .{ no });
-                try self.pages.append(self.a7r, no);
-                self.capacity += self.per_page;
+            const new_cap = if (cap == 0) 
+                    std.math.ceilPowerOfTwoAssert(usize, n_items)
+                else 
+                (
+                    (
+                        std.math.divCeil(usize, desired_cap, cap) 
+                        catch @panic("overflow")
+                    )
+                    * cap
+                );
+            if (new_cap < self.per_page) {
+                if (self.small_vec) |*vec| {
+                    try vec.resize(self.ha7r, new_cap);
+                } else {
+                    self.small_vec = std.ArrayListUnmanaged(T){};
+                    try self.small_vec.?.resize(self.ha7r, new_cap);
+                }
+            } else {
+                var new_pages_req = 
+                    (
+                        std.math.divCeil(usize, new_cap, self.per_page) catch @panic("overflow")
+                    ) - self.pages.items.len;
+                // println(
+                //     "expanding cap to {}, from {} with new pages {}, desired = {}",
+                //     .{ new_cap, cap, new_pages_req, desired_cap }
+                // );
+                std.debug.assert(new_pages_req > 0);
+                try self.pages.ensureUnusedCapacity(self.ha7r, new_pages_req);
+                while (new_pages_req > 0) : ({
+                    new_pages_req -= 1;
+                }) {
+                    const no = try self.pager.alloc();
+                    errdefer self.pager.free(no);
+                    // println("allocated page {} for " ++ @typeName(T) ++ " list", .{ no });
+                    try self.pages.append(self.ha7r, no);
+                }
+                // NOTE: we won't necessarily double the first time we ditch the 
+                // small_list since the old capacity might not be page flush
+                if (self.small_vec) |*vec| {
+                    var bytes = try self.pager.swapIn(self.pages.items[0]);
+                    defer self.pager.swapOut(self.pages.items[0]);
+                    const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
+                    std.mem.copy(T, page_slice, vec.items);
+                    vec.deinit(self.ha7r);
+                    self.small_vec = null;
+                }
+                std.debug.assert(self.pages.items.len * self.per_page > desired_cap);
             }
-            // std.debug.print("capacity increased to: {}\n",.{ self.capacity });
         }
 
         pub fn get(self: *Self, idx: usize) !*T {
@@ -1337,10 +1405,14 @@ pub fn SwappingList(comptime T: type) type {
 
             /// Panics if index is out of bound.
             inline fn ptrTo(self: *Iterator, index: usize) !*T {
-                const page_idx = index / self.list.per_page;
-                const bytes = try self.pager.swapIn(self.list.pages.items[page_idx]);
-                const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
-                return &page_slice[index - (page_idx * self.list.per_page)];
+                if (self.list.small_vec) |vec| {
+                    return &vec.items[index];
+                } else {
+                    const page_idx = index / self.list.per_page;
+                    const bytes = try self.pager.swapIn(self.list.pages.items[page_idx]);
+                    const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
+                    return &page_slice[index - (page_idx * self.list.per_page)];
+                }
             }
         };
 

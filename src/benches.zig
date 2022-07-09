@@ -552,7 +552,7 @@ fn bench_plist_swapping(
 }
 
 test "SwappingPList.bench.gen" {
-    const size: usize = 1_000_00;
+    const size: usize = 1_000_000;
     const id_t = u32;
     const gram_len = 3;
 
