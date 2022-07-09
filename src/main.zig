@@ -28,7 +28,7 @@ pub fn main() !void {
 
 fn swapping () !void {
     const Index = mod_index.SwappingIndex;
-    const PList = mod_plist.SwappingPostingListUnmanaged(Index.Id, 3);
+    const PList = mod_plist.SwappingPostingList(Index.Id, 3);
 
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
@@ -56,8 +56,8 @@ fn swapping () !void {
     var index = Index.init(a7r, pager, sa7r);
     defer index.deinit();
 
-    var plist = PList.init(pager);
-    defer plist.deinit(a7r);
+    var plist = PList.init(a7r, sa7r, pager);
+    defer plist.deinit();
 
     var name_arena = std.heap.ArenaAllocator.init(a7r);
     defer name_arena.deinit();
@@ -91,7 +91,6 @@ fn swapping () !void {
                 );
             new_ids[ii] = try index.file_created(i_entry);
             try plist.insert(
-                a7r,
                 new_ids[ii],
                 t_entry.name,
                 std.ascii.spaces[0..]
@@ -117,7 +116,7 @@ fn swapping () !void {
     var stdin_rdr = stdin.reader();
     var phrase = std.ArrayList(u8).init(a7r);
     defer phrase.deinit();
-    var matcher = PList.str_matcher(a7r, pager);
+    var matcher = plist.matcher();
     defer matcher.deinit();
     var weaver = Index.FullPathWeaver.init();
     defer weaver.deinit(index.ha7r);

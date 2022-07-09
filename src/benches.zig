@@ -460,12 +460,11 @@ test "plist.bench.walk" {
 fn bench_plist_swapping(
     comptime I: type,
     comptime gram_len: u4,
-    plist: *mod_plist.SwappingPostingListUnmanaged(I, gram_len), 
+    plist: *mod_plist.SwappingPostingList(I, gram_len), 
     allocator: Allocator, 
-    pager: mod_mmap.Pager,
     search_str: [] const u8
 ) !void {
-    const PList = mod_plist.SwappingPostingListUnmanaged(I, gram_len);
+    const PList = mod_plist.SwappingPostingList(I, gram_len);
     {
         var max: usize = 0;
         var max_gram = [_]u8{mod_gram.TEC} ** gram_len;
@@ -543,7 +542,7 @@ fn bench_plist_swapping(
         .allocator = allocator, 
         .plist = plist,
         .search_str = search_str,
-        .matcher = PList.str_matcher(allocator, pager),
+        .matcher = plist.matcher(),
     };
     defer {
         ctx.matcher.deinit();
@@ -570,6 +569,10 @@ test "SwappingPList.bench.gen" {
     var lru = try mod_mmap.LRUSwapCache.init(allocator, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
     defer lru.deinit();
     var pager = lru.pager();
+
+    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(allocator, pager);
+    defer ma7r.deinit();
+    var sa7r = ma7r.allocator();
     
     var tree = try PlasticTree.init(.{ .size = size }, allocator);
     defer tree.deinit();
@@ -577,14 +580,14 @@ test "SwappingPList.bench.gen" {
     try tree.gen();
     std.debug.print("done generating fake tree of size {}\n", .{ size });
 
-    var plist = mod_plist.SwappingPostingListUnmanaged(id_t, gram_len).init(pager);
+    var plist = mod_plist.SwappingPostingList(id_t, gram_len).init(allocator, sa7r, pager);
     // defer plist.deinit(allocator);
 
     var longest: usize = 0;
     var longest_name = try allocator.alloc(u8, 1);
     defer allocator.free(longest_name);
     for (tree.list.items) |entry, id|{
-        try plist.insert(allocator, @intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
+        try plist.insert(@intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
         if (id % 10_000 == 0 ) {
             println("added {} items to plist, now at {s}", .{ id, entry.name });
             // println("{} hot pages and {} cold pages items to plist", .{ lru.hot_count(), lru.cold_count() });
@@ -597,7 +600,7 @@ test "SwappingPList.bench.gen" {
         }
     }
     std.debug.print("done adding to plist {} items\n", .{ size });
-    try bench_plist_swapping(id_t, gram_len, &plist, allocator, pager, longest_name);
+    try bench_plist_swapping(id_t, gram_len, &plist, allocator, longest_name);
 }
 
 test "SwappingPList.bench.walk" {
@@ -630,8 +633,12 @@ test "SwappingPList.bench.walk" {
     defer lru.deinit();
     var pager = lru.pager();
 
-    var plist = mod_plist.SwappingPostingListUnmanaged(id_t, gram_len).init(pager);
-    defer plist.deinit(allocator);
+    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(allocator, pager);
+    defer ma7r.deinit();
+    var sa7r = ma7r.allocator();
+
+    var plist = mod_plist.SwappingPostingList(id_t, gram_len).init(allocator, sa7r, pager);
+    defer plist.deinit();
 
     const search_str = ss: {
         var deepest: usize = 0;
@@ -647,7 +654,7 @@ test "SwappingPList.bench.walk" {
 
         var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
         for (tree.list.items) |entry, id| {
-            try plist.insert(allocator, id, entry.name, std.ascii.spaces[0..]);
+            try plist.insert(id, entry.name, std.ascii.spaces[0..]);
             if (id % 10_000 == 0 ) {
                 std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
             }
@@ -693,5 +700,5 @@ test "SwappingPList.bench.walk" {
 
         break :ss longest_name;
     };
-    try bench_plist_swapping(id_t, gram_len, &plist, allocator, pager, search_str);
+    try bench_plist_swapping(id_t, gram_len, &plist, allocator, search_str);
 }
