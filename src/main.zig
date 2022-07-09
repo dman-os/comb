@@ -28,6 +28,7 @@ pub fn main() !void {
 
 fn swapping () !void {
     const Index = mod_index.SwappingIndex;
+    const PList = mod_plist.SwappingPostingListUnmanaged(Index.Id, 3);
 
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
@@ -54,6 +55,9 @@ fn swapping () !void {
 
     var index = Index.init(a7r, pager, sa7r);
     defer index.deinit();
+
+    var plist = PList.init(pager);
+    defer plist.deinit(a7r);
 
     var name_arena = std.heap.ArenaAllocator.init(a7r);
     defer name_arena.deinit();
@@ -86,6 +90,12 @@ fn swapping () !void {
                     try sa7r.dupeJustPtr(t_entry.name),
                 );
             new_ids[ii] = try index.file_created(i_entry);
+            try plist.insert(
+                a7r,
+                new_ids[ii],
+                t_entry.name,
+                std.ascii.spaces[0..]
+            );
         }
         const index_elapsed = timer.read();
         std.log.info(
@@ -107,7 +117,7 @@ fn swapping () !void {
     var stdin_rdr = stdin.reader();
     var phrase = std.ArrayList(u8).init(a7r);
     defer phrase.deinit();
-    var matcher = index.matcher();
+    var matcher = PList.str_matcher(a7r, pager);
     defer matcher.deinit();
     var weaver = Index.FullPathWeaver.init();
     defer weaver.deinit(index.ha7r);
@@ -117,7 +127,11 @@ fn swapping () !void {
         try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
         std.log.info("Searching...", .{});
         _ = timer.reset();
-        var matches = try matcher.str_match(phrase.items);
+        var matches = try matcher.str_match(
+            &plist,
+            phrase.items,
+            std.ascii.spaces[0..],
+        );
         const elapsed = timer.read();
         var ii:usize = 0;
         for (matches) |id| {
