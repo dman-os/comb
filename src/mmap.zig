@@ -1260,7 +1260,10 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
         const Self = @This();
 
         const bucket_count = std.math.log2(config.page_size);
-        const BuckIndex = std.meta.Int(.unsigned, std.math.log2(std.math.ceilPowerOfTwoAssert(u16, bucket_count)));
+        const BuckIndex = std.meta.Int(
+            .unsigned, 
+            std.math.log2(std.math.ceilPowerOfTwoAssert(u16, bucket_count + 1))
+        );
         const SlotIndex = std.meta.Int(
             .unsigned, 
             @bitSizeOf(SwappingAllocator.Ptr) - @bitSizeOf(BuckIndex)
@@ -1282,14 +1285,17 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
         comptime {
             // TODO: THiS gets fucked if usize bytes are above 255
             if (@sizeOf(CustomPtr) != @sizeOf(SwappingAllocator.Ptr)) {
-                var buf = [_]u8{0} ** 64;
-                var msg = std.fmt.bufPrint(
-                    &buf, 
-                    "CustomPtr size mismatch: {} !=  {}", 
+                @compileError(std.fmt.comptimePrint(
+                   @typeName(CustomPtr) ++ " size {} != " ++ @typeName(SwappingAllocator.Ptr) ++ " {}",
                     .{ @sizeOf(CustomPtr), @sizeOf(SwappingAllocator.Ptr) }
-                ) catch @panic("wtf");
-                @compileError(msg);
+                ));
             }
+            // we need this for the puprpose of working with BlockIds
+            if (@sizeOf(SlotIndex) < @sizeOf(u32))
+                @compileError(std.fmt.comptimePrint(
+                   @typeName(SlotIndex) ++ " size {} < " ++ @typeName(u32) ++ " {}",
+                    .{ @sizeOf(SlotIndex), @sizeOf(u32) }
+                ));
         }
 
         const Bucket = struct {
@@ -1327,7 +1333,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
                 };
             }
 
-            fn deinit(self: *Bucket, sa6r: *Self) void{
+            fn deinit(self: *Bucket, sa6r: *Self) void {
                 self.allocs.deinit(sa6r.ha7r);
                 for (self.pages.items) |no| {
                     // since this bucket is exclusively using the page
@@ -1395,19 +1401,26 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
                 var meta = &self.allocs.items[slot];
                 if (meta.free) @panic("Double free");
                 meta.free = true;
+                // FIXME: find a way to avoid this
                 self.free_list.add(slot) catch @panic("so, this happened");
             }
         };
 
+        const LargeAllocation = struct {
+            block: BlockId,
+            requested_size: usize
+        };
+
         ha7r: Allocator,
         pager: Pager,
-        buckets: [bucket_count]?Bucket,
+
+        buckets: [bucket_count]?Bucket = [_]?Bucket{null} ** bucket_count,
+        large_allocs: std.AutoHashMapUnmanaged(SlotIndex, LargeAllocation) = .{},
 
         pub fn init(ha7r: Allocator, pager: Pager) Self {
             return .{
                 .ha7r = ha7r,
                 .pager = pager,
-                .buckets = [_]?Bucket{null} ** bucket_count,
             };
         }
 
@@ -1417,16 +1430,90 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
                     buck.deinit(self);
                 }
             }
+            self.large_allocs.deinit(self.ha7r);
         }
 
         pub fn allocator(self: *Self) SwappingAllocator {
             return SwappingAllocator.init(self, alloc, swapIn, swapOut, free);
         }
 
+        fn buckAlloc(self: *Self, buck_idx: BuckIndex, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
+            // println("allocating len {} in bucket of size {}", .{ len, @as(usize, 1) << buck_idx_fit });
+            // println("buck for len {} == {}", .{ len, @as(usize, 1) << buck_idx_fit });
+            if (self.buckets[buck_idx] == null) {
+                const slot_size = @as(usize, 1) << buck_idx;
+                self.buckets[buck_idx] = Bucket.init(
+                    self.ha7r, 
+                    @divExact(config.page_size, slot_size),
+                );
+            }
+            var buck = &(self.buckets[buck_idx].?);
+            var slot = try buck.addOne(len, self);
+            return (CustomPtr{ .buck = buck_idx, .slot = slot }).toGpPtr();
+        }
+
+        fn largeAlloc(self: *Self, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
+            const page_count = std.math.divCeil(usize, len, config.page_size) catch @panic("overflow");
+            const block_id = try self.pager.allocBlock(@intCast(u32, page_count));
+            const slot = @as(SlotIndex, block_id.idx);
+            try self.large_allocs.put(
+                self.ha7r,
+                slot, 
+                LargeAllocation {
+                    .block = block_id,
+                    .requested_size = len,
+                },
+            );
+            // println(
+            //     "allocated large alloc for len {} using {} pages to block id {}", 
+            //     .{ len, page_count, block_id}
+            // );
+            return (CustomPtr{ .buck = bucket_count, .slot = slot }).toGpPtr();
+        }
+
+        pub fn alloc(self: *Self, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
+            const buck_idx = std.math.log2(std.math.ceilPowerOfTwoAssert(usize, len));
+            if (buck_idx >= bucket_count) {
+                // printn(
+                //     "we got a big one boys. page_size = {}, len = {}, buck_idx = {}, buck_count = {}, idx type = {any}", 
+                //     .{ config.page_size, len, buck_idx, bucket_count, @typeInfo(BuckIndex) }
+                // );
+                return try self.largeAlloc(len);
+            } else {
+                const buck_idx_fit = @intCast(BuckIndex, buck_idx);
+                return try self.buckAlloc(buck_idx_fit, len);
+            }
+        }
+
+        pub fn free(self: *Self, gpptr: SwappingAllocator.Ptr) void {
+            const ptr = CustomPtr.fromGpPtr(gpptr);
+            const buck_idx = ptr.buck;
+            if (buck_idx == bucket_count) {
+                if (self.large_allocs.fetchRemove(ptr.slot)) |large| {
+                    self.pager.freeBlock(
+                        large.value.block
+                    );
+                } else {
+                    @panic("double free: Ptr points to an unrecognized large allocation");
+                }
+            } else if (self.buckets[buck_idx]) |*buck|{
+                buck.free(ptr.slot);
+            } else {
+                @panic("Ptr points to empty bucket");
+            }
+        }
+
         pub fn swapIn(self: *Self, gpptr: SwappingAllocator.Ptr) SwappingAllocator.SwapInError![]u8 {
             const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
-            if (self.buckets[buck_idx]) |*buck|{
+            if (buck_idx == bucket_count) {
+                if (self.large_allocs.get(ptr.slot)) |large| {
+                    const slice = try self.pager.swapInBlock(large.block);
+                    return slice[0..large.requested_size];
+                } else {
+                    @panic("Ptr points to an unrecognized large allocation");
+                }
+            } else if (self.buckets[buck_idx]) |*buck|{
                 return try buck.swapIn(ptr.slot, &self.pager);
             } else {
                 @panic("Ptr points to empty bucket");
@@ -1436,46 +1523,16 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
         pub fn swapOut(self: *Self, gpptr: SwappingAllocator.Ptr) void {
             const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
-            if (self.buckets[buck_idx]) |*buck|{
+            if (buck_idx == bucket_count) {
+                if (self.large_allocs.get(ptr.slot)) |large| {
+                    self.pager.swapOutBlock(large.block);
+                } else {
+                    @panic("Ptr points to an unrecognized large allocation");
+                }
+            } else if (self.buckets[buck_idx]) |*buck|{
                 buck.swapOut(ptr.slot, &self.pager);
             } else {
                 @panic("Ptr points to empty bucket");
-            }
-        }
-
-        pub fn free(self: *Self, gpptr: SwappingAllocator.Ptr) void {
-            const ptr = CustomPtr.fromGpPtr(gpptr);
-            const buck_idx = ptr.buck;
-            if (self.buckets[buck_idx]) |*buck|{
-                buck.free(ptr.slot);
-            } else {
-                @panic("Ptr points to empty bucket");
-            }
-        }
-
-        pub fn alloc(self: *Self, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
-            const buck_idx = std.math.log2(std.math.ceilPowerOfTwoAssert(usize, len));
-            if (buck_idx >= bucket_count) {
-                println(
-                    "we got a big one boys. page_size = {}, len = {}, buck_idx = {}, buck_count = {}, idx type = {any}", 
-                    .{ config.page_size, len, buck_idx, bucket_count, @typeInfo(BuckIndex) }
-                );
-                // std.debug.todo("large allocations");
-                @panic("todo");
-            } else {
-                const buck_idx_fit = @intCast(BuckIndex, buck_idx);
-                // println("allocating len {} in bucket of size {}", .{ len, @as(usize, 1) << buck_idx_fit });
-                // std.debug.print("buck for len {} == {}\n", .{ len, @as(usize, 1) << buck_idx_fit });
-                if (self.buckets[buck_idx_fit] == null) {
-                    const slot_size = @as(usize, 1) << buck_idx_fit;
-                    self.buckets[buck_idx_fit] = Bucket.init(
-                        self.ha7r, 
-                        @divExact(config.page_size, slot_size),
-                    );
-                }
-                var buck = &(self.buckets[buck_idx_fit].?);
-                var slot = try buck.addOne(len, self);
-                return (CustomPtr{ .buck = buck_idx_fit, .slot = slot }).toGpPtr();
             }
         }
     };
@@ -1505,6 +1562,7 @@ test "MmapSwappingAllocator.usage" {
         "i wondered all night"[0..],
         "i wondered all night all about you"[0..],
         "i've been here for years just wondering around about the neighborhood"[0..],
+        ([_]u8{42} ** (10 * page_size))[0..]
     };
     var ptrs: [table.len]SwappingAllocator.Ptr = undefined;
 
@@ -1549,6 +1607,18 @@ pub fn SwappingList(comptime T: type) type {
             ptr: SwappingAllocator.Ptr,
             len: usize,
         };
+
+        // const PageHeader = struct {
+        //     no: PageNo,
+        //     next: PageNo,
+        //     prev: PageNo,
+        // };
+
+        // const InPage = struct {
+        //     idx: usize,
+        //     no: PageNo,
+        // };
+        // in: ?InPage = null,
 
         /// items per page
         per_page: usize,
