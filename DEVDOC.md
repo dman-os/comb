@@ -3,7 +3,8 @@
 ## TODO
 
 - Work stack
-    - [ ] Swapping PList
+    - [x] Swapping PList
+    - [ ] FANotify notifications & test suite
     - [ ] B-Tree
         - [ ] BSTree
 
@@ -65,3 +66,10 @@ redo it. First of all, here's what we want:
 
 - Avoid fragmentation and minimaize disk size usage.
 - Scheme for small lists to be able to share pages.
+
+---
+
+After some examining, it turns out that the current apporoach and direction was
+more than sufficent. All I had to do was add a stricter constraint that any access
+to swapped memory has to be explicity swappedIn/out. There's no way to safely
+abstract this away from high level users.

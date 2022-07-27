@@ -21,9 +21,91 @@ pub const mod_index = @import("index.zig");
 
 pub const log_level = std.log.Level.debug;
 
+pub const mod_fanotify = @import("fanotify.zig");
+
 pub fn main() !void {
     // try in_mem();
-    try swapping();
+    // try swapping();
+    try fanotify_demo();
+}
+
+fn fanotify_demo() !void {
+    const FAN = mod_fanotify.FAN;
+    const fd = blk: {
+        const fd = try mod_fanotify.init(
+            FAN.CLASS.NOTIF,
+            FAN.INIT.REPORT_FID
+                | FAN.INIT.REPORT_DIR_FID
+                | FAN.INIT.REPORT_NAME,
+            std.os.O.RDONLY | std.os.O.CLOEXEC,
+        );
+        try mod_fanotify.mark(
+            fd,
+            FAN.MARK.MOD.ADD,
+            FAN.MARK.FILESYSTEM,
+            FAN.EVENT.ONDIR
+                | FAN.EVENT.CREATE
+                | FAN.EVENT.ATTRIB
+                | FAN.EVENT.DELETE
+                | FAN.EVENT.MOVED_TO
+                ,
+            std.os.AT.FDCWD,
+           "/" 
+        );
+        break :blk fd;
+    };
+    defer std.os.close(fd);
+    var pollfds = [_]std.os.pollfd{ 
+        std.os.pollfd {
+            .fd = fd,
+            .events = std.os.POLL.IN,
+            .revents = 0,
+        } 
+    };
+    std.log.info("entering poll loop", .{});
+    var buf = [_]u8{0} ** 256;
+    while (true) {
+        const poll_num = try std.os.poll(&pollfds, -1);
+
+        if (poll_num < 1) {
+            std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
+            @panic("err on poll");
+        }
+        for (&pollfds) |pollfd| {
+            if (
+                pollfd.revents == 0 
+                or (pollfd.revents & std.os.POLL.IN) == 0
+            ) {
+                continue;
+            }
+            const fanotify_fd = pollfd.fd;
+            const read_len = try std.os.read(fanotify_fd, &buf);
+
+            var ptr = &buf[0];
+            var left_bytes = read_len;
+            var event_count: usize = 0;
+            while (true) {
+                const meta_ptr = @ptrCast(*const align(1) mod_fanotify.event_metadata, ptr);
+                const meta = meta_ptr.*;
+
+                if (
+                    left_bytes < @sizeOf(mod_fanotify.event_metadata)
+                    or left_bytes < @intCast(usize, meta.event_len)
+                    // FIXME: is this case even possible?
+                    or meta.event_len < @sizeOf(mod_fanotify.event_metadata)
+                ) {
+                    break;
+                }
+                if (meta.vers != mod_fanotify.METADATA_VERSION) {
+                    @panic("unexpected " ++ @typeName(mod_fanotify.event_metadata) ++ " version");
+                }
+                ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
+                left_bytes -= meta.event_len;
+                event_count += 1;
+            }
+            std.log.info("{} events read this cycle", .{ event_count });
+        }
+    }
 }
 
 fn swapping () !void {
