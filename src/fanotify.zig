@@ -5,6 +5,37 @@ const Allocator = std.mem.Allocator;
 const mod_utils = @import("utils.zig");
 const println = mod_utils.println;
 const dbg = mod_utils.dbg;
+const Option = mod_utils.Option;
+
+pub const FanotifyEvent = struct {
+    const Self = @This();
+    dir: ?[]u8,
+    name: ?[]u8,
+    mask: c_ulonglong align(8),
+    pid: c_int,
+    timestamp: i64,
+
+    // avoid const optional slices: https://github.com/ziglang/zig/issues/4907
+    pub fn init(
+        a7r: std.mem.Allocator,
+        name: Option([]const u8), 
+        dir: Option([]const u8),
+        meta: *const event_metadata,
+        timestamp: i64,
+    ) !Self {
+        return Self {
+            .name = if (name.toNative()) |slice| try a7r.dupe(u8, slice) else null,
+            .dir = if (dir.toNative()) |slice| try a7r.dupe(u8, slice) else null,
+            .mask = meta.mask,
+            .pid = meta.pid,
+            .timestamp = timestamp,
+        };
+    }
+    pub fn deinit(self: *Self, a7r: std.mem.Allocator) void {
+        a7r.free(self.name);
+        a7r.free(self.dir);
+    }
+};
 
 pub const FAN = struct {
     /// Events that user-space can register for.
@@ -279,6 +310,13 @@ pub const file_handle =  extern struct {
     handle_type: i32,
     /// I'm opqaue, just point to me
     f_handle: u8,
+
+    pub fn file_name(self: @This()) [*:0] const u8 {
+        return @intToPtr(
+            [*:0]u8, 
+            @ptrToInt(&self.f_handle) + @as(usize, self.handle_bytes)
+        );
+    }
 };
 
 pub const event_info_pidfd = extern struct {
@@ -416,10 +454,15 @@ pub const OpenByHandleErr = error {
 pub fn open_by_handle_at(
     mount_fd: std.os.fd_t,
     handle: *const file_handle,
-    flags: @typeInfo(std.os.O).Enum.tag_type, 
+    flags: c_int, 
 ) OpenByHandleErr!std.os.fd_t {
     while (true) {
-        const resp = std.os.linux.syscall3(.open_by_handle_at, mount_fd, handle, flags);
+        const resp = std.os.linux.syscall3(
+            .open_by_handle_at,
+            @bitCast(usize, @as(isize, mount_fd)), 
+            @ptrToInt(handle), 
+            @bitCast(usize, @as(isize, flags)), 
+        );
         switch (std.os.errno(resp)) {
             .SUCCESS => return @intCast(std.os.fd_t, resp),
             // we was interrupted, try again

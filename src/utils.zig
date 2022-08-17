@@ -15,6 +15,32 @@ pub fn println(comptime fmt: []const u8, args: anytype) void {
     nosuspend _ = stderr.write("\n") catch return;
 }
 
+pub fn Option(comptime T:type) type {
+    return union(enum){
+        const Self = @This();
+        some: T,
+        none: void,
+
+        pub const None = Self {
+            .none = {}
+        };
+
+        pub inline fn toNative(self: Self) ?T {
+            return switch(self) {
+                .some => |val| val,
+                .none => null,
+            };
+        }
+        pub inline fn fromNative(opt: ?T) Self {
+            if (opt) |val| {
+                return Self { .some = val };
+            } else {
+                return Self.None;
+            }
+       }
+    };
+}
+
 pub fn Appender(comptime T: type) type {
     return struct {
         const Self = @This();

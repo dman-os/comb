@@ -19,6 +19,10 @@
 
 ## devlog
 
+### Upstream Issues
+
+- [Zig compiler bug surrounding optional const slices](https://github.com/ziglang/zig/issues/4907)
+
 ### IPC less design?
 
 That is, instead of talking to a deamon, clients use a library to interact with

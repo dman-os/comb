@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 pub const mod_utils = @import("utils.zig");
 pub const println = mod_utils.println;
 pub const dbg = mod_utils.dbg;
+pub const Option = mod_utils.Option;
 
 pub const mod_gram = @import("gram.zig");
 
@@ -30,6 +31,12 @@ pub fn main() !void {
 }
 
 fn fanotify_demo() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){
+        // .backing_allocator = fixed_a7r.allocator(),
+    };
+    defer _ = gpa.deinit();
+    var a7r = gpa.allocator();
+
     const FAN = mod_fanotify.FAN;
     const fd = blk: {
         const fd = try mod_fanotify.init(
@@ -71,6 +78,11 @@ fn fanotify_demo() !void {
             std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
             @panic("err on poll");
         }
+
+        var events = std.ArrayList(mod_fanotify.FanotifyEvent).init(a7r);
+        defer events.deinit();
+        const timestamp = std.time.timestamp();
+
         for (&pollfds) |pollfd| {
             if (
                 pollfd.revents == 0 
@@ -99,11 +111,120 @@ fn fanotify_demo() !void {
                 if (meta.vers != mod_fanotify.METADATA_VERSION) {
                     @panic("unexpected " ++ @typeName(mod_fanotify.event_metadata) ++ " version");
                 }
+                const event = eb: {
+                    // if event is this short
+                    if (meta.event_len == @as(c_uint, meta.metadata_len)) {
+                        // it's not reporting file handles
+                        // and we're not interested
+                        @panic("todo");
+                    } else {
+                        const fid_info = @intToPtr(
+                            *mod_fanotify.event_info_fid,
+                            @ptrToInt(meta_ptr) + @sizeOf(mod_fanotify.event_metadata)
+                        );
+                        const file_handle = &fid_info.handle;
+
+                        if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME) {
+                            const name_ptr = file_handle.file_name();
+                            const name = name_ptr[0..std.mem.len(name_ptr)];
+
+                            var dir_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+                            const dir = if(mod_fanotify.open_by_handle_at(
+                                std.os.AT.FDCWD,
+                                file_handle,
+                                std.os.O.PATH,
+                            )) |dir_fd| blk: {
+                                defer std.os.close(dir_fd);
+                                var fd_buf = [_]u8{0} ** 128;
+                                const fd_path = std.fmt.bufPrint(
+                                    &fd_buf,
+                                    "/proc/self/fd/{}", 
+                                    .{ dir_fd }
+                                ) catch @panic("so this happened");
+                                break :blk try std.fs.readLinkAbsolute(fd_path, &dir_buf);
+                            } else |err| switch(err) {
+                                mod_fanotify.OpenByHandleErr.StaleFileHandle => null,
+                                else => @panic("open_by_handle_at failed")
+                            };
+
+                            const dir_opt = if (dir) |val| 
+                                Option([]const u8) { .some = val }
+                            else Option([]const u8).None;
+
+                            break :eb try mod_fanotify.FanotifyEvent.init(
+                                a7r, 
+                                Option([]const u8){ .some = name }, 
+                                dir_opt,
+                                &meta, 
+                                timestamp
+                            );
+                        } else if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.FID)  {
+                            if(mod_fanotify.open_by_handle_at(
+                                std.os.AT.FDCWD,
+                                file_handle,
+                                std.os.O.PATH,
+                            )) |dir_fd| {
+                                defer std.os.close(dir_fd);
+                                var dir_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+                                var fd_buf = [_]u8{0} ** 128;
+                                const fd_path = std.fmt.bufPrint(
+                                    &fd_buf,
+                                    "/proc/self/fd/{}", 
+                                    .{ dir_fd }
+                                ) catch @panic("so this happened");
+                                const path = try std.fs.readLinkAbsolute(fd_path, &dir_buf);
+
+                                const name = std.fs.path.basename(path);
+                                const dir = std.fs.path.dirname(path) orelse "/"[0..];
+
+                                break :eb try mod_fanotify.FanotifyEvent.init(
+                                    a7r, 
+                                    Option([]const u8){ .some = name }, 
+                                    Option([]const u8){ .some = dir },
+                                    &meta, 
+                                    timestamp
+                                );
+                            } else |err| switch(err) {
+                                mod_fanotify.OpenByHandleErr.StaleFileHandle => 
+                                    break :eb try mod_fanotify.FanotifyEvent.init(
+                                        a7r, 
+                                        Option([]const u8).None, 
+                                        Option([]const u8).None,
+                                        &meta, 
+                                        timestamp
+                                    ),
+                                else => {
+                                    std.log.warn(
+                                        "open_by_handle_at failed with {} at {}",
+                                        .{ err, meta }
+                                    );
+                                    break :eb try mod_fanotify.FanotifyEvent.init(
+                                        a7r, 
+                                        Option([]const u8).None, 
+                                        Option([]const u8).None,
+                                        &meta, 
+                                        timestamp
+                                    );
+                                } 
+                            }
+                        } else {
+                            @panic("unexpected info type");
+                        }
+                    }
+                };
+                try events.append(event);
                 ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
                 left_bytes -= meta.event_len;
                 event_count += 1;
             }
-            std.log.info("{} events read this cycle", .{ event_count });
+            std.log.info("{} events read this cycle:", .{ event_count, });
+            for (events.items) |event, ii| {
+                std.log.info(
+                    "Event: {} at {} with mask {} from pid {}", 
+                    .{ ii, event.timestamp, event.mask, event.pid }
+                );
+                std.log.info("  - {s}/{s}", .{ event.dir, event.name });
+            }
         }
     }
 }
