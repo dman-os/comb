@@ -6,6 +6,7 @@ const mod_utils = @import("utils.zig");
 const println = mod_utils.println;
 const dbg = mod_utils.dbg;
 const Option = mod_utils.Option;
+const OptionStr = Option([]const u8);
 
 pub const FanotifyEvent = struct {
     const Self = @This();
@@ -18,8 +19,8 @@ pub const FanotifyEvent = struct {
     // avoid const optional slices: https://github.com/ziglang/zig/issues/4907
     pub fn init(
         a7r: std.mem.Allocator,
-        name: Option([]const u8), 
-        dir: Option([]const u8),
+        name: OptionStr,
+        dir: OptionStr,
         meta: *const event_metadata,
         timestamp: i64,
     ) !Self {
@@ -145,23 +146,23 @@ pub const FAN = struct {
         pub const ONDIR = 0x40000000;
     };
 
-    /// Listeners with different notification classes will receive events in the order 
+    /// Listeners with different notification classes will receive events in the order
     /// PRE_CONTENT,  CONTENT,  NOTIF.
     /// The order of notification for listeners in the same notification class is undefined.
     /// These are NOT bitwise flags.  Both bits are used together.
     pub const CLASS = enum (c_uint) {
-        /// This is the default value. It does not need to be specified. 
+        /// This is the default value. It does not need to be specified.
         /// This value only allows the receipt of events notifying that a file has
         /// been accessed. Permission decisions before the file is accessed are not possible.
         NOTIF = 0,
         /// This  value allows the receipt of events notifying that a file has
         /// been accessed and events for permission decisions if a file may be
-        ///  accessed. It is intended for event listeners that need to access 
+        ///  accessed. It is intended for event listeners that need to access
         ///  files when they already contain their final content.
         CONTENT = 0x04,
-        /// This  value allows the receipt of events notifying that a file has 
+        /// This  value allows the receipt of events notifying that a file has
         /// been accessed and events for permission decisions if a file may be
-        /// accessed.  It is intended for event listeners that need to access files 
+        /// accessed.  It is intended for event listeners that need to access files
         /// before they contain their final data.
         PRE_CONTENT = 0x08,
         // ALL_CLASS_BITS = @compileError("deprecated"),
@@ -175,13 +176,13 @@ pub const FAN = struct {
         pub const CLOEXEC = @as(c_uint, 0x01);
         /// Enable the nonblocking flag (O_NONBLOCK) for the file descriptor.
         pub const NONBLOCK = @as(c_uint, 0x02);
-        /// Remove the limit of 16384 events for the event queue. 
+        /// Remove the limit of 16384 events for the event queue.
         /// Use of this flag requires the CAP_SYS_ADMIN capability.
         pub const UNLIMITED_QUEUE = @as(c_uint, 0x10);
-        /// Remove the limit of 8192 marks. 
+        /// Remove the limit of 8192 marks.
         /// Use of this flag requires the CAP_SYS_ADMIN capability.
         pub const UNLIMITED_MARKS = @as(c_uint, 0x20);
-        /// Enable  generation  of audit log records about access mediation 
+        /// Enable  generation  of audit log records about access mediation
         /// performed by permission events.
         ///
         /// (since Linux 4.15)
@@ -191,7 +192,7 @@ pub const FAN = struct {
         /// Report pidfd for event->pid.
         /// TODO: flag undocumented in fanotify(7)
         pub const REPORT_PIDFD = @as(c_uint, 0x00000080);
-        
+
         /// Report thread ID (TID) instead of process ID (PID) in the pid field of the struct fanotify_event_metadata supplied
         ///
         /// (since Linux 4.20)
@@ -300,7 +301,7 @@ pub const event_info_header = extern struct {
 pub const event_info_fid = extern struct {
     hdr: event_info_header align(4),
     /// Treat this like dev_major/dev_minor fro statx
-    fsid: [2]c_int, 
+    fsid: [2]c_int,
     handle: file_handle,
     // pub fn handle(self: anytype) std.zig.c_translation.FlexibleArrayType(@TypeOf(self), u8) {
     //     const Intermediate = std.zig.c_translation.FlexibleArrayType(@TypeOf(self), u8);
@@ -317,7 +318,7 @@ pub const file_handle =  extern struct {
 
     pub fn file_name(self: @This()) [*:0] const u8 {
         return @intToPtr(
-            [*:0]u8, 
+            [*:0]u8,
             @ptrToInt(&self.f_handle) + @as(usize, self.handle_bytes)
         );
     }
@@ -347,20 +348,20 @@ pub const FanotifyInitErr = error {
     /// The number of fanotify groups for this user exceeds 128.
     /// or The per-process limit on the number of open file descriptors has been reached.
     ProcessFdQuotaExceeded,
-    /// This kernel does not implement fanotify_init().  The fanotify API is 
+    /// This kernel does not implement fanotify_init().  The fanotify API is
     /// available only  if  the  kernel  was configured with CONFIG_FANOTIFY.
     OperationNotSupported,
 } || std.os.UnexpectedError;
 
 /// Read `fanotify_init(2)`
 pub fn init(
-    class: FAN.CLASS, 
-    flags: c_uint, 
+    class: FAN.CLASS,
+    flags: c_uint,
     event_flags: c_uint,
 ) FanotifyInitErr!std.os.fd_t {
     const resp = std.os.linux.syscall2(
-        .fanotify_init, 
-        @enumToInt(class) | flags, 
+        .fanotify_init,
+        @enumToInt(class) | flags,
         event_flags
     );
     switch (std.os.errno(resp)) {
@@ -377,22 +378,22 @@ pub fn init(
 
 pub const FanotifyMarkErr = error {
     /// `path` is relative but dirfd is neither AT_FDCWD nor a valid file descriptor.
-    /// or 
-    /// The filesystem object indicated by dirfd and pathname does not exist.  This 
+    /// or
+    /// The filesystem object indicated by dirfd and pathname does not exist.  This
     /// error also occurs when trying to remove a mark from an object which is not marked.
     FileNotFound,
-    /// The fanotify file descriptor was opened with FAN_CLASS_NOTIF or the 
-    /// fanotify group identifies  filesystem objects  by  file  handles  and  
+    /// The fanotify file descriptor was opened with FAN_CLASS_NOTIF or the
+    /// fanotify group identifies  filesystem objects  by  file  handles  and
     /// mask  contains  a  flag  for permission events (FAN_OPEN_PERM or FAN_ACCESS_PERM).
     InvalidFlags,
-    /// The filesystem object indicated by pathname is not associated with a filesystem 
-    /// that supports fsid (e.g.,tmpfs(5)). 
-    /// or 
-    /// The object  indicated  by pathname is associated with a filesystem that does 
+    /// The filesystem object indicated by pathname is not associated with a filesystem
+    /// that supports fsid (e.g.,tmpfs(5)).
+    /// or
+    /// The object  indicated  by pathname is associated with a filesystem that does
     /// not support the encoding of file handles.
-    /// or 
-    ///  The filesystem object indicated by pathname resides within a filesystem 
-    ///  subvolume (e.g., btrfs(5)) which uses a different fsid than its root superblock.  
+    /// or
+    ///  The filesystem object indicated by pathname resides within a filesystem
+    ///  subvolume (e.g., btrfs(5)) which uses a different fsid than its root superblock.
     ///
     ///  This error can be returned only with an  fanotify  group that identifies filesystem objects by file handles.
     UnsupportedFS,
@@ -403,30 +404,30 @@ pub const FanotifyMarkErr = error {
     /// The number of fanotify groups for this user exceeds 128.
     /// or The per-process limit on the number of open file descriptors has been reached.
     ProcessFdQuotaExceeded,
-    /// The number of marks exceeds the limit of 8192 and the FAN_UNLIMITED_MARKS 
+    /// The number of marks exceeds the limit of 8192 and the FAN_UNLIMITED_MARKS
     /// flag was not specified when the fanotify file descriptor was created with fanotify_init(2).
     NoSpaceLeft,
     /// `flags` contains FAN_MARK_ONLYDIR, and dirfd and pathname do not specify a directory.
     NotDir,
-    /// This kernel does not implement fanotify_mark().  The fanotify API is 
+    /// This kernel does not implement fanotify_mark().  The fanotify API is
     /// available only  if  the  kernel  was configured with CONFIG_FANOTIFY.
     OperationNotSupported,
 } || std.os.UnexpectedError;
 
 /// Read `fanotify_mark(2)`
 pub fn mark(
-    fanotify_fd: std.os.fd_t, 
-    action: FAN.MARK.MOD, 
-    // target: FAN.MARK.TARGET, 
+    fanotify_fd: std.os.fd_t,
+    action: FAN.MARK.MOD,
+    // target: FAN.MARK.TARGET,
     flags: c_uint,
-    mask: c_uint, 
-    dir_fd: std.os.fd_t, 
+    mask: c_uint,
+    dir_fd: std.os.fd_t,
     path: [:0]const u8
 ) !void {
     const resp = std.os.linux.syscall5(
-        .fanotify_mark, 
+        .fanotify_mark,
         @bitCast(usize, @as(isize, fanotify_fd)),
-        @enumToInt(action) | flags, 
+        @enumToInt(action) | flags,
         mask,
         @bitCast(usize, @as(isize, dir_fd)),
         @ptrToInt(path.ptr),
@@ -458,14 +459,14 @@ pub const OpenByHandleErr = error {
 pub fn open_by_handle_at(
     mount_fd: std.os.fd_t,
     handle: *const file_handle,
-    flags: c_int, 
+    flags: c_int,
 ) OpenByHandleErr!std.os.fd_t {
     while (true) {
         const resp = std.os.linux.syscall3(
             .open_by_handle_at,
-            @bitCast(usize, @as(isize, mount_fd)), 
-            @ptrToInt(handle), 
-            @bitCast(usize, @as(isize, flags)), 
+            @bitCast(usize, @as(isize, mount_fd)),
+            @ptrToInt(handle),
+            @bitCast(usize, @as(isize, flags)),
         );
         switch (std.os.errno(resp)) {
             .SUCCESS => return @intCast(std.os.fd_t, resp),
@@ -506,10 +507,10 @@ pub const MountErr = error {
 
 /// Read the man page
 pub fn mount(
-    source: [*:0]const u8, 
-    dir: [*:0]const u8, 
-    fstype: ?[*:0]const u8, 
-    flags: u32, 
+    source: [*:0]const u8,
+    dir: [*:0]const u8,
+    fstype: ?[*:0]const u8,
+    flags: u32,
     data: usize
 ) MountErr!void {
     const resp = std.os.linux.mount(source, dir, fstype, flags, data);
@@ -528,14 +529,26 @@ const TestFanotify = struct {
     pub const TouchFn = fn (a7r: Allocator, dir: std.fs.Dir) anyerror!void;
 
     events: std.ArrayList(FanotifyEvent),
-    tmpfs_path: []u8,
+    tmpfs_path: [:0]u8,
+    tmp_dir: std.testing.TmpDir,
+    tmpfs_dir: std.fs.Dir,
 
     pub fn deinit(self: *Self, a7r: Allocator) void {
         for (self.events.items) |*evt| {
             evt.deinit(a7r);
         }
         self.events.deinit();
-        defer a7r.free(self.tmpfs_path);
+        self.tmpfs_dir.close();
+        const resp = std.os.linux.umount(self.tmpfs_path);
+        switch (std.os.errno(resp)) {
+            .SUCCESS => {},
+            else => |err| {
+                println("err: {}", .{ err });
+                @panic("umount failed");
+            },
+        }
+        a7r.free(self.tmpfs_path);
+        self.tmp_dir.cleanup();
     }
 
     pub fn run(
@@ -544,7 +557,6 @@ const TestFanotify = struct {
         touchFn: TouchFn,
     ) !Self {
         var tmp_dir = std.testing.tmpDir(.{});
-        defer tmp_dir.cleanup();
 
         const tmpfs_name = "tmpfs";
         try tmp_dir.dir.makeDir(tmpfs_name);
@@ -556,16 +568,8 @@ const TestFanotify = struct {
         };
 
         try mount("tmpfs", tmpfs_path, "tmpfs", 0, 0);
-        defer {
-            const resp = std.os.linux.umount(tmpfs_path);
-            switch (std.os.errno(resp)) {
-                .SUCCESS => {},
-                else => @panic("umount failed"),
-            }
-        }
 
         var tmpfs_dir = try tmp_dir.dir.openDir("tmpfs", .{});
-        defer tmpfs_dir.close();
 
         const Context = struct {
             const ContexSelf = @This();
@@ -630,16 +634,16 @@ const TestFanotify = struct {
                         };
                         defer std.os.close(fd);
 
-                        var pollfds = [_]std.os.pollfd{ 
+                        var pollfds = [_]std.os.pollfd{
                             std.os.pollfd {
                                 .fd = fd,
                                 .events = std.os.POLL.IN,
                                 .revents = 0,
-                            } 
+                            }
                         };
                         std.log.info("entering poll loop", .{});
                         var buf = [_]u8{0} ** 256;
-                        
+
                         // tell them we're ready to poll
                         ctx.listenReady.set();
                         // wait until they give us the heads up inorder to avoid
@@ -670,7 +674,7 @@ const TestFanotify = struct {
 
                             for (&pollfds) |pollfd| {
                                 if (
-                                    pollfd.revents == 0 
+                                    pollfd.revents == 0
                                     or (pollfd.revents & std.os.POLL.IN) == 0
                                 ) {
                                     continue;
@@ -684,7 +688,6 @@ const TestFanotify = struct {
                                 while (true) {
                                     const meta_ptr = @ptrCast(*const align(1) event_metadata, ptr);
                                     const meta = meta_ptr.*;
-
                                     if (
                                         left_bytes < @sizeOf(event_metadata)
                                         or left_bytes < @intCast(usize, meta.event_len)
@@ -697,108 +700,10 @@ const TestFanotify = struct {
                                     if (meta.vers != METADATA_VERSION) {
                                         @panic("unexpected " ++ @typeName(event_metadata) ++ " version");
                                     }
-                                    const event = eb: {
-                                        // if event is this short
-                                        if (meta.event_len == @as(c_uint, meta.metadata_len)) {
-                                            // it's not reporting file handles
-                                            // and we're not interested
-                                            @panic("todo");
-                                        } else {
-                                            const fid_info = @intToPtr(
-                                                *event_info_fid,
-                                                @ptrToInt(meta_ptr) + @sizeOf(event_metadata)
-                                            );
-                                            const handle = &fid_info.handle;
 
-                                            if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME) {
-                                                const name_ptr = handle.file_name();
-                                                const name = name_ptr[0..std.mem.len(name_ptr)];
+                                    if (try parseEvent(alloc8or, timestamp, meta_ptr)) |event| 
+                                        try ctx.events.append(event);
 
-                                                var dir_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
-                                                const dir = if(open_by_handle_at(
-                                                    std.os.AT.FDCWD,
-                                                    handle,
-                                                    std.os.O.PATH,
-                                                )) |dir_fd| blk: {
-                                                    defer std.os.close(dir_fd);
-                                                    var fd_buf = [_]u8{0} ** 128;
-                                                    const fd_path = std.fmt.bufPrint(
-                                                        &fd_buf,
-                                                        "/proc/self/fd/{}", 
-                                                        .{ dir_fd }
-                                                    ) catch @panic("so this happened");
-                                                    break :blk try std.fs.readLinkAbsolute(fd_path, &dir_buf);
-                                                } else |err| switch(err) {
-                                                    OpenByHandleErr.StaleFileHandle => null,
-                                                    else => @panic("open_by_handle_at failed")
-                                                };
-
-                                                const dir_opt = if (dir) |val| 
-                                                    Option([]const u8) { .some = val }
-                                                else Option([]const u8).None;
-
-                                                break :eb try FanotifyEvent.init(
-                                                    alloc8or, 
-                                                    Option([]const u8){ .some = name }, 
-                                                    dir_opt,
-                                                    &meta, 
-                                                    timestamp
-                                                );
-                                            } else if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.FID)  {
-                                                if(open_by_handle_at(
-                                                    std.os.AT.FDCWD,
-                                                    handle,
-                                                    std.os.O.PATH,
-                                                )) |dir_fd| {
-                                                    defer std.os.close(dir_fd);
-                                                    var dir_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
-                                                    var fd_buf = [_]u8{0} ** 128;
-                                                    const fd_path = std.fmt.bufPrint(
-                                                        &fd_buf,
-                                                        "/proc/self/fd/{}", 
-                                                        .{ dir_fd }
-                                                    ) catch @panic("so this happened");
-                                                    const path = try std.fs.readLinkAbsolute(fd_path, &dir_buf);
-
-                                                    const name = std.fs.path.basename(path);
-                                                    const dir = std.fs.path.dirname(path) orelse "/"[0..];
-
-                                                    break :eb try FanotifyEvent.init(
-                                                        alloc8or, 
-                                                        Option([]const u8){ .some = name }, 
-                                                        Option([]const u8){ .some = dir },
-                                                        &meta, 
-                                                        timestamp
-                                                    );
-                                                } else |err| switch(err) {
-                                                    OpenByHandleErr.StaleFileHandle => 
-                                                        break :eb try FanotifyEvent.init(
-                                                            alloc8or, 
-                                                            Option([]const u8).None, 
-                                                            Option([]const u8).None,
-                                                            &meta, 
-                                                            timestamp
-                                                        ),
-                                                    else => {
-                                                        std.log.warn(
-                                                            "open_by_handle_at failed with {} at {}",
-                                                            .{ err, meta }
-                                                        );
-                                                        break :eb try FanotifyEvent.init(
-                                                            alloc8or, 
-                                                            Option([]const u8).None, 
-                                                            Option([]const u8).None,
-                                                            &meta, 
-                                                            timestamp
-                                                        );
-                                                    } 
-                                                }
-                                            } else {
-                                                @panic("unexpected info type");
-                                            }
-                                        }
-                                    };
-                                    try ctx.events.append(event);
                                     ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
                                     left_bytes -= meta.event_len;
                                     event_count += 1;
@@ -806,7 +711,7 @@ const TestFanotify = struct {
                                 // std.log.info("{} events read this cycle:", .{ event_count, });
                                 // for (events.items) |event, ii| {
                                 //     std.log.info(
-                                //         "Event: {} at {} with mask {} from pid {}", 
+                                //         "Event: {} at {} with mask {} from pid {}",
                                 //         .{ ii, event.timestamp, event.mask, event.pid }
                                 //     );
                                 //     std.log.info("  - {s}/{s}", .{ event.dir, event.name });
@@ -842,15 +747,135 @@ const TestFanotify = struct {
 
         // @call(.{}, testFn, .{ a7r, ctx.events, })
         return Self {
+            .tmp_dir = tmp_dir,
+            .tmpfs_dir = tmpfs_dir,
             .tmpfs_path = tmpfs_path,
             .events = out,
         };
     }
 };
 
+inline fn parseEvent(
+    a7r: Allocator,
+    timestamp: i64,
+    meta_ptr: *const align(1) event_metadata
+) !?FanotifyEvent {
+    const meta = meta_ptr.*;
+    // if event is this short
+    if (meta.event_len == @as(c_uint, meta.metadata_len)) {
+        // it's not reporting file handles
+        // and we're not interested
+        @panic("todo");
+    } else {
+        const fid_info = @intToPtr(
+            *event_info_fid,
+            @ptrToInt(meta_ptr) + @sizeOf(event_metadata)
+        );
+        const handle = &fid_info.handle;
 
-test "fanotify_create" {
-    // if (true) return error.SkipZigTest;
+        if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME) {
+            const name = blk: {
+                const name_ptr = handle.file_name();
+                break :blk name_ptr[0..std.mem.len(name_ptr)];
+            };
+
+            var dir_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+            const dir = if(open_by_handle_at(
+                std.os.AT.FDCWD,
+                handle,
+                std.os.O.PATH,
+            )) |dir_fd| blk: {
+                defer std.os.close(dir_fd);
+                var fd_buf = [_]u8{0} ** 128;
+                const fd_path = std.fmt.bufPrint(
+                    &fd_buf,
+                    "/proc/self/fd/{}",
+                    .{ dir_fd }
+                ) catch @panic("so this happened");
+                break :blk try std.fs.readLinkAbsolute(fd_path, &dir_buf);
+            } else |err| switch(err) {
+                OpenByHandleErr.StaleFileHandle => null,
+                else => @panic("open_by_handle_at failed")
+            };
+
+            const dir_opt = if (dir) |val|
+                OptionStr { .some = val }
+            else OptionStr.None;
+
+            return try FanotifyEvent.init(
+                a7r,
+                OptionStr{ .some = name },
+                dir_opt,
+                &meta,
+                timestamp
+            );
+        } else if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.FID)  {
+            if(open_by_handle_at(
+                std.os.AT.FDCWD,
+                handle,
+                std.os.O.PATH,
+            )) |dir_fd| {
+                defer std.os.close(dir_fd);
+                var dir_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+                var fd_buf = [_]u8{0} ** 128;
+                const fd_path = std.fmt.bufPrint(
+                    &fd_buf,
+                    "/proc/self/fd/{}",
+                    .{ dir_fd }
+                ) catch @panic("so this happened");
+                const path = try std.fs.readLinkAbsolute(fd_path, &dir_buf);
+
+                const name = std.fs.path.basename(path);
+                const dir = std.fs.path.dirname(path) orelse "/"[0..];
+
+                return try FanotifyEvent.init(
+                    a7r,
+                    OptionStr{ .some = name },
+                    OptionStr{ .some = dir },
+                    &meta,
+                    timestamp
+                );
+            } else |err| switch(err) {
+                OpenByHandleErr.StaleFileHandle =>
+                    // FIXME: move filtering to a higher abstraction
+                    // we explicitly filter out the numerous ATTRIB events with no
+                    // `name` or `dir` attached
+                    return if (meta.mask == @as(c_ulonglong, FAN.EVENT.ATTRIB)) 
+                        null
+                    else try FanotifyEvent.init(
+                        a7r, 
+                        OptionStr.None, 
+                        OptionStr.None, 
+                        &meta, 
+                        timestamp
+                    ),
+                else => {
+                    std.log.warn(
+                        "open_by_handle_at failed with {} at {}",
+                        .{ err, meta }
+                    );
+                    @panic("open_by_handle_at failed");
+                    // break :eb try FanotifyEvent.init(
+                    //     alloc8or,
+                    //     OptionStr.None,
+                    //     OptionStr.None,
+                    //     &meta,
+                    //     timestamp
+                    // );
+                }
+            }
+        } else {
+            @panic("unexpected info type");
+        }
+    }
+}
+
+fn isElevated() bool {
+    return std.os.linux.geteuid() == 0;
+}
+
+test "fanotify_create_file" {
+    if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const actions = struct {
         fn prePoll(a7r: Allocator, dir: std.fs.Dir) !void {
@@ -861,7 +886,6 @@ test "fanotify_create" {
             _ = a7r;
             var file = try dir.createFile(file_name, .{});
             defer file.close();
-            // println("got here", .{});
         }
     };
     var a7r = std.testing.allocator;
@@ -870,6 +894,106 @@ test "fanotify_create" {
 
     try std.testing.expectEqual(@as(usize, 1), res.events.items.len);
     try std.testing.expectEqual(@as(c_ulonglong, FAN.EVENT.CREATE), res.events.items[0].mask);
+    try std.testing.expectEqualSlices(
+        u8,
+        file_name,
+        res.events.items[0].name orelse @panic("name was null")
+    );
+}
+
+test "fanotify_create_dir" {
+    if (!isElevated()) return error.SkipZigTest;
+    const file_name = "wheredidyouparkthecar";
+    const actions = struct {
+        fn prePoll(a7r: Allocator, dir: std.fs.Dir) !void {
+            _ = a7r;
+            _ = dir;
+        }
+        fn touch(a7r: Allocator, dir: std.fs.Dir) !void {
+            _ = a7r;
+            try dir.makeDir(file_name);
+        }
+    };
+    var a7r = std.testing.allocator;
+    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    defer res.deinit(a7r);
+
+    try std.testing.expectEqual(@as(usize, 1), res.events.items.len);
+    try std.testing.expectEqual(
+        @as(c_ulonglong, FAN.EVENT.CREATE | FAN.EVENT.ONDIR),
+        res.events.items[0].mask
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        file_name,
+        res.events.items[0].name orelse @panic("name was null")
+    );
+}
+
+test "fanotify_delete_file" {
+    if (!isElevated()) return error.SkipZigTest;
+    const file_name = "wheredidyouparkthecar";
+    const actions = struct {
+        fn prePoll(a7r: Allocator, dir: std.fs.Dir) !void {
+            _ = a7r;
+            var file = try dir.createFile(file_name, .{ });
+            defer file.close();
+        }
+        fn touch(a7r: Allocator, dir: std.fs.Dir) !void {
+            _ = a7r;
+            try dir.deleteFile(file_name);
+        }
+    };
+    var a7r = std.testing.allocator;
+    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    defer res.deinit(a7r);
+
+    // println("{any}", .{ res.events.items });
+    const evt_idx = res.events.items.len - 1;
+    try std.testing.expectEqual(
+        @as(c_ulonglong, FAN.EVENT.DELETE),
+        // sometimes, the delete and create events are merged into one
+        // so just check that the delte bit is set
+        @as(c_ulonglong, FAN.EVENT.DELETE) & res.events.items[evt_idx].mask,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        file_name,
+        res.events.items[evt_idx].name orelse @panic("name was null")
+    );
+}
+
+test "fanotify_delete_dir" {
+    if (!isElevated()) return error.SkipZigTest;
+    const dir_name = "wheredidyouparkthecar";
+    const actions = struct {
+        fn prePoll(a7r: Allocator, dir: std.fs.Dir) !void {
+            _ = a7r;
+            try dir.makeDir(dir_name);
+        }
+        fn touch(a7r: Allocator, dir: std.fs.Dir) !void {
+            _ = a7r;
+            try dir.deleteDir(dir_name);
+        }
+    };
+    var a7r = std.testing.allocator;
+    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    defer res.deinit(a7r);
+
+    // println("{any}", .{ res.events.items });
+    const evt_idx = res.events.items.len - 1;
+    try std.testing.expectEqual(
+        @as(c_ulonglong, FAN.EVENT.DELETE | FAN.EVENT.ONDIR),
+        // sometimes, the delete and create events are merged into one
+        // so just check that the delte bit is set
+        @as(c_ulonglong, FAN.EVENT.DELETE | FAN.EVENT.ONDIR)
+        & res.events.items[evt_idx].mask,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        dir_name,
+        res.events.items[evt_idx].name orelse @panic("name was null")
+    );
 }
 
 // fn getTestFanotifyEvent(a7r: Allocator, name: []const u8, kind: u128) !FanotifyEvent {
