@@ -146,7 +146,7 @@ pub const Tree = struct {
             Allocator.Error || 
             std.fs.File.OpenError || 
             std.fs.File.MetadataError || 
-            std.fs.Dir.Iterator.Error ||
+            std.fs.IterableDir.Iterator.Error ||
             std.os.UnexpectedError;
 
         fn init(allocator: Allocator, limit: usize) @This() {
@@ -210,7 +210,7 @@ pub const Tree = struct {
             parent_dev: u64, 
         ) Error!void {
             // std.debug.print("error happened at path = {s}\n", .{path});
-            var dir = parent.openDir(path,.{ .iterate = true, .no_follow = true }) catch |err| {
+            var iterable_dir = parent.openIterableDir(path, .{ .no_follow = true }) catch |err| {
                 switch(err){
                     std.fs.Dir.OpenError.AccessDenied => {
                         const parent_path = try self.weaver.pathOf(
@@ -226,7 +226,8 @@ pub const Tree = struct {
                     else => return err,
                 }
             };
-            defer dir.close();
+            defer iterable_dir.close();
+            var dir = iterable_dir.dir;
 
             const dev = blk: {
                 const meta = try dir.metadata();
@@ -266,7 +267,7 @@ pub const Tree = struct {
             };
             const dir_id = self.tree.list.items.len - 1;
 
-            var it = dir.iterate();
+            var it = iterable_dir.iterate();
             while (self.remaining > 0) {
                 // handle the error first
                 if (it.next()) |next| {
@@ -315,7 +316,7 @@ pub const Tree = struct {
                         });
                     }
                 } else |err| switch (err) {
-                    std.fs.Dir.Iterator.Error.AccessDenied => {
+                    std.fs.IterableDir.Iterator.Error.AccessDenied => {
                         const parent_path = try self.weaver.pathOf(
                             self.tree.allocator, 
                             self.tree,

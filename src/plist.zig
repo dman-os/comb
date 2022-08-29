@@ -347,17 +347,16 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
         pub fn insert(self: *Self, allocator: Allocator, id: I, name: []const u8, delimiters: []const u8) !void {
             self.cache.clearRetainingCapacity();
 
-            var appender = blk: {
-                const curry = struct {
-                    map: *std.AutoHashMapUnmanaged(GramPos, void),
-                    allocator: Allocator,
+            const curry = struct {
+                map: *std.AutoHashMapUnmanaged(GramPos, void),
+                allocator: Allocator,
 
-                    fn append(this: *@This(), item: GramPos) !void {
-                        try this.map.put(this.allocator, item, {});
-                    }
-                };
-                break :blk Appender(GramPos).new(&curry{ .map = &self.cache, .allocator = allocator }, curry.append);
+                fn append(this: *@This(), item: GramPos) !void {
+                    try this.map.put(this.allocator, item, {});
+                }
             };
+            var my_curry = curry{ .map = &self.cache, .allocator = allocator };
+            var appender = Appender(GramPos).new(&my_curry, curry.append);
             try mod_gram.grammer(gram_len, name, true, delimiters, appender);
 
             var it = self.cache.keyIterator();

@@ -576,9 +576,9 @@ const TestFanotify = struct {
             touch: TouchFn,
 
             doDone: std.Thread.ResetEvent = .{},
-            pollDone: std.Thread.ResetEvent = .{},
-            startPoll: std.Thread.ResetEvent = .{},
-            pollReady: std.Thread.ResetEvent = .{},
+            listenDone: std.Thread.ResetEvent = .{},
+            startListen: std.Thread.ResetEvent = .{},
+            listenReady: std.Thread.ResetEvent = .{},
             events: *std.ArrayList(FanotifyEvent),
 
             doErr: ?anyerror = null,
@@ -590,9 +590,9 @@ const TestFanotify = struct {
                     fn actual(ctx: *ContexSelf, alloc8or: Allocator) !void {
                         try @call(.{}, ctx.prePollTouch, .{ alloc8or, ctx.dir });
                         // make sure they're ready to poll before you start doing shit
-                        ctx.pollReady.wait();
+                        ctx.listenReady.wait();
                         // give them the heads up to start polling
-                        ctx.startPoll.set();
+                        ctx.startListen.set();
                         try @call(.{}, ctx.touch, .{ alloc8or, ctx.dir });
                     }
                 };
@@ -602,7 +602,7 @@ const TestFanotify = struct {
             }
 
             fn listenFn(ctxOuter: *ContexSelf, alloc8orOuter: Allocator) void {
-                defer ctxOuter.pollDone.set();
+                defer ctxOuter.listenDone.set();
                 const inner = struct {
                     fn actual(ctx: *ContexSelf, alloc8or: Allocator) !void {
                         const fd = blk: {
@@ -641,25 +641,29 @@ const TestFanotify = struct {
                         var buf = [_]u8{0} ** 256;
                         
                         // tell them we're ready to poll
-                        ctx.pollReady.set();
+                        ctx.listenReady.set();
                         // wait until they give us the heads up inorder to avoid
                         // catching events they don't want us seeing
-                        ctx.startPoll.wait();
+                        ctx.startListen.wait();
                         var breakOnNext = false;
                         while (true) {
                             if (breakOnNext) break;
                             if (ctx.doDone.isSet()) {
                                 // poll at least one cycle after they're done
-                                // in case they give set `startPoll` and `finishPoll`
+                                // in case they give set `startListen` and `finishPoll`
                                 // before we get to run
                                 breakOnNext = true;
                             }
                             // println("looping", .{});
-                            const poll_num = try std.os.poll(&pollfds, -1);
+
+                            // set timeout to zero to avoid polling forver incase
+                            // we start polling just before they set `doDone`
+                            const poll_num = try std.os.poll(&pollfds, 0);
 
                             if (poll_num < 1) {
-                                std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
-                                @panic("err on poll");
+                                continue;
+                                // std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
+                                // @panic("err on poll");
                             }
 
                             const timestamp = std.time.timestamp();
@@ -831,7 +835,7 @@ const TestFanotify = struct {
         listen_thread.detach();
 
         ctx.doDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for do");
-        ctx.pollDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for listen");
+        ctx.listenDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for listen");
 
         if (ctx.doErr) |err| return err;
         if (ctx.listenErr) |err| return err;

@@ -291,9 +291,18 @@ test "grammer.trigram" {
     inline for (table) |case| {
         var list = std.ArrayList(GramPos(3)).init(std.testing.allocator);
         defer list.deinit();
-        try grammer(3, case.string, case.boundary_grams, &std.ascii.spaces, Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append));
+        try grammer(
+            3, 
+            case.string, 
+            case.boundary_grams, 
+            &std.ascii.spaces, 
+            Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append)
+        );
         std.testing.expectEqualSlices(GramPos(3), case.expected, list.items) catch |err| {
-            std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, list.items });
+            std.debug.print(
+                "\nerror on {s}\n{any}\n !=\n {any}\n", 
+                .{ case.name, case.expected, list.items }
+            );
             return err;
         };
     }
@@ -385,11 +394,20 @@ test "grammer.quadgram" {
         } },
     };
     inline for (table) |case| {
-        var arr = std.ArrayList(GramPos(4)).init(std.testing.allocator);
-        defer arr.deinit();
-        try grammer(4, case.string, case.boundary_grams, &std.ascii.spaces, Appender(GramPos(4)).new(&arr, std.ArrayList(GramPos(4)).append));
-        std.testing.expectEqualSlices(GramPos(4), case.expected, arr.items) catch |err| {
-            std.debug.print("\nerror on {s}\n{s}\n !=\n {s}\n", .{ case.name, case.expected, arr.items });
+        var list = std.ArrayList(GramPos(4)).init(std.testing.allocator);
+        defer list.deinit();
+        try grammer(
+            4, 
+            case.string, 
+            case.boundary_grams, 
+            &std.ascii.spaces, 
+            Appender(GramPos(4)).new(&list, std.ArrayList(GramPos(4)).append)
+        );
+        std.testing.expectEqualSlices(GramPos(4), case.expected, list.items) catch |err| {
+            std.debug.print(
+                "\nerror on {s}\n{any}\n !=\n {any}\n", 
+                .{ case.name, case.expected, list.items }
+            );
             return err;
         };
     }
