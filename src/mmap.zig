@@ -258,10 +258,7 @@ pub const MmapPager = struct {
 
     pub fn deinit(self: *Self) void {
         if (self.config.deinit_clean_up_file) {
-            var fd_buf = [_]u8{0} ** 128;
-            const fd_path = std.fmt.bufPrint(&fd_buf, "/proc/self/fd/{}", .{ self.backing_file.handle }) catch @panic("so this happened");
-            var buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
-            if (std.fs.readLinkAbsolute(fd_path, &buf)) |actual_path| {
+            if (mod_utils.fdPath(self.backing_file.handle)) |actual_path| {
                 self.backing_file.close();
                 std.fs.deleteFileAbsolute(actual_path) catch |err|{
                     std.log.warn("error deleting file  when trying to remove mmap file: {}",. { err });

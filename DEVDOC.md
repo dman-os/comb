@@ -13,7 +13,7 @@
 ### Features
 
 - [ ] Low resource footprint
-- [ ] Current TM
+- [ ] Current (TM)
 - [ ] CLI client
 - [ ] IPC interface
 
@@ -77,3 +77,11 @@ After some examining, it turns out that the current apporoach and direction was
 more than sufficent. All I had to do was add a stricter constraint that any access
 to swapped memory has to be explicity swappedIn/out. There's no way to safely
 abstract this away from high level users.
+
+### FAN_EVENT_MODIFY
+
+...are emitted anytime a file is written to and as you can imagine are supernumerous. 
+We'll be needing a scheme to combine them for over a span of time if not options 
+for completely disabling them erstwhile we find ourselves syscalling and queriying 
+against the index each time we catch one.
+

@@ -102,6 +102,22 @@ test "Appender.set" {
     }
 }
 
+threadlocal var pathBuf: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+/// Returns the absolute path of the given file handle. Allocate the returned
+/// slice to heap before next usage of this function on the same thread or woe be u.
+pub fn fdPath(fd: std.os.fd_t) ![]const u8 {
+    // const prefix = "/proc/self/fd/";
+    // var fd_buf = prefix ++ ([_]u8{0} ** (128 - prefix.len));
+    // var fbs = std.io.fixedBufferStream(&fd_buf[prefix.len..]);
+    // std.fmt.formatInt(fd, 10, .lower, .{}, fbs.writer()) catch unreachable;
+    // const fd_path = fd_buf[0..prefix.len + fbs.pos];
+    // return std.fs.readLinkAbsolute(fd_path, &pathBuf);
+
+    var fd_buf = [_]u8{0} ** 128;
+    const fd_path = std.fmt.bufPrint(&fd_buf, "/proc/self/fd/{}", .{ fd }) catch unreachable;
+    return std.fs.readLinkAbsolute(fd_path, &pathBuf);
+}
+
 // fn Trait(
 //     comptime required: []type,
 //     // comptime required: fn (type) type,

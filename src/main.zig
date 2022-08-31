@@ -26,8 +26,9 @@ pub const mod_fanotify = @import("fanotify.zig");
 
 pub fn main() !void {
     // try in_mem();
-    try swapping();
+    // try swapping();
     // try fanotify_demo();
+    try mod_fanotify.demo();
 }
 
 fn swapping () !void {

@@ -259,6 +259,7 @@ const Index = struct {
     };
 
     comptime {
+        // FIXME: check for bitsize too
         // TODO: THiS gets fucked if usize bytes are above 255
         if (@sizeOf(Id) != @sizeOf(u32)) {
             var buf = [_]u8{0} ** 64;
