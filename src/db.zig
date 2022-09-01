@@ -12,6 +12,8 @@ const FsEntry = mod_treewalking.FsEntry;
 const mod_mmap = @import("mmap.zig");
 const SwapList = mod_mmap.SwapList;
 const Ptr = mod_mmap.SwapAllocator.Ptr;
+const Pager = mod_mmap.Pager;
+const SwapAllocator = mod_mmap.SwapAllocator;
 
 const mod_plist = @import("plist.zig");
 
@@ -74,8 +76,8 @@ pub const Database = struct {
     config: Config,
     /// The heap allocator.
     ha7r: Allocator,
-    sa7r: mod_mmap.SwapAllocator,
-    pager: mod_mmap.Pager,
+    sa7r: SwapAllocator,
+    pager: Pager,
     /// Our actual big list.
     table: SwapList(Entry),
     meta: SwapList(RowMeta),
@@ -84,16 +86,16 @@ pub const Database = struct {
 
     pub fn init(
         ha7r: Allocator, 
-        pager: mod_mmap.Pager, 
-        sa7r: mod_mmap.SwapAllocator,
+        pager: Pager, 
+        sa7r: SwapAllocator,
         config: Config,
     ) Self {
         var self = Self {
             .ha7r = ha7r,
             .sa7r = sa7r,
             .pager = pager,
-            .table = SwapList(Entry).init(pager.pageSize()),
             .meta = SwapList(RowMeta).init(pager.pageSize()),
+            .table = SwapList(Entry).init(pager.pageSize()),
             .free_slots = FreeSlots.init(ha7r, .{}),
             .config = config,
         };
@@ -113,6 +115,21 @@ pub const Database = struct {
         self.plist.deinit(self.ha7r, self.sa7r, self.pager);
     }
 
+    fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
+        try self.table.set(
+            self.sa7r, 
+            self.pager, 
+            idx, 
+            entry
+        );
+    }
+
+    fn appendEntry(self: *Self, entry: Entry) !void {
+        try self.table.append(
+            self.ha7r, self.sa7r, self.pager, entry 
+        );
+    }
+
     /// Add an entry to the database.
     pub fn file_created(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         // clone the entry but store the name on the swap this time
@@ -125,7 +142,7 @@ pub const Database = struct {
             var row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
             defer self.meta.swapOut(self.sa7r, self.pager, id.id);
 
-            try self.table.set(self.sa7r, self.pager, id.id, swapped_entry);
+            try self.setAtIdx(id.id, swapped_entry);
 
             row.gen += 1;
             row.free = false;
@@ -142,7 +159,7 @@ pub const Database = struct {
             // TODO: this shit
             errdefer _ = self.meta.pop(self.sa7r, self.pager) catch unreachable;
 
-            try self.table.append(self.ha7r, self.sa7r, self.pager, swapped_entry);
+            try self.appendEntry(swapped_entry);
 
             break :blk Id {
                 .id = @intCast(u24, idx),
@@ -375,3 +392,139 @@ test "Database.usage" {
     defer sa7r.swapOut(ret.name);
     try std.testing.expectEqualSlices(u8, entry.name, dbName);
 }
+
+// pub const ColumnarDatabase = struct {
+//     const Self = @This();
+//
+//     /// Represents a single file system object.
+//     pub const Entry = FsEntry(Id, Ptr);
+//
+//     /// An enum identifying a column
+//     pub const Column = std.meta.FieldEnum(Entry);
+//
+//     fn ColumnType(field: Column) type {
+//         return std.meta.fieldInfo(Entry, field).field_type;
+//     }
+//     /// Metadata about the columns in sliceform for ergonomic "foreaching"
+//     const columns = blk: { 
+//         const ColumnDeets = struct {
+//             column: Column,
+//             // type: type,
+//         };
+//         const fields = std.meta.fields(Entry);
+//         var cols: [fields.len]ColumnDeets = undefined;
+//         inline for (fields) |info, ii| {
+//             cols[ii] = ColumnDeets {
+//                 .column = std.enums.nameCast(Column, info.name),
+//                 // .type = info.field_type,
+//             };
+//         }
+//         break :blk cols; 
+//     };
+//
+//     fn ColumnStore(comptime T: type) type {
+//         return struct {
+//             list: SwapList(T),
+//
+//             pub fn init(page_size: usize) @This() {
+//                 return @This() {
+//                     .list = SwapList(T).init(page_size),
+//                 };
+//             }
+//
+//             pub fn deinit(
+//                 self: *@This(),
+//                 ha7r: Allocator,
+//                 sa7r: SwapAllocator,
+//                 pager: Pager
+//             ) void {
+//                 self.list.deinit(ha7r, sa7r, pager);
+//             }
+//         };
+//     }
+//
+//     const ErasedColumnStore = struct {
+//         ptr: *anyopaque,
+//         column: Column,
+//
+//         pub fn init(comptime column: Column, ha7r: Allocator, page_size: usize) !@This() {
+//             const Store = ColumnStore(ColumnType(column));
+//             var ptr = try ha7r.create(ColumnStore(ColumnType(column)));
+//             ptr.* = Store.init(page_size);
+//             return @This() {
+//                 .ptr = ptr,
+//                 .column = column,
+//             };
+//         }
+//         pub fn deinit(
+//             self: *@This(), 
+//             comptime column: Column,
+//             ha7r: Allocator,
+//             sa7r: SwapAllocator,
+//             pager: Pager
+//         ) void {
+//             self.cast(column).deinit(ha7r, sa7r, pager);
+//             ha7r.destroy(self.ptr);
+//         }
+//
+//         pub inline fn cast(self: @This(), comptime column: Column) *ColumnStore(ColumnType(column)) {
+//             std.debug.assert(column == self.column);
+//             var aligned = @alignCast(@alignOf(*ColumnStore(ColumnType(column))), self.ptr);
+//             return @ptrCast(*ColumnStore(ColumnType(column)), aligned);
+//         }
+//     };
+//
+//     // const Table = blk: {
+//     //     break :blk @Type(std.builtin.Type{ 
+//     //         .Struct = .{
+//     //             .layout = .Auto,
+//     //             .decls = &.{}
+//     //         }
+//     //     });
+//     // };
+//     const Table = std.EnumArray(Column, ErasedColumnStore);
+//     table: Table,
+//
+//     pub fn init() Self {
+//         return Self {
+//             .table = blk: {
+//                 var table = Table.initUndefined();
+//                 inline for (columns) |col| {
+//                     self.table.set(
+//                         col.column, 
+//                         try ErasedColumnStore.init(col.column, self.ha7r, pager.pageSize())
+//                     );
+//                 }
+//                 break :blk table;
+//             },
+//         };
+//     }
+//
+//     pub fn deinit(self: *Self) void {
+//         inline for (columns) |col| {
+//             self.table.getPtr(col.column).deinit(
+//                 col.column,
+//                 self.ha7r, self.sa7r, self.pager,
+//             );
+//         }
+//     }
+//
+//     fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
+//         inline for (columns) |col| {
+//             try self.table.getPtr(col.column).cast(col.column).list.set(
+//                 self.sa7r, 
+//                 self.pager, 
+//                 idx, 
+//                 @field(entry, @tagName(col.column))
+//             );
+//         }
+//     }
+//
+//     fn appendEntry(self: *Self, entry: Entry) !void {
+//         inline for (columns) |col| {
+//             try self.table.getPtr(col.column).cast(col.column).list.append(
+//                 self.ha7r, self.sa7r, self.pager, @field(entry, @tagName(col.column))
+//             );
+//         }
+//     }
+// };

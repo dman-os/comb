@@ -1,7 +1,8 @@
 //! TODO: remove dependence on heap allocator
 //! FIXME: none of these are threadsafe
-//! FIXME: this is too complex. Get rid of Pager and just use the SwapAllocator
-//! -- If we were distentangle `SwapList` and `Pager`, we can make the latter private.
+//! FIXME: this is too complex. Pager + SwapAllocator combo seem superfluous.
+//! -- If we were distentangle `SwapList` and `Pager`, it being the primary
+//!    consumer of most of these types, we can make the latter private.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1566,7 +1567,7 @@ test "PagingSwapAllocator.usage" {
     }
 }
 
-/// A general prurpos array list using manking use of pages for a `Pager`
+/// A general prurpos array list making use of pages from a `Pager`
 /// but falling back to a `SwapAllocator` if size is still under a page.
 /// This allows multiple lists sharing the same `SwapAllocator` to share a 
 /// page.
@@ -1595,6 +1596,7 @@ pub fn SwapList(comptime T: type) type {
         per_page: usize,
 
         len: usize = 0,
+        /// The `SwapAllocator` allocation we make use until we overflow a single page.
         small_list: ?SmallList = null,
         pages: std.ArrayListUnmanaged(PageNo) = .{},
 
@@ -1882,3 +1884,70 @@ test "SwapList.usage" {
         }
     }
 }
+
+// /// An array list that stores the items using a `SwapAllocator`.
+// pub fn SwapListSimple(comptime T: type) type {
+//     return struct { const Self = @This(); };
+// }
+//
+// /// A SwapList that doesn't make use of the heap.
+// /// Stores the list metadata using a `SwapListSimple` until it overflows a page, 
+// /// then uses an instance of itself to store the list metadata. 
+// /// This'll add one extra page `swapIn` operation per metadata storage mesa-levels
+// /// used but an LRU cached pager should help here.
+// pub fn SwapListUltraPetite(comptime T: type) type {
+//     return struct {
+//         const Self = @This();
+//         pub const ListHeader = struct {
+//         };
+//     };
+// }
+// /// Swapping version of `std.MultiArrayList`.
+// pub fn MultiSwapList(comptime T: type) type {
+//     return struct {
+//         const Self = @This();
+//         const fields = std.meta.fields(T);
+//
+//         pub const Field = std.meta.FieldEnum(T);
+//         fn FieldType(field: Field) type {
+//             return std.meta.fieldInfo(T, field).field_type;
+//         }
+//
+//         pub const Config = struct {
+//             page_size: usize = std.mem.page_size,
+//             /// the page count at which we'd be manually managing pages 
+//             /// instead of using the `SwapAllocator`
+//             page_out_threshold: usize = blk: {
+//                 // do fancy pants heurstic, we don't want to wait until we have 
+//                 // enough items for say 20 pages until we...page out
+//                 break :blk fields.len;
+//             },
+//         };
+//
+//         const SmallList = struct {
+//             ptr: SwapAllocator.Ptr,
+//             len: usize,
+//         };
+//
+//         config: Config,
+//         len: usize = 0,
+//         small_list: ?SmallList = null,
+//         pages: std.ArrayListUnmanaged(PageNo) = .{},
+//
+//         pub fn init(config: Config) Self {
+//             return Self {
+//                 .config = config,
+//             };
+//         }
+//
+//         pub fn deinit(self: *Self) void {
+//             _ = self;
+//         }
+//
+//         fn perPage(self: *const Self) usize {
+//             return self.config.page_size / @sizeOf(T);
+//         }
+//     };
+// }
+//
+// test "MultiArrayList.usage" {}
