@@ -238,7 +238,7 @@ test "Db.NaiveNameMatcher" {
 
     var a7r = std.testing.allocator;
 
-    const file_p = "/tmp/comb.bench.SwappingIndex.rowscan";
+    const file_p = "/tmp/comb.bench.Db.NaiveNameMatcher";
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
     defer mmap_pager.deinit();
     // var pager = mmap_pager.pager();
@@ -278,7 +278,6 @@ test "Db.NaiveNameMatcher" {
         defer aa7r.free(new_ids);
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
-            // const i_entry = try t_entry.conv(Index.Id, ).clone(name_arena.a7r());
             const i_entry = comb.mod_treewalking.FsEntry(Db.Id, []const u8) {
                 .name = t_entry.name,
                 .parent = new_ids[t_entry.parent],
@@ -301,12 +300,9 @@ test "Db.NaiveNameMatcher" {
             .{ @divFloor(timer.read(), std.time.ns_per_s) }
         );
     }
-
     var matcher = db.naiveNameMatcher();
     defer matcher.deinit();
 
-    // var weaver = Index.FullPathWeaver.init();
-    // defer weaver.deinit(index.a7r);
     const BenchCtx = struct {
         const Self = @This();
         matcher: *Db.NaiveNameMatcher,

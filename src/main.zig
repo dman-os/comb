@@ -27,7 +27,6 @@ pub const log_level = std.log.Level.debug;
 pub const mod_fanotify = @import("fanotify.zig");
 
 pub fn main() !void {
-    // try in_mem();
     try swapping();
     // try fanotify_demo();
     // try mod_fanotify.demo();
@@ -107,7 +106,7 @@ fn swapping () !void {
     // std.debug.print("index table pages: {} pages\n", .{ index.table.pages.items.len });
     // std.debug.print("index table bytes: {} KiB\n", .{ (index.table.pages.items.len * @sizeOf(usize)) / 1024});
     // std.debug.print("index meta pages: {} pages\n", .{ index.meta.pages.items.len });
-    // std.debug.print("index meta bytes: {} KiB\n", .{ (index.meta.pages.items.len * @sizeOf(Index.RowMeta)) / 1024});
+    // std.debug.print("index meta bytes: {} KiB\n", .{ (index.meta.pages.items.len * @sizeOf(Db.RowMeta)) / 1024});
 
     var stdin = std.io.getStdIn();
     var stdin_rdr = stdin.reader();
@@ -132,89 +131,6 @@ fn swapping () !void {
             std.debug.print("{}. {s}\n", .{ ii, path });
         }
 
-        std.log.info(
-            "{} results in {d} seconds", 
-            .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},
-        );
-    }
-}
-
-fn in_mem() !void {
-    const Index = mod_index.Index;
-
-    // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
-
-    // var a7r = fixed_a7r.threadSafeAllocator();
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){
-        // .backing_allocator = fixed_a7r.allocator(),
-    };
-    defer _ = gpa.deinit();
-
-    var a7r = gpa.allocator();
-
-    var index = Index.init(a7r);
-    defer index.deinit();
-    defer {
-        for(index.table.items(.name)) |name|{
-            a7r.free(name);
-        }
-    }
-
-    var timer = try std.time.Timer.start();
-    {
-        std.log.info("Walking tree from /", . {});
-
-        var arena = std.heap.ArenaAllocator.init(a7r);
-        defer arena.deinit();
-        timer.reset();
-        var tree = try Tree.walk(arena.allocator(), "/", null);
-        // defer tree.deinit();
-        const walk_elapsed = timer.read();
-        std.log.info(
-            "Done walking tree with {} items in {d} seconds", 
-            .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
-        );
-
-        var new_ids = try arena.allocator().alloc(Index.Id, tree.list.items.len);
-        defer arena.allocator().free(new_ids);
-        timer.reset();
-        for (tree.list.items) |t_entry, ii| {
-            const i_entry = try t_entry.conv(
-                Index.Id, 
-                []u8, 
-                new_ids[t_entry.parent], 
-                try a7r.dupe(u8, t_entry.name)
-            );
-            new_ids[ii] = try index.file_created(i_entry);
-        }
-        const index_elapsed = timer.read();
-        std.log.info(
-            "Done adding items to index in {d} seconds", 
-            .{ @divFloor(index_elapsed, std.time.ns_per_s) }
-        );
-    }
-    var stdin = std.io.getStdIn();
-    var stdin_rdr = stdin.reader();
-    var phrase = std.ArrayList(u8).init(a7r);
-    defer phrase.deinit();
-    var matcher = index.matcher();
-    defer matcher.deinit();
-    var weaver = Index.FullPathWeaver.init();
-    defer weaver.deinit(index.a7r);
-    while (true) {
-        std.debug.print("Ready to search: ", .{});
-        try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
-        std.log.info("Searching...", .{});
-        _ = timer.reset();
-        var matches = try matcher.str_match(phrase.items);
-        const elapsed = timer.read();
-        var ii:usize = 0;
-        for (matches) |id| {
-            ii += 1;
-            const path = try weaver.pathOf(&index, id, '/');
-            std.debug.print("{}. {s}\n", .{ ii, path });
-        }
         std.log.info(
             "{} results in {d} seconds", 
             .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},

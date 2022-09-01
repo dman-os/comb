@@ -334,7 +334,7 @@ pub const Database = struct {
 
 test "Database.usage" {
     var a7r = std.testing.allocator;
-    var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/SwappingIndex.usage", .{});
+    var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/Database.usage", .{});
     defer mmap_pager.deinit();
 
     var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
