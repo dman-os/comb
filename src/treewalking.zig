@@ -24,8 +24,8 @@ pub fn FsEntry(comptime I: type, comptime N: type) type {
         atime: i64,
         mtime: i64,
 
-        pub fn clone(orig: *const @This(), new_name: N) !@This() {
-            return @This() {
+        pub fn clone(orig: *const @This(), new_name: anytype) FsEntry(I, @TypeOf(new_name)) {
+            return FsEntry(I, @TypeOf(new_name)) {
                 // .name = try a7r.dupe(u8, orig.name),
                 .name = new_name,
                 .parent = orig.parent,
@@ -43,7 +43,7 @@ pub fn FsEntry(comptime I: type, comptime N: type) type {
             };
         }
 
-        // This clones it fo sure
+        /// This clones it fo sure
         pub fn conv(
             orig: *const @This(), 
             comptime P: type, 

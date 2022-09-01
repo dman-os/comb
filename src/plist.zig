@@ -26,94 +26,96 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
 
         const map_len = std.math.pow(usize, std.math.maxInt(u8) + 1, gram_len);
 
-        ha7r: Allocator,
-        sa7r: SwappingAllocator,
-        pager: Pager,
+        // ha7r: Allocator,
+        // sa7r: SwappingAllocator,
+        // pager: Pager,
         // map: []?SwappingList(I), // = [_]?SwappingList(I){null} ** map_len,
-        map: std.AutoHashMapUnmanaged(Gram, SwappingList(I)),
+        map: std.AutoHashMapUnmanaged(Gram, SwappingList(I)) = .{},
         cache: std.AutoHashMapUnmanaged(GramPos, void) = .{},
 
-        pub fn init(ha7r:Allocator, sa7r: SwappingAllocator, pager: Pager) Self {
-            return Self {
-                .ha7r = ha7r,
-                .sa7r = sa7r,
-                .pager = pager,
-                .map = std.AutoHashMapUnmanaged(Gram, SwappingList(I)){},
-                .cache = std.AutoHashMapUnmanaged(GramPos, void){},
-                // .map = try ha7r.alloc(?SwappingList(I), map_len),
-            };
-        }
+        // pub fn init(
+        //     ha7r:Allocator, sa7r: SwappingAllocator, pager: Pager
+        // ) Self {
+        //     return Self {
+        //         // .ha7r = ha7r,
+        //         // .sa7r = sa7r,
+        //         // .pager = pager,
+        //         // .map = std.AutoHashMapUnmanaged(Gram, SwappingList(I)){},
+        //         // .cache = std.AutoHashMapUnmanaged(GramPos, void){},
+        //         // .map = try ha7r.alloc(?SwappingList(I), map_len),
+        //     };
+        // }
 
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(
+            self: *Self, ha7r:Allocator, sa7r: SwappingAllocator, pager: Pager
+        ) void {
             var it = self.map.valueIterator();
             while (it.next()) |list| {
-                list.deinit(self.ha7r, self.sa7r, self.pager);
+                list.deinit(ha7r, sa7r, pager);
             }
-            self.map.deinit(self.ha7r);
-            self.cache.deinit(self.ha7r);
+            self.map.deinit(ha7r);
+            self.cache.deinit(ha7r);
         }
 
-        pub fn insert(self: *Self, id: I, name: []const u8, delimiters: []const u8) !void {
+        pub fn insert(
+            self: *Self, 
+            ha7r:Allocator, 
+            sa7r: SwappingAllocator, 
+            pager: Pager,
+            id: I, 
+            name: []const u8, 
+            delimiters: []const u8
+        ) !void {
             self.cache.clearRetainingCapacity();
 
-            var appender = blk: {
-                const Ctx = struct {
-                    map: *std.AutoHashMapUnmanaged(GramPos, void),
-                    a7r: Allocator,
-
-                    fn append(this: *@This(), item: GramPos) !void {
-                        try this.map.put(this.a7r, item, {});
-                    }
-                };
-                break :blk Appender(GramPos).new(
-                    &Ctx{ .map = &self.cache, .a7r = self.ha7r }, 
-                    Ctx.append
-                );
-            };
-            try mod_gram.grammer(@as(u4, gram_len), name, true, delimiters, appender);
+            try mod_gram.grammer(
+                @as(u4, gram_len), 
+                name, true, 
+                delimiters, 
+                Appender(GramPos).new(
+                    &Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, 
+                    Appender(GramPos).Curry.UnmanagedSet.put
+                )
+            );
 
             var it = self.cache.keyIterator();
             while (it.next()) |gpos| {
                 var list = blk: {
-                    const entry = try self.map.getOrPut(self.ha7r, gpos.gram);
+                    const entry = try self.map.getOrPut(ha7r, gpos.gram);
                     if (entry.found_existing) {
                         break :blk entry.value_ptr;
                     } else {
-                        entry.value_ptr.* = SwappingList(I).init(self.pager.pageSize());
+                        entry.value_ptr.* = SwappingList(I).init(pager.pageSize());
                         break :blk entry.value_ptr;
                     }
                 };
                 // try list.append(allocator, .{ .id = id, .pos = gpos.pos });
-                try list.append(self.ha7r, self.sa7r, self.pager, id);
+                try list.append(ha7r, sa7r, pager, id);
             }
-        }
-
-        pub fn matcher(self: *const Self) StrMatcher {
-            return StrMatcher.init(self.ha7r, self.sa7r, self.pager);
         }
 
         pub const StrMatcher = struct {
-            // allocator: Allocator,
-            out_vec: std.ArrayList(I),
-            check: std.AutoHashMap(I, void),
-            grams: std.ArrayList(GramPos),
-            sa7r: SwappingAllocator,
-            pager: Pager,
+            out_vec: std.ArrayListUnmanaged(I) = .{},
+            check: std.AutoHashMapUnmanaged(I, void) = .{},
+            grams: std.ArrayListUnmanaged(GramPos) = .{},
+            // sa7r: SwappingAllocator,
+            // pager: Pager,
+            // ha7r: Allocator,
             
-            pub fn init(allocator: Allocator, sa7r: SwappingAllocator, pager: Pager) StrMatcher {
-                return StrMatcher{
-                    .check = std.AutoHashMap(I, void).init(allocator),
-                    .out_vec = std.ArrayList(I).init(allocator),
-                    .grams = std.ArrayList(GramPos).init(allocator),
-                    .pager = pager,
-                    .sa7r = sa7r,
-                };
-            }
+            // pub fn init(ha7r: Allocator, sa7r: SwappingAllocator, pager: Pager) StrMatcher {
+            //     return StrMatcher{
+            //         // .ha7r = ha7r,
+            //         // .pager = pager,
+            //         // .sa7r = sa7r,
+            //     };
+            // }
 
-            pub fn deinit(self: *StrMatcher) void {
-                self.out_vec.deinit();
-                self.check.deinit();
-                self.grams.deinit();
+            pub fn deinit(
+                self: *StrMatcher, ha7r: Allocator, // sa7r: SwappingAllocator, pager: Pager
+            ) void {
+                self.out_vec.deinit(ha7r);
+                self.check.deinit(ha7r);
+                self.grams.deinit(ha7r);
             }
             // const Clause = union(enum){
             //     const Op = union(enum){
@@ -137,6 +139,9 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
             /// FIXME: optimize
             pub fn str_match(
                 self: *StrMatcher, 
+                ha7r: Allocator, 
+                sa7r: SwappingAllocator, 
+                pager: Pager,
                 plist: *const Self,
                 string: []const u8, 
                 delimiters: []const u8,
@@ -152,8 +157,12 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
                     string, 
                     false, 
                     delimiters, 
-                    Appender(GramPos).new(&self.grams, std.ArrayList(GramPos).append)
+                    Appender(GramPos).new(
+                        &Appender(GramPos).Curry.UnamanagedList { .a7r = ha7r, .list = &self.grams }, 
+                        Appender(GramPos).Curry.UnamanagedList.append
+                    )
                 );
+
                 var is_init = false;
                 for (self.grams.items) |gpos| {
                     const gram = gpos.gram;
@@ -163,19 +172,19 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
                         if (is_init) {
                             self.check.clearRetainingCapacity();
                             for (self.out_vec.items) |id| {
-                                try self.check.put(id, {});
+                                try self.check.put(ha7r, id, {});
                             }
 
                             self.out_vec.clearRetainingCapacity();
 
-                            var it = list.iterator(self.sa7r, self.pager);
+                            var it = list.iterator(sa7r, pager);
                             defer it.close();
                             while (try it.next()) |ptr| {
                                 const id = ptr.*;
                                 // reduce the previous list of eligible
                                 // matches according the the new list
                                 if (self.check.contains(id)) {
-                                    try self.out_vec.append(id);
+                                    try self.out_vec.append(ha7r, id);
                                 }
                             }
                             if (self.out_vec.items.len == 0 ) {
@@ -184,11 +193,11 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
                             }
                         } else {
                             // alll items satisfying first gram are elgiible
-                            var it = list.iterator(self.sa7r, self.pager);
+                            var it = list.iterator(sa7r, pager);
                             defer it.close();
                             while (try it.next()) |ptr| {
                                 const id = ptr.*;
-                                try self.out_vec.append(id);
+                                try self.out_vec.append(ha7r, id);
                             }
                             is_init = true;
                         }
@@ -270,17 +279,19 @@ test "SwappingPlist.str_match" {
         defer msa7r.deinit();
         var sa7r = msa7r.allocator();
 
-        var plist = TriPList.init(ha7r, sa7r, pager);
-        defer plist.deinit();
+        var plist = TriPList{};
+        defer plist.deinit(ha7r, sa7r, pager);
 
-        var matcher = plist.matcher();
-        defer matcher.deinit();
+        var matcher = TriPList.StrMatcher{};
+        defer matcher.deinit(ha7r);
 
         for (case.items) |name, id| {
-            try plist.insert(@as(u64, id), name, std.ascii.spaces[0..]);
+            try plist.insert(
+               ha7r, sa7r, pager, @as(u64, id), name, std.ascii.spaces[0..]
+            );
         }
 
-        var res = matcher.str_match(&plist, case.query, std.ascii.spaces[0..]);
+        var res = matcher.str_match(ha7r, sa7r, pager, &plist, case.query, std.ascii.spaces[0..]);
         switch (case.expected) {
             .ok => |expected|{
                 var matches = try res;
@@ -347,17 +358,16 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
         pub fn insert(self: *Self, allocator: Allocator, id: I, name: []const u8, delimiters: []const u8) !void {
             self.cache.clearRetainingCapacity();
 
-            const curry = struct {
-                map: *std.AutoHashMapUnmanaged(GramPos, void),
-                allocator: Allocator,
-
-                fn append(this: *@This(), item: GramPos) !void {
-                    try this.map.put(this.allocator, item, {});
-                }
-            };
-            var my_curry = curry{ .map = &self.cache, .allocator = allocator };
-            var appender = Appender(GramPos).new(&my_curry, curry.append);
-            try mod_gram.grammer(gram_len, name, true, delimiters, appender);
+            try mod_gram.grammer(
+                gram_len, 
+                name, 
+                true, 
+                delimiters, 
+                Appender(GramPos).new(
+                    &Appender(GramPos).Curry.UnmanagedSet { .set = &self.cache, .a7r = allocator}, 
+                    Appender(GramPos).Curry.UnmanagedSet.put
+                )
+            );
 
             var it = self.cache.keyIterator();
             while (it.next()) |gpos| {

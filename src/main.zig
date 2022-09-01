@@ -3,9 +3,9 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 pub const mod_utils = @import("utils.zig");
-pub const println = mod_utils.println;
-pub const dbg = mod_utils.dbg;
-pub const Option = mod_utils.Option;
+const println = mod_utils.println;
+const dbg = mod_utils.dbg;
+const Option = mod_utils.Option;
 
 pub const mod_gram = @import("gram.zig");
 
@@ -18,6 +18,8 @@ pub const mod_plist = @import("plist.zig");
 pub const mod_mmap = @import("mmap.zig");
 const SwappingAllocator = mod_mmap.SwappingAllocator;
 
+pub const mod_db = @import("db.zig");
+
 pub const mod_index = @import("index.zig");
 
 pub const log_level = std.log.Level.debug;
@@ -26,14 +28,13 @@ pub const mod_fanotify = @import("fanotify.zig");
 
 pub fn main() !void {
     // try in_mem();
-    // try swapping();
+    try swapping();
     // try fanotify_demo();
-    try mod_fanotify.demo();
+    // try mod_fanotify.demo();
 }
 
 fn swapping () !void {
-    const Index = mod_index.SwappingIndex;
-    const PList = mod_plist.SwappingPostingList(Index.Id, 3);
+    const Db = mod_db.Database;
 
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
@@ -58,11 +59,8 @@ fn swapping () !void {
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 
-    var index = Index.init(a7r, pager, sa7r);
-    defer index.deinit();
-
-    var plist = PList.init(a7r, sa7r, pager);
-    defer plist.deinit();
+    var db = Db.init(a7r, pager, sa7r, .{});
+    defer db.deinit();
 
     var name_arena = std.heap.ArenaAllocator.init(a7r);
     defer name_arena.deinit();
@@ -83,23 +81,17 @@ fn swapping () !void {
             .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
         );
 
-        var new_ids = try arena.allocator().alloc(Index.Id, tree.list.items.len);
+        var new_ids = try arena.allocator().alloc(Db.Id, tree.list.items.len);
         defer arena.allocator().free(new_ids);
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
-            const i_entry = t_entry
-                .conv(
-                    Index.Id, 
-                    SwappingAllocator.Ptr, 
-                    new_ids[t_entry.parent], 
-                    try sa7r.dupeJustPtr(t_entry.name),
-                );
-            new_ids[ii] = try index.file_created(i_entry);
-            try plist.insert(
-                new_ids[ii],
+            const i_entry = t_entry.conv(
+                Db.Id, 
+                []const u8, 
+                new_ids[t_entry.parent], 
                 t_entry.name,
-                std.ascii.spaces[0..]
             );
+            new_ids[ii] = try db.file_created(&i_entry);
         }
         const index_elapsed = timer.read();
         std.log.info(
@@ -121,28 +113,25 @@ fn swapping () !void {
     var stdin_rdr = stdin.reader();
     var phrase = std.ArrayList(u8).init(a7r);
     defer phrase.deinit();
-    var matcher = plist.matcher();
+    var matcher = db.plistNameMatcher();
     defer matcher.deinit();
-    var weaver = Index.FullPathWeaver.init();
-    defer weaver.deinit(index.ha7r);
+    var weaver = Db.FullPathWeaver{};
+    defer weaver.deinit(a7r);
 
     while (true) {
         std.debug.print("Ready to search: ", .{});
         try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
         std.log.info("Searching...", .{});
+
         _ = timer.reset();
-        var matches = try matcher.str_match(
-            &plist,
-            phrase.items,
-            std.ascii.spaces[0..],
-        );
+        var matches = try matcher.match(phrase.items);
         const elapsed = timer.read();
-        var ii:usize = 0;
-        for (matches) |id| {
-            ii += 1;
-            const path = try weaver.pathOf(&index, id, '/');
+
+        for (matches) |id, ii| {
+            const path = try weaver.pathOf(&db, id, '/');
             std.debug.print("{}. {s}\n", .{ ii, path });
         }
+
         std.log.info(
             "{} results in {d} seconds", 
             .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},

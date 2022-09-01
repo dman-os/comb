@@ -59,15 +59,32 @@ pub fn Appender(comptime T: type) type {
             };
         }
 
+        pub const Curry = struct {
+            pub const UnmanagedSet = struct {
+                a7r: Allocator,
+                set: *std.AutoHashMapUnmanaged(T, void),
+                pub fn put(curry: *@This(), item: T) !void {
+                    try curry.set.put(curry.a7r, item, {});
+                }
+            };
+            pub const UnamanagedList = struct {
+                a7r: Allocator,
+                list: *std.ArrayListUnmanaged(T),
+                pub fn append(curry: *@This(), item: T) !void {
+                    try curry.list.append(curry.a7r, item);
+                }
+            };
+        };
+
         pub fn append(self: Self, item: T) Err!void {
             try self.func(self.vptr, item);
         }
 
-        pub fn for_list(list: *std.ArrayList(T)) Self {
+        pub fn forList(list: *std.ArrayList(T)) Self {
             return Self.new(list, std.ArrayList(T).append);
         }
 
-        pub fn for_set(set: *std.AutoHashMap(T, void)) Self {
+        pub fn forSet(set: *std.AutoHashMap(T, void)) Self {
             const curry = struct {
                 fn append(ptr: *std.AutoHashMap(T, void), item: T) !void {
                     try ptr.put(item, {});
@@ -81,7 +98,7 @@ pub fn Appender(comptime T: type) type {
 test "Appender.list" {
     var list = std.ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
-    var appender = Appender(u32).for_list(&list);
+    var appender = Appender(u32).forList(&list);
     try appender.append(10);
     try appender.append(20);
     try appender.append(30);
@@ -92,7 +109,7 @@ test "Appender.list" {
 test "Appender.set" {
     var set = std.AutoHashMap(u32, void).init(std.testing.allocator);
     defer set.deinit();
-    var appender = Appender(u32).for_set(&set);
+    var appender = Appender(u32).forSet(&set);
     try appender.append(10);
     try appender.append(20);
     try appender.append(30);
