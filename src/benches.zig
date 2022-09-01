@@ -13,7 +13,7 @@ const mod_mmap = comb.mod_mmap;
 const Tree = comb.mod_treewalking.Tree;
 const PlasticTree = comb.mod_treewalking.PlasticTree;
 
-const SwappingAllocator = comb.mod_mmap.SwappingAllocator;
+const SwapAllocator = comb.mod_mmap.SwapAllocator;
 const Pager = comb.mod_mmap.Pager;
 
 const mod_bench = struct {
@@ -247,7 +247,7 @@ test "Db.NaiveNameMatcher" {
     defer lru.deinit();
     var pager = lru.pager();
 
-    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
+    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 
@@ -452,13 +452,13 @@ test "plist.bench.walk" {
 fn bench_plist_swapping(
     comptime I: type,
     comptime gram_len: u4,
-    plist: *mod_plist.SwappingPostingList(I, gram_len), 
+    plist: *mod_plist.SwapPostingList(I, gram_len), 
     a7r: Allocator, 
-    sa7r: SwappingAllocator,
+    sa7r: SwapAllocator,
     pager: Pager,
     search_str: [] const u8
 ) !void {
-    const PList = mod_plist.SwappingPostingList(I, gram_len);
+    const PList = mod_plist.SwapPostingList(I, gram_len);
     {
         var max: usize = 0;
         var max_gram = [_]u8{mod_gram.TEC} ** gram_len;
@@ -521,7 +521,7 @@ fn bench_plist_swapping(
     const BenchCtx = struct {
         const Self = @This();
         a7r: Allocator,
-        sa7r: SwappingAllocator,
+        sa7r: SwapAllocator,
         pager: Pager,
         plist: *PList,
         search_str: []const u8,
@@ -548,7 +548,7 @@ fn bench_plist_swapping(
     try mod_bench.bench("str_match", &ctx, BenchCtx.do, .{});
 }
 
-test "SwappingPList.bench.gen" {
+test "SwapPList.bench.gen" {
     const size: usize = 1_000_000;
     const id_t = u32;
     const gram_len = 3;
@@ -559,7 +559,7 @@ test "SwappingPList.bench.gen" {
     defer arena.deinit();
     var a7r = arena.allocator();
 
-    const file_p = "/tmp/comb.bench.SwappingPList";
+    const file_p = "/tmp/comb.bench.SwapPList";
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
     defer mmap_pager.deinit();
     // var pager = mmap_pager.pager();
@@ -568,7 +568,7 @@ test "SwappingPList.bench.gen" {
     defer lru.deinit();
     var pager = lru.pager();
 
-    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
+    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
     
@@ -578,7 +578,7 @@ test "SwappingPList.bench.gen" {
     try tree.gen();
     std.debug.print("done generating fake tree of size {}\n", .{ size });
 
-    var plist = mod_plist.SwappingPostingList(id_t, gram_len){};
+    var plist = mod_plist.SwapPostingList(id_t, gram_len){};
     // defer plist.deinit(a7r, sa7r, pager);
 
     var longest: usize = 0;
@@ -609,7 +609,7 @@ test "SwappingPList.bench.gen" {
     );
 }
 
-test "SwappingPList.bench.walk" {
+test "SwapPList.bench.walk" {
     const size: usize = 1_000_000;
     const id_t = usize;
     const gram_len = 1;
@@ -630,7 +630,7 @@ test "SwappingPList.bench.walk" {
     var weaver = Tree.FullPathWeaver.init();
     defer weaver.deinit(a7r);
 
-    const file_p = "/tmp/comb.bench.SwappingPList";
+    const file_p = "/tmp/comb.bench.SwapPList";
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, file_p, .{});
     defer mmap_pager.deinit();
     // var pager = mmap_pager.pager();
@@ -639,11 +639,11 @@ test "SwappingPList.bench.walk" {
     defer lru.deinit();
     var pager = lru.pager();
 
-    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
+    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 
-    var plist = mod_plist.SwappingPostingList(id_t, gram_len){};
+    var plist = mod_plist.SwapPostingList(id_t, gram_len){};
     // defer plist.deinit(a7r, sa7r, pager);
 
     const search_str = ss: {

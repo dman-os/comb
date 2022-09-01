@@ -16,7 +16,7 @@ const PlasticTree = mod_treewalking.PlasticTree;
 pub const mod_plist = @import("plist.zig");
 
 pub const mod_mmap = @import("mmap.zig");
-const SwappingAllocator = mod_mmap.SwappingAllocator;
+const SwapAllocator = mod_mmap.SwapAllocator;
 
 pub const mod_db = @import("db.zig");
 
@@ -54,7 +54,7 @@ fn swapping () !void {
 
     var pager = lru.pager();
 
-    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
+    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 

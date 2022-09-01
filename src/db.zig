@@ -10,8 +10,8 @@ const mod_treewalking = @import("treewalking.zig");
 const FsEntry = mod_treewalking.FsEntry;
 
 const mod_mmap = @import("mmap.zig");
-const SwappingList = mod_mmap.SwappingList;
-const Ptr = mod_mmap.SwappingAllocator.Ptr;
+const SwapList = mod_mmap.SwapList;
+const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 
@@ -69,31 +69,31 @@ pub const Database = struct {
 
     /// Our index, a trigram posting list with a gram length of 3.
     /// We associate each trigram with a set of `Id`.
-    const PList = mod_plist.SwappingPostingList(Id, 3);
+    const PList = mod_plist.SwapPostingList(Id, 3);
 
     config: Config,
     /// The heap allocator.
     ha7r: Allocator,
-    sa7r: mod_mmap.SwappingAllocator,
+    sa7r: mod_mmap.SwapAllocator,
     pager: mod_mmap.Pager,
     /// Our actual big list.
-    table: SwappingList(Entry),
-    meta: SwappingList(RowMeta),
+    table: SwapList(Entry),
+    meta: SwapList(RowMeta),
     plist: PList = .{},
     free_slots: FreeSlots,
 
     pub fn init(
         ha7r: Allocator, 
         pager: mod_mmap.Pager, 
-        sa7r: mod_mmap.SwappingAllocator,
+        sa7r: mod_mmap.SwapAllocator,
         config: Config,
     ) Self {
         var self = Self {
             .ha7r = ha7r,
             .sa7r = sa7r,
             .pager = pager,
-            .table = SwappingList(Entry).init(pager.pageSize()),
-            .meta = SwappingList(RowMeta).init(pager.pageSize()),
+            .table = SwapList(Entry).init(pager.pageSize()),
+            .meta = SwapList(RowMeta).init(pager.pageSize()),
             .free_slots = FreeSlots.init(ha7r, .{}),
             .config = config,
         };
@@ -306,7 +306,7 @@ pub const Database = struct {
         return PlistNameMatcher.init(self);
     }
 
-    /// Queries for a string amongst the `Entry` `name`s using the `SwappingPostingList` index.
+    /// Queries for a string amongst the `Entry` `name`s using the `SwapPostingList` index.
     pub const PlistNameMatcher = struct {
         db: *Database,
         inner: PList.StrMatcher = .{},
@@ -342,7 +342,7 @@ test "Database.usage" {
 
     var pager = lru.pager();
 
-    var ma7r = mod_mmap.MmapSwappingAllocator(.{}).init(a7r, pager);
+    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
 
     var sa7r = ma7r.allocator();

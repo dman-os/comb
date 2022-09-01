@@ -4,17 +4,35 @@
 
 - Work stack
     - [x] Swapping PList
-    - [ ] FANotify notifications & test suite
+    - [x] FANotify notifications & test suite
       - [ ] `tmpfs` alternative for testing
-    - [ ] B-Tree
+    - [ ] Database modification operations
+      - [ ] Created
+      - [ ] Updated
+      - [ ] Deleted
+      - [ ] Deleted (Dir)
+      - [ ] Moved
+      - [ ] Moved (Dir)
+    - [ ] Queries
+    - [ ] FANotify <-> Database integration
+    - [ ] B-Tree implementation for field indices
         - [ ] BSTree
+
+- Later
+    - [ ] Support less than gram length (3) search strings
 
 ## design doc
 
 ### Features
 
-- [ ] Low resource footprint
+- [ ] Fast
+    - [ ] Acceleration Indices
+        - [x] PostingList (for names)
+        - [ ] B-Tree (for other values)
 - [ ] Current (TM)
+    - [ ] FANotify integration
+- [ ] Low resource footprint
+    - [x] Disk Swapping
 - [ ] CLI client
 - [ ] IPC interface
 

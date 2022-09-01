@@ -1,6 +1,7 @@
 //! TODO: remove dependence on heap allocator
 //! FIXME: none of these are threadsafe
-//! FIXME: this is too complex. Get rid of Pager and just use the Allocator
+//! FIXME: this is too complex. Get rid of Pager and just use the SwapAllocator
+//! -- If we were distentangle `SwapList` and `Pager`, we can make the latter private.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,6 +13,8 @@ const dbg = mod_utils.println;
 
 const mmap_align = std.mem.page_size;
 
+/// Fat pointer dynamic dispatch interface in the vein of `std.mem.Allocator`
+/// for page sized memory blocks with swapping support.
 pub const Pager = struct {
     const Self = @This();
     pub const Error = AllocError || SwapInError;
@@ -201,9 +204,7 @@ const PageNo = Pager.PageNo;
 const PageSlice = Pager.PageSlice;
 const BlockId = Pager.BlockId;
 
-// TODO: add support for page ranges
-//  - the free_list is going to be tricky; we'd need to recognize and adjacent 
-//    free pages
+/// Implements the `Pager` interface using `mmap` over a backing file.
 pub const MmapPager = struct {
     const Self = @This();
 
@@ -727,7 +728,8 @@ test "MmapPager.usage" {
     }
 }
 
-/// This type mainly avoids unessary syscalls and double map of the same page
+/// Wraps and provides the `Pager` interface with a lru caching for that swapping action.
+/// Mainly avoids unessary syscalls and double map of the same page
 pub const LRUSwapCache = struct {
     const Self = @This();
     
@@ -777,7 +779,6 @@ pub const LRUSwapCache = struct {
             self.free_list.deinit(a7r);
         }
     };
-
 
     a7r: Allocator,
     backing_pager: Pager,
@@ -981,40 +982,6 @@ pub const LRUSwapCache = struct {
     }
 };
 
-// pub const SwapInTracker = struct {
-//     const Self = @This();
-
-//     swappedInPages: std.AutoHashMapUnmanaged(PageNo, void),
-
-//     pub fn init() Self {
-//         return Self {
-//             .swappedInPages = std.AutoHashMapUnmanaged(PageNo, .{}),
-//         };
-//     }
-
-//     pub fn deinit(self: *Self, ha7r: Allocator, pager: *Pager) void {
-//         var it = self.swappedInPages.iterator();
-//         while (it.next()) |no| {
-//             pager.swapOut(no);
-//         }
-//         self.swappedInPages.deinit(ha7r);
-//     }
-
-//     fn swapIn(self: *Self, ha7r: Allocator, pager: *Pager, no: PageNo) !PageSlice {
-//         try self.swappedInPages.put(ha7r, no, .{});
-//         errdefer _ = self.swappedInPages.remove(no);
-//         const slice = try pager.swapIn(no);
-//         return slice;
-//     }
-
-//     fn swapOut(self: *Self, ha7r: Allocator, pager: *Pager, no: PageNo) void {
-//         if (!self.swappedInPages.remove(ha7r, no)){
-//             std.log.warn("unrecognized page {} swapped out through" ++ @typeName(Self), .{no});
-//         }
-//         pager.swapOut(no);
-//     }
-// };
-
 pub const SinglePageCache = struct {
     const Self = @This();
 
@@ -1139,7 +1106,9 @@ pub const SinglePageCache = struct {
     }
 };
 
-pub const SwappingAllocator = struct {
+/// Another fat pointer interface in the vein of `Pager` allowing arbitrary length
+/// allocations and making use of a `Ptr` ptrs instead of the language builtin ptrs.
+pub const SwapAllocator = struct {
     pub const Ptr = usize;
     // TODO: clean me up
     pub const AllocError = Pager.AllocError;
@@ -1156,19 +1125,19 @@ pub const SwappingAllocator = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    pub fn alloc(self: SwappingAllocator, len: usize) AllocError!Ptr {
+    pub fn alloc(self: SwapAllocator, len: usize) AllocError!Ptr {
         return self.vtable.alloc(self.ptr, len);
     }
 
-    pub fn swapIn(self: SwappingAllocator, ptr: Ptr) SwapInError![]u8 {
+    pub fn swapIn(self: SwapAllocator, ptr: Ptr) SwapInError![]u8 {
         return self.vtable.swapIn(self.ptr, ptr);
     }
 
-    pub fn swapOut(self: SwappingAllocator, ptr: Ptr) void {
+    pub fn swapOut(self: SwapAllocator, ptr: Ptr) void {
         return self.vtable.swapOut(self.ptr, ptr);
     }
 
-    pub fn free(self: SwappingAllocator, ptr: Ptr) void {
+    pub fn free(self: SwapAllocator, ptr: Ptr) void {
         return self.vtable.free(self.ptr, ptr);
     }
 
@@ -1178,7 +1147,7 @@ pub const SwappingAllocator = struct {
     };
 
     /// Don't forget to swap out the ptr if you don't need the slice.
-    pub fn dupe(self: SwappingAllocator, bytes: []const u8) Error!DupeRes {
+    pub fn dupe(self: SwapAllocator, bytes: []const u8) Error!DupeRes {
         const ptr = try self.alloc(bytes.len);
         var slice = try self.swapIn(ptr);
         std.mem.copy(u8, slice, bytes);
@@ -1188,7 +1157,7 @@ pub const SwappingAllocator = struct {
         };
     }
 
-    pub fn dupeJustPtr(self: SwappingAllocator, bytes: []const u8) Error!Ptr {
+    pub fn dupeJustPtr(self: SwapAllocator, bytes: []const u8) Error!Ptr {
         const ptr = try self.alloc(bytes.len);
         var slice = try self.swapIn(ptr);
         defer self.swapOut(ptr);
@@ -1203,7 +1172,7 @@ pub const SwappingAllocator = struct {
         comptime swapInFn: fn (ptr: @TypeOf(pointer), ptr: Ptr) SwapInError![]u8,
         comptime swapOutFn: fn (ptr: @TypeOf(pointer), ptr: Ptr) void,
         comptime freeFn: fn (ptr: @TypeOf(pointer), ptr: Ptr) void,
-    ) SwappingAllocator {
+    ) SwapAllocator {
         const AllocPtr = @TypeOf(pointer);
         const ptr_info = @typeInfo(AllocPtr);
         std.debug.assert(ptr_info == .Pointer); // Must be a pointer
@@ -1248,11 +1217,13 @@ pub const SwappingAllocator = struct {
 };
 
 
-pub const MmapAllocatorConfig = struct {
+pub const PagingSwapAllocatorConfig = struct {
     page_size: usize = std.mem.page_size,
 };
 
-pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
+/// Implements the `SwapAllocator` interface using a `Pager` and a similar
+/// bucketing approach as the `std.mem.GeneralPurposeAllocator`.
+pub fn PagingSwapAllocator(config: PagingSwapAllocatorConfig) type {
     return struct {
         const Self = @This();
 
@@ -1263,28 +1234,27 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
         );
         const SlotIndex = std.meta.Int(
             .unsigned, 
-            @bitSizeOf(SwappingAllocator.Ptr) - @bitSizeOf(BuckIndex)
+            @bitSizeOf(SwapAllocator.Ptr) - @bitSizeOf(BuckIndex)
         );
-        /// TODO: consnoer using a usize and bittweedling to improve performance
         /// TODO: hate the name
         pub const CustomPtr = packed struct {
             buck: BuckIndex,
             slot: SlotIndex,
 
-            fn toGpPtr(self: CustomPtr) SwappingAllocator.Ptr {
-                return @bitCast(SwappingAllocator.Ptr, self);
+            fn toGpPtr(self: CustomPtr) SwapAllocator.Ptr {
+                return @bitCast(SwapAllocator.Ptr, self);
             }
-            fn fromGpPtr(ptr: SwappingAllocator.Ptr) CustomPtr {
+            fn fromGpPtr(ptr: SwapAllocator.Ptr) CustomPtr {
                 return @bitCast(CustomPtr, ptr);
             }
         };
 
         comptime {
             // TODO: THiS gets fucked if usize bytes are above 255
-            if (@sizeOf(CustomPtr) != @sizeOf(SwappingAllocator.Ptr)) {
+            if (@sizeOf(CustomPtr) != @sizeOf(SwapAllocator.Ptr)) {
                 @compileError(std.fmt.comptimePrint(
-                   @typeName(CustomPtr) ++ " size {} != " ++ @typeName(SwappingAllocator.Ptr) ++ " {}",
-                    .{ @sizeOf(CustomPtr), @sizeOf(SwappingAllocator.Ptr) }
+                   @typeName(CustomPtr) ++ " size {} != " ++ @typeName(SwapAllocator.Ptr) ++ " {}",
+                    .{ @sizeOf(CustomPtr), @sizeOf(SwapAllocator.Ptr) }
                 ));
             }
             // we need this for the puprpose of working with BlockIds
@@ -1430,11 +1400,11 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
             self.large_allocs.deinit(self.ha7r);
         }
 
-        pub fn allocator(self: *Self) SwappingAllocator {
-            return SwappingAllocator.init(self, alloc, swapIn, swapOut, free);
+        pub fn allocator(self: *Self) SwapAllocator {
+            return SwapAllocator.init(self, alloc, swapIn, swapOut, free);
         }
 
-        fn buckAlloc(self: *Self, buck_idx: BuckIndex, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
+        fn buckAlloc(self: *Self, buck_idx: BuckIndex, len: usize) SwapAllocator.AllocError!SwapAllocator.Ptr {
             // println("allocating len {} in bucket of size {}", .{ len, @as(usize, 1) << buck_idx_fit });
             // println("buck for len {} == {}", .{ len, @as(usize, 1) << buck_idx_fit });
             if (self.buckets[buck_idx] == null) {
@@ -1449,7 +1419,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
             return (CustomPtr{ .buck = buck_idx, .slot = slot }).toGpPtr();
         }
 
-        fn largeAlloc(self: *Self, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
+        fn largeAlloc(self: *Self, len: usize) SwapAllocator.AllocError!SwapAllocator.Ptr {
             const page_count = std.math.divCeil(usize, len, config.page_size) catch @panic("overflow");
             const block_id = try self.pager.allocBlock(@intCast(u32, page_count));
             const slot = @as(SlotIndex, block_id.idx);
@@ -1468,7 +1438,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
             return (CustomPtr{ .buck = bucket_count, .slot = slot }).toGpPtr();
         }
 
-        pub fn alloc(self: *Self, len: usize) SwappingAllocator.AllocError!SwappingAllocator.Ptr {
+        pub fn alloc(self: *Self, len: usize) SwapAllocator.AllocError!SwapAllocator.Ptr {
             const buck_idx = std.math.log2(std.math.ceilPowerOfTwoAssert(usize, len));
             if (buck_idx >= bucket_count) {
                 // printn(
@@ -1482,7 +1452,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
             }
         }
 
-        pub fn free(self: *Self, gpptr: SwappingAllocator.Ptr) void {
+        pub fn free(self: *Self, gpptr: SwapAllocator.Ptr) void {
             const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
             if (buck_idx == bucket_count) {
@@ -1500,7 +1470,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
             }
         }
 
-        pub fn swapIn(self: *Self, gpptr: SwappingAllocator.Ptr) SwappingAllocator.SwapInError![]u8 {
+        pub fn swapIn(self: *Self, gpptr: SwapAllocator.Ptr) SwapAllocator.SwapInError![]u8 {
             const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
             if (buck_idx == bucket_count) {
@@ -1517,7 +1487,7 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
             }
         }
 
-        pub fn swapOut(self: *Self, gpptr: SwappingAllocator.Ptr) void {
+        pub fn swapOut(self: *Self, gpptr: SwapAllocator.Ptr) void {
             const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
             if (buck_idx == bucket_count) {
@@ -1535,10 +1505,10 @@ pub fn MmapSwappingAllocator(config: MmapAllocatorConfig) type {
     };
 }
 
-test "MmapSwappingAllocator.usage" {
+test "PagingSwapAllocator.usage" {
     const page_size = std.mem.page_size;
     const ha7r = std.testing.allocator;
-    var mmap_pager = try MmapPager.init(ha7r, "/tmp/comb.test.SwappingAllocator.usage", .{
+    var mmap_pager = try MmapPager.init(ha7r, "/tmp/comb.test.SwapAllocator.usage", .{
         .page_size = page_size,
     });
     defer mmap_pager.deinit();
@@ -1546,12 +1516,12 @@ test "MmapSwappingAllocator.usage" {
     var lru = try LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
     defer lru.deinit();
     
-    var ma7r = MmapSwappingAllocator(.{}).init(ha7r, lru.pager());
+    var ma7r = PagingSwapAllocator(.{}).init(ha7r, lru.pager());
     defer ma7r.deinit();
 
     var sa7r = ma7r.allocator();
 
-    // std.debug.print("Size MPA: {}\n", .{@sizeOf(MmapSwappingAllocator(.{ .page_size = 4 * 1024 }))});
+    // std.debug.print("Size MPA: {}\n", .{@sizeOf(PagingSwapAllocator(.{ .page_size = 4 * 1024 }))});
     // std.debug.print("Size GPA: {}\n", .{@sizeOf(std.heap.GeneralPurposeAllocator(.{}))});
 
     const table = [_][]const u8{
@@ -1561,7 +1531,7 @@ test "MmapSwappingAllocator.usage" {
         "i've been here for years just wondering around about the neighborhood"[0..],
         ([_]u8{42} ** (10 * page_size))[0..]
     };
-    var ptrs: [table.len]SwappingAllocator.Ptr = undefined;
+    var ptrs: [table.len]SwapAllocator.Ptr = undefined;
 
     for (&table) |case, ii| {
         ptrs[ii] = try sa7r.alloc(case.len);
@@ -1596,12 +1566,16 @@ test "MmapSwappingAllocator.usage" {
     }
 }
 
-pub fn SwappingList(comptime T: type) type {
+/// A general prurpos array list using manking use of pages for a `Pager`
+/// but falling back to a `SwapAllocator` if size is still under a page.
+/// This allows multiple lists sharing the same `SwapAllocator` to share a 
+/// page.
+pub fn SwapList(comptime T: type) type {
     return struct {
         const Self = @This();
 
         const SmallList = struct {
-            ptr: SwappingAllocator.Ptr,
+            ptr: SwapAllocator.Ptr,
             len: usize,
         };
 
@@ -1633,7 +1607,7 @@ pub fn SwappingList(comptime T: type) type {
         pub fn deinit(
             self: *Self, 
             ha7r: Allocator, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager
         ) void {
             for (self.pages.items) |no| {
@@ -1657,7 +1631,7 @@ pub fn SwappingList(comptime T: type) type {
         pub fn ensureUnusedCapacity(
             self: *Self, 
             ha7r: Allocator, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager, 
             n_items: usize
         ) !void {
@@ -1670,11 +1644,10 @@ pub fn SwappingList(comptime T: type) type {
                     std.math.ceilPowerOfTwoAssert(usize, n_items)
                 else 
                 (
-                    (
+                    cap * (
                         std.math.divCeil(usize, desired_cap, cap) 
                         catch @panic("overflow")
                     )
-                    * cap
                 );
             if (new_cap < self.per_page) {
                 const ptr = try sa7r.alloc(new_cap * @sizeOf(T));
@@ -1731,7 +1704,7 @@ pub fn SwappingList(comptime T: type) type {
 
         pub fn swapIn(
             self: *const Self, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager, 
             idx: usize
         ) !*T {
@@ -1743,7 +1716,7 @@ pub fn SwappingList(comptime T: type) type {
         /// but not necessarily length. Use `swapIn` for safer alternative.
         fn swapInUnchecked(
             self: *const Self, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager, 
             idx: usize
         ) !*T {
@@ -1761,7 +1734,7 @@ pub fn SwappingList(comptime T: type) type {
 
         pub fn swapOut(
             self: *const Self,
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager, 
             idx: usize
         ) void {
@@ -1771,7 +1744,7 @@ pub fn SwappingList(comptime T: type) type {
 
         fn swapOutUnchecked(
             self: *const Self, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager, 
             idx: usize
         ) void {
@@ -1785,7 +1758,7 @@ pub fn SwappingList(comptime T: type) type {
 
         pub fn set(
             self: *const Self, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager, 
             idx: usize, 
             item: T
@@ -1796,7 +1769,7 @@ pub fn SwappingList(comptime T: type) type {
             ptr.* = item;
         }
 
-        pub fn pop(self: *Self, sa7r: SwappingAllocator, pager: Pager) !T {
+        pub fn pop(self: *Self, sa7r: SwapAllocator, pager: Pager) !T {
             if (self.len == 0) @panic("iss empty");
             const idx = self.len - 1;
             var item = (try self.swapIn(sa7r, pager, idx)).*;
@@ -1805,7 +1778,7 @@ pub fn SwappingList(comptime T: type) type {
             return item;
         }
 
-        pub fn append(self: *Self, ha7r: Allocator, sa7r: SwappingAllocator, pager: Pager, item: T) !void {
+        pub fn append(self: *Self, ha7r: Allocator, sa7r: SwapAllocator, pager: Pager, item: T) !void {
             try self.ensureUnusedCapacity(ha7r, sa7r, pager, 1);
             const idx = self.len;
             var ptr = try self.swapInUnchecked(sa7r, pager, idx);
@@ -1817,7 +1790,7 @@ pub fn SwappingList(comptime T: type) type {
         const Iterator = struct {
             cur: usize,
             stop: usize,
-            sa7r: SwappingAllocator,
+            sa7r: SwapAllocator,
             pager: Pager,
             list: *const Self,
             in_idx: ?usize = null,
@@ -1826,7 +1799,7 @@ pub fn SwappingList(comptime T: type) type {
                 list: *const Self, 
                 from: usize, 
                 to: usize, 
-                sa7r: SwappingAllocator,
+                sa7r: SwapAllocator,
                 pager: Pager
             ) Iterator {
                 return Iterator{
@@ -1865,7 +1838,7 @@ pub fn SwappingList(comptime T: type) type {
         /// Might panic if the list is modified before the iterator is closed.
         /// Be sure to close the iterator after usage.
         /// This reuses the list's built in pager.
-        pub fn iterator(self: *const Self, sa7r: SwappingAllocator, pager: Pager) Iterator {
+        pub fn iterator(self: *const Self, sa7r: SwapAllocator, pager: Pager) Iterator {
             // we give it the backing pager since we don't want it sharing our
             // single page cache in case of simultaneous usage
             return Iterator.new(self, 0, self.len, sa7r, pager);
@@ -1873,10 +1846,10 @@ pub fn SwappingList(comptime T: type) type {
     };
 }
 
-test "SwappingList.usage" {
+test "SwapList.usage" {
     const page_size = std.mem.page_size;
     const ha7r = std.testing.allocator;
-    var mmap_pager = try MmapPager.init(ha7r, "/tmp/comb.test.SwappingList.usage", .{
+    var mmap_pager = try MmapPager.init(ha7r, "/tmp/comb.test.SwapList.usage", .{
         .page_size = page_size,
     });
     defer mmap_pager.deinit();
@@ -1885,11 +1858,11 @@ test "SwappingList.usage" {
     defer lru.deinit();
     var pager = lru.pager();
 
-    var msa7r = MmapSwappingAllocator(.{}).init(ha7r, pager);
+    var msa7r = PagingSwapAllocator(.{}).init(ha7r, pager);
     defer msa7r.deinit();
     var sa7r = msa7r.allocator();
 
-    var list = SwappingList(usize).init(pager.pageSize());
+    var list = SwapList(usize).init(pager.pageSize());
     defer list.deinit(ha7r, sa7r, pager);
 
     const item_per_page = page_size / @sizeOf(usize);

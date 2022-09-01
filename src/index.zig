@@ -10,8 +10,8 @@ const mod_treewalking = @import("treewalking.zig");
 const FsEntry = mod_treewalking.FsEntry;
 
 const mod_mmap = @import("mmap.zig");
-const SwappingList = mod_mmap.SwappingList;
-const Ptr = mod_mmap.SwappingAllocator.Ptr;
+const SwapList = mod_mmap.SwapList;
+const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 

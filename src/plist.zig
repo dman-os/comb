@@ -10,12 +10,12 @@ const Appender = mod_utils.Appender;
 const mod_gram = @import("gram.zig");
 
 const mod_mmap = @import("mmap.zig");
-const SwappingAllocator = mod_mmap.SwappingAllocator;
-const SwappingList = mod_mmap.SwappingList;
+const SwapAllocator = mod_mmap.SwapAllocator;
+const SwapList = mod_mmap.SwapList;
 const Pager = mod_mmap.Pager;
-const Ptr = mod_mmap.SwappingAllocator.Ptr;
+const Ptr = mod_mmap.SwapAllocator.Ptr;
 
-pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
+pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
     if (gram_len == 0) {
         @compileError("gram_len is 0");
     }
@@ -27,27 +27,27 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
         const map_len = std.math.pow(usize, std.math.maxInt(u8) + 1, gram_len);
 
         // ha7r: Allocator,
-        // sa7r: SwappingAllocator,
+        // sa7r: SwapAllocator,
         // pager: Pager,
-        // map: []?SwappingList(I), // = [_]?SwappingList(I){null} ** map_len,
-        map: std.AutoHashMapUnmanaged(Gram, SwappingList(I)) = .{},
+        // map: []?SwapList(I), // = [_]?SwapList(I){null} ** map_len,
+        map: std.AutoHashMapUnmanaged(Gram, SwapList(I)) = .{},
         cache: std.AutoHashMapUnmanaged(GramPos, void) = .{},
 
         // pub fn init(
-        //     ha7r:Allocator, sa7r: SwappingAllocator, pager: Pager
+        //     ha7r:Allocator, sa7r: SwapAllocator, pager: Pager
         // ) Self {
         //     return Self {
         //         // .ha7r = ha7r,
         //         // .sa7r = sa7r,
         //         // .pager = pager,
-        //         // .map = std.AutoHashMapUnmanaged(Gram, SwappingList(I)){},
+        //         // .map = std.AutoHashMapUnmanaged(Gram, SwapList(I)){},
         //         // .cache = std.AutoHashMapUnmanaged(GramPos, void){},
-        //         // .map = try ha7r.alloc(?SwappingList(I), map_len),
+        //         // .map = try ha7r.alloc(?SwapList(I), map_len),
         //     };
         // }
 
         pub fn deinit(
-            self: *Self, ha7r:Allocator, sa7r: SwappingAllocator, pager: Pager
+            self: *Self, ha7r:Allocator, sa7r: SwapAllocator, pager: Pager
         ) void {
             var it = self.map.valueIterator();
             while (it.next()) |list| {
@@ -60,7 +60,7 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
         pub fn insert(
             self: *Self, 
             ha7r:Allocator, 
-            sa7r: SwappingAllocator, 
+            sa7r: SwapAllocator, 
             pager: Pager,
             id: I, 
             name: []const u8, 
@@ -85,7 +85,7 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
                     if (entry.found_existing) {
                         break :blk entry.value_ptr;
                     } else {
-                        entry.value_ptr.* = SwappingList(I).init(pager.pageSize());
+                        entry.value_ptr.* = SwapList(I).init(pager.pageSize());
                         break :blk entry.value_ptr;
                     }
                 };
@@ -98,11 +98,11 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
             out_vec: std.ArrayListUnmanaged(I) = .{},
             check: std.AutoHashMapUnmanaged(I, void) = .{},
             grams: std.ArrayListUnmanaged(GramPos) = .{},
-            // sa7r: SwappingAllocator,
+            // sa7r: SwapAllocator,
             // pager: Pager,
             // ha7r: Allocator,
             
-            // pub fn init(ha7r: Allocator, sa7r: SwappingAllocator, pager: Pager) StrMatcher {
+            // pub fn init(ha7r: Allocator, sa7r: SwapAllocator, pager: Pager) StrMatcher {
             //     return StrMatcher{
             //         // .ha7r = ha7r,
             //         // .pager = pager,
@@ -111,7 +111,7 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
             // }
 
             pub fn deinit(
-                self: *StrMatcher, ha7r: Allocator, // sa7r: SwappingAllocator, pager: Pager
+                self: *StrMatcher, ha7r: Allocator, // sa7r: SwapAllocator, pager: Pager
             ) void {
                 self.out_vec.deinit(ha7r);
                 self.check.deinit(ha7r);
@@ -140,7 +140,7 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
             pub fn str_match(
                 self: *StrMatcher, 
                 ha7r: Allocator, 
-                sa7r: SwappingAllocator, 
+                sa7r: SwapAllocator, 
                 pager: Pager,
                 plist: *const Self,
                 string: []const u8, 
@@ -212,8 +212,8 @@ pub fn SwappingPostingList(comptime I: type, comptime gram_len: u4) type {
     };
 }
 
-test "SwappingPlist.str_match" {
-    const TriPList = SwappingPostingList(u64, 3);
+test "SwapPlist.str_match" {
+    const TriPList = SwapPostingList(u64, 3);
         // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
     const Expected = union(enum){
         ok: []const u64,
@@ -268,14 +268,14 @@ test "SwappingPlist.str_match" {
     inline for (table) |case| {
         var ha7r = std.testing.allocator;
 
-        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, "/tmp/SwappingPlist.str_match", .{});
+        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, "/tmp/SwapPlist.str_match", .{});
         defer mmap_pager.deinit();
 
         var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
         defer lru.deinit();
         var pager = lru.pager();
 
-        var msa7r = mod_mmap.MmapSwappingAllocator(.{}).init(ha7r, pager);
+        var msa7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
         defer msa7r.deinit();
         var sa7r = msa7r.allocator();
 
