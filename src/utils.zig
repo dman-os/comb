@@ -2,7 +2,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub fn dbg(val: anytype) @TypeOf(val){
-    std.debug.print("{any}\n", .{val});
+    switch (@typeInfo(@TypeOf(val))) {
+        .Pointer => |ptr| {
+            if (ptr.size == .Slice) 
+                std.debug.print("{s}\n", .{val})
+            else std.debug.print("{any}\n", .{val});
+        },
+        else => std.debug.print("{any}\n", .{val}),
+    }
     return val;
 }
 

@@ -18,13 +18,15 @@ pub const mod_plist = @import("plist.zig");
 pub const mod_mmap = @import("mmap.zig");
 const SwapAllocator = mod_mmap.SwapAllocator;
 
-pub const mod_db = @import("db.zig");
+pub const Database = @import("Database.zig");
 
 pub const mod_index = @import("index.zig");
 
 pub const log_level = std.log.Level.debug;
 
 pub const mod_fanotify = @import("fanotify.zig");
+
+pub const mod_query = @import("Query.zig");
 
 pub fn main() !void {
     try swapping();
@@ -33,7 +35,7 @@ pub fn main() !void {
 }
 
 fn swapping () !void {
-    const Db = mod_db.Database;
+    const Db = Database;
 
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
@@ -113,7 +115,7 @@ fn swapping () !void {
     var phrase = std.ArrayList(u8).init(a7r);
     defer phrase.deinit();
     var matcher = db.plistNameMatcher();
-    defer matcher.deinit();
+    defer matcher.deinit(&db);
     var weaver = Db.FullPathWeaver{};
     defer weaver.deinit(a7r);
 
@@ -123,7 +125,7 @@ fn swapping () !void {
         std.log.info("Searching...", .{});
 
         _ = timer.reset();
-        var matches = try matcher.match(phrase.items);
+        var matches = try matcher.match(&db, phrase.items);
         const elapsed = timer.read();
 
         for (matches) |id, ii| {
@@ -140,12 +142,12 @@ fn swapping () !void {
 
 test {
     std.testing.refAllDecls(@This());
-    _ = mod_gram;
-    _ = mod_utils;
-    _ = mod_treewalking;
-    _ = mod_plist;
-    _ = mod_index;
-    _ = mod_mmap;
+    // _ = mod_gram;
+    // _ = mod_utils;
+    // _ = mod_treewalking;
+    // _ = mod_plist;
+    // _ = mod_index;
+    // _ = mod_mmap;
     // _ = mod_tpool;
     // _ = BinarySearchTree;
 }

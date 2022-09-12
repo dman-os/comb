@@ -117,19 +117,6 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
                 self.check.deinit(ha7r);
                 self.grams.deinit(ha7r);
             }
-            // const Clause = union(enum){
-            //     const Op = union(enum){
-            //         And: Clause,
-            //         Or: Clause,
-            //         // Not: Clause,
-            //     };
-            //     const Match = struct {
-            //         grams: []const Gram,
-            //     };
-            //     op: Op,
-            //     match: Match,
-            //
-            // };
             
             pub const Error = error { TooShort } || 
                     Allocator.Error || 

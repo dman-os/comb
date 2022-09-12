@@ -7,11 +7,11 @@ test {
     _ = Tree;
 }
 
-pub fn FsEntry(comptime I: type, comptime N: type) type {
+pub fn FsEntry(comptime P: type, comptime N: type) type {
     return struct {
         pub const Kind = std.fs.File.Kind;
         name: N,
-        parent: I,
+        parent: P,
         kind: Kind,
         depth: usize,
         size: u64,
@@ -24,8 +24,8 @@ pub fn FsEntry(comptime I: type, comptime N: type) type {
         atime: i64,
         mtime: i64,
 
-        pub fn clone(orig: *const @This(), new_name: anytype) FsEntry(I, @TypeOf(new_name)) {
-            return FsEntry(I, @TypeOf(new_name)) {
+        pub fn clone(orig: *const @This(), new_name: anytype) FsEntry(P, @TypeOf(new_name)) {
+            return FsEntry(P, @TypeOf(new_name)) {
                 // .name = try a7r.dupe(u8, orig.name),
                 .name = new_name,
                 .parent = orig.parent,
@@ -46,12 +46,12 @@ pub fn FsEntry(comptime I: type, comptime N: type) type {
         /// This clones it fo sure
         pub fn conv(
             orig: *const @This(), 
-            comptime P: type, 
+            comptime NP: type, 
             comptime NN: type, 
-            new_parent: P,
+            new_parent: NP,
             new_name: NN,
-        ) FsEntry(P, NN) {
-            return FsEntry(P, NN) {
+        ) FsEntry(NP, NN) {
+            return FsEntry(NP, NN) {
                 .name = new_name,
                 .parent = new_parent,
                 .kind = orig.kind,
