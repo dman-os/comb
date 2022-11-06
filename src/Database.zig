@@ -17,8 +17,9 @@ const SwapAllocator = mod_mmap.SwapAllocator;
 
 const Query = @import("Query.zig");
 
-const mod_plist = @import("plist.zig");
+const mod_gram = @import("gram.zig");
 
+const mod_plist = @import("plist.zig");
 
 const Self = @This();
 const Database = Self;
@@ -71,9 +72,13 @@ const FreeSlots = std.PriorityQueue(
     }.cmp
 );
 
+const gram_len = 3;
+
 /// Our index, a trigram posting list with a gram length of 3.
 /// We associate each trigram with a set of `Id`.
-const PList = mod_plist.SwapPostingList(Id, 3);
+const PList = mod_plist.SwapPostingList(Id, gram_len);
+
+const Gram = mod_gram.Gram(gram_len);
 
 config: Config,
 /// The heap allocator.
@@ -133,7 +138,7 @@ fn appendEntry(self: *Self, entry: Entry) !void {
 }
 
 /// Add an entry to the database.
-pub fn file_created(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
+pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     // clone the entry but store the name on the swap this time
     const swapped_entry = entry.clone(
         try self.sa7r.dupeJustPtr(entry.name)
@@ -328,7 +333,7 @@ pub const PlistNameMatcher = struct {
     }
 
     pub fn match(self: *@This(), db: *const Database, string: []const u8) ![]const Id {
-        return try self.inner.str_match(
+        return try self.inner.strMatch(
             db.ha7r, 
             db.sa7r, 
             db.pager,
@@ -339,28 +344,264 @@ pub const PlistNameMatcher = struct {
     }
 };
 
-pub const Querier = struct {
+pub const Quexecutor = struct {
+    pub const Error = error { InvalidQuery };
+    const Plan = struct {
+        const NodeId = usize;
+        const Node = struct {
+            const Payload = union(enum) {
+                pub const Tag = @typeInfo(@This()).Union.tag_type orelse unreachable;
+                ixion: []Node,
+                @"union": []Node,
+                complement: NodeId,
+                gramMatch: Gram,
+            };
+
+            // parent: NodeId,
+            load: Payload,
+        };
+
+        nodes: std.ArrayListUnmanaged(Node) = .{},
+
+        fn init() @This() {
+            return Self {};
+        }
+
+        pub fn clear(self: *@This()) void {
+            self.nodes.clearRetainingCapacity();
+        }
+
+        pub fn deinit(self: *@This(), ha7r: Allocator) void {
+            self.clear();
+            self.nodes.deinit(ha7r);
+        }
+
+        fn build(
+            self: *@This(), 
+            ha7r: Allocator,
+            clause: *const Query.Filter.Clause
+        ) !void {
+            _ = self;
+            _ = ha7r;
+            _ = clause;
+            self.nodes.clearRetainingCapacity();
+            var root = try self.nodes.addOne(ha7r);
+            root.* = try self.buildQueryDAG(ha7r, clause);
+        }
+
+        fn buildQueryDAG(
+            self: *@This(), 
+            ha7r: Allocator,
+            clause: *const Query.Filter.Clause
+        ) anyerror!Node {
+            return switch (clause.*) {
+                .op => |load| switch (load) {
+                    .@"and" => |clauses| blk: {
+                        if (clauses.len < 2) {
+                            println("and clauses need 2 or more children: {any}", .{ clause });
+                            return Error.InvalidQuery;
+                        }
+                        var start_idx = self.nodes.items.len;
+                        // allocate the children contigiously in `self.nodes`
+                        // and just return a slice from that
+                        try self.nodes.resize(ha7r, start_idx + clauses.len);
+                        var children = self.nodes.items[start_idx..(start_idx + clauses.len)];
+                        for (clauses) |subclause, ii| {
+                            children[ii] = try self.buildQueryDAG(ha7r, &subclause);
+                        }
+                        // TODO: consider using an arena allocator and pointers instead
+                        // there's no advatage in this scheme if the NodeId's don't have
+                        // generations
+                        break :blk Node {
+                            .load = Node.Payload {
+                                .ixion = children,
+                            },
+                        };
+                    },
+                    .@"or" => |clauses| blk: {
+                        if (clauses.len < 2) {
+                            println("or clauses need 2 or more children: {any}", .{ clause });
+                            return Error.InvalidQuery;
+                        }
+                        var start_idx = self.nodes.items.len;
+                        try self.nodes.resize(ha7r, start_idx + clauses.len);
+                        var children = self.nodes.items[start_idx..(start_idx + clauses.len)];
+                        for (clauses) |subclause, ii| {
+                            children[ii] = try self.buildQueryDAG(ha7r, &subclause);
+                        }
+                        break :blk Node {
+                            .load = Node.Payload {
+                                .@"union" = children,
+                            },
+                        };
+                    },
+                    .not => |subclause| blk: { 
+                        try self.nodes.append(
+                            ha7r, 
+                            try self.buildQueryDAG(ha7r, subclause)
+                        );
+                        break :blk Node {
+                            .load = Node.Payload {
+                                .complement = self.nodes.items.len - 1,
+                            },
+                        };
+                    },
+                },
+                .param => |load|  switch (load) {
+                    .nameMatch => |nameMatch| blk: {
+                        const GramPos = mod_gram.GramPos(gram_len);
+                        var start_idx = self.nodes.items.len;
+                        const appenderImpl = struct {
+                            a7r: Allocator,
+                            list: *std.ArrayListUnmanaged(Node),
+                            fn append(this: *@This(), gram: GramPos) !void {
+                                try this.list.append(this.a7r, Node {
+                                    .load = Node.Payload {
+                                        .gramMatch = gram.gram,
+                                    },
+                                });
+                            }
+                        };
+                        try mod_gram.grammer(
+                            gram_len, 
+                            nameMatch.string,
+                            false,
+                            &.{},
+                            mod_utils.Appender(GramPos).new(
+                                &appenderImpl { .a7r = ha7r, .list = &self.nodes },
+                                appenderImpl.append
+                            )
+                        );
+                        break :blk Node {
+                            .load = Node.Payload {
+                                .ixion = self.nodes.items[start_idx..],
+                            },
+                        };
+                    }
+                },
+            };
+        }
+    };
+
+
     db: *Database,
     name_matcher: PlistNameMatcher = .{},
     id_buf: std.ArrayListUnmanaged(Id) = .{},
+    check: std.AutoHashMapUnmanaged(Id, void) = .{},
+    plan: Plan = .{},
+    // lists: std.ArrayListUnmanaged(Plan.Shortlist) = {},
+    // filters: std.ArrayListUnmanaged(Plan.Filter) = {},
 
     pub fn init(db: *Database) @This() {
         return @This() {
             .db = db,
         };
     }
+
     pub fn deinit(self: *@This()) void {
         self.name_matcher.deinit(self.db);
         self.id_buf.deinit(self.db.ha7r);
+        self.plan.deinit(self.db.ha7r);
+        // self.lists.deinit(self.db.ha7r);
+        // self.filters.deinit(self.db.ha7r);
     }
 
-    pub fn query(self: *@This(), input: *const Query) ![]Id {
-        var out = &self.id_buf;
-        out.clearRetainingCapacity();
+    const ExecErr = Allocator.Error || mod_mmap.Pager.SwapInError;
+
+    fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id {
+        // const IdSet = std.AutoHashMapUnmanaged(Id, void);
+        // const IdSet = std.ArrayListUnmanaged(Id, void);
+        const IdSet = std.AutoHashMap(Id, void);
+        return switch (node.load) {
+            .ixion => |children| blk: {
+                var check = IdSet.init(ha7r);
+                defer check.deinit();
+                // println("ixion: ", .{});
+                var result = std.ArrayList(Id).fromOwnedSlice(
+                    ha7r,
+                    try self.execNode(&children[0], ha7r), 
+                );
+                defer result.deinit();
+                // println("-- {any}", .{ result.items });
+                for (children[1..]) |subnode| {
+                    if (result.items.len == 0) break;
+                    check.clearRetainingCapacity();
+                    for (result.items) |item|{
+                        try check.put(item, {});
+                    }
+                    result.clearRetainingCapacity();
+                    var subnode_result = try self.execNode(&subnode, ha7r);
+                    defer ha7r.free(subnode_result);
+
+                    // println("-- {any}", .{ subnode_result });
+
+                    for(subnode_result) |item| {
+                        if (check.contains(item)) {
+                            try result.append(item);
+                        }
+                    }
+                }
+                break :blk result.toOwnedSlice();
+            },
+            .@"union" => |children| blk: {
+                var result = std.ArrayList(Id).fromOwnedSlice(
+                    ha7r,
+                    try self.execNode(&children[0], ha7r), 
+                );
+                defer result.deinit();
+                var set = IdSet.init(ha7r);
+                defer set.deinit();
+                for (result.items) |item| {
+                    try set.put(item, {});
+                }
+                for (children) |subnode| {
+                    var subnode_result = try self.execNode(&subnode, ha7r);
+                    defer ha7r.free(subnode_result);
+                    for (subnode_result) |item| {
+                        const res = try set.getOrPut(item);
+                        if (!res.found_existing){
+                            // FIXME: is this neccessary
+                            res.value_ptr.* = {};
+                            try result.append(item);
+                        }
+                    }
+                }
+                break :blk result.toOwnedSlice();
+            },
+            .complement => |child| {
+                _ = child;
+                std.debug.todo("fuck");
+            },
+            .gramMatch => |gram| {
+                // println("gramMatch: {any}", .{ gram });
+                var out = std.ArrayList(Id).init(ha7r);
+                defer out.deinit();
+                try self.db.plist.gramItems(
+                    gram, 
+                    self.db.sa7r,
+                    self.db.pager,
+                    mod_utils.Appender(Id).forList(&out)
+                );
+                return out.toOwnedSlice();
+            }
+        };
+    }
+
+    pub fn query(self: *@This(), input: *const Query) ![]const Id {
         if (input.filter) |filter| {
-            _ = filter;
-            @panic("todo");
+            defer self.plan.clear();
+            try self.plan.build(self.db.ha7r, &filter.root);
+            var arena = std.heap.ArenaAllocator.init(self.db.ha7r);
+            defer arena.deinit();
+            var ha7r = arena.allocator();
+            var temp_result = try self.execNode(&self.plan.nodes.items[0], ha7r);
+            defer ha7r.free(temp_result);
+            self.id_buf.clearRetainingCapacity();
+            try self.id_buf.appendSlice(self.db.ha7r, temp_result);
+            return self.id_buf.items;
         } else {
+            var out = &self.id_buf;
+            out.clearRetainingCapacity();
             var it = self.db.meta.iterator(self.db.sa7r, self.db.pager);
             defer it.close();
             var ii: u24 = 0;
@@ -370,10 +611,11 @@ pub const Querier = struct {
                 }
                 ii += 1;
             }
+            return out.items;
         }
-        return out.items;
     }
 };
+
 
 test "Database.usage" {
     var a7r = std.testing.allocator;
@@ -410,7 +652,7 @@ test "Database.usage" {
         .mtime = 0,
     };
 
-    const id = try db.file_created(&entry);
+    const id = try db.fileCreated(&entry);
     var ret = try rdr.get(&db, id);
 
     try std.testing.expectEqual(entry, ret.clone(entry.name));
@@ -440,18 +682,124 @@ fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
     };
 }
 
-// fn randFile(name: []const u8) FsEntry()
-test "Db.query" {
+const e2e = struct {
     const Case = struct {
         name: []const u8,
-        query: Query,
+        query: []const u8,
         entries: []const FsEntry([] const u8, [] const u8),
         expected: [] const usize,
     };
-    var table = [_]Case{
+
+    fn run(table: []const Case) !void {
+        var ha7r = std.testing.allocator;
+        var big_buf = [_]u8{0} ** 1024;
+        for (table) |case| {
+            var mmap_pager = try mod_mmap.MmapPager.init(
+                ha7r, 
+                try std.fmt.bufPrint(big_buf[0..], "/tmp/Database.query.{s}", .{ case.name }),
+                .{}
+            );
+            defer mmap_pager.deinit();
+
+            var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
+            defer lru.deinit();
+
+            var pager = lru.pager();
+
+            var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
+            defer ma7r.deinit();
+
+            var sa7r = ma7r.allocator();
+
+            var db = Database.init(ha7r, pager, sa7r, .{});
+            defer db.deinit();
+
+            var querier = Quexecutor.init(&db);
+            defer querier.deinit();
+
+            var declared_map = try ha7r.alloc(Id, case.entries.len);
+            defer ha7r.free(declared_map);
+
+            // add the files while making sure any implied parent dir 
+            // in path string is also present
+            {
+                var path_id_map = std.StringHashMap(Id).init(ha7r);
+                defer {
+                    var it = path_id_map.keyIterator();
+                    while(it.next()) |key| {
+                        ha7r.free(key.*);
+                    }
+                    path_id_map.deinit();
+                }
+
+                var stack = std.ArrayList(FsEntry([] const u8, [] const u8)).init(ha7r);
+                defer stack.deinit();
+
+                for (case.entries) |entry, ii| {
+                    defer stack.clearRetainingCapacity();
+                    try stack.append(entry);
+                    while (true) {
+                        // println(
+                        //     "name: {s}, parent: {s}",
+                        //     .{
+                        //         stack.items[stack.items.len - 1].name,
+                        //         stack.items[stack.items.len - 1].parent,
+                        //      }
+                        // );
+                        if (
+                            path_id_map.contains(stack.items[stack.items.len - 1].parent)
+                            or
+                            std.mem.eql(u8, stack.items[stack.items.len - 1].name, "/")
+                        ) break;
+                        try stack.append(genRandFile(stack.items[stack.items.len - 1].parent));
+                    }
+                    var id: Id = undefined;
+                    while (stack.popOrNull()) |s_entry| {
+                        var is_root = std.mem.eql(u8, s_entry.name, "/");
+
+                        const parent = path_id_map.get(s_entry.parent) 
+                            orelse if (is_root)
+                                Id { .id = 0, .gen = 0 }
+                            else { 
+                                println("name: {s}, parent: {s}", .{ s_entry.name, s_entry.parent });
+                                unreachable;
+                            };
+
+                        id = try db.fileCreated(
+                            &s_entry.conv(Id, []const u8, parent, s_entry.name)
+                        );
+                        try path_id_map.put(
+                            try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
+                            // if (is_root)
+                            //     try ha7r.dupe(u8, "/")
+                            // else 
+                            //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
+                            id
+                        );
+                    }
+                    declared_map[ii] = id;
+                }
+            }
+            var parsed_query = try Query.parse(ha7r, case.query);
+            defer parsed_query.deinit(ha7r);
+            var results = try querier.query(&parsed_query);
+            var expected_id_list = try ha7r.alloc(Id, case.expected.len);
+            defer ha7r.free(expected_id_list);
+            for (case.expected) |ex_idx, ii| {
+                expected_id_list[ii] = declared_map[ex_idx];
+            }
+            println("result: {any}, expected: {any}", .{ results, expected_id_list });
+            try std.testing.expectEqualSlices(Id, expected_id_list, results);
+        }
+    }
+};
+
+// fn randFile(name: []const u8) FsEntry()
+test "Db.e2e" {
+    var table = [_]e2e.Case {
         .{
             .name = "supports_no_filter",
-            .query = Query.Builder.init().build(),
+            .query = "",
             .entries = &.{
                 genRandFile("/"),
                 genRandFile("/you"),
@@ -465,98 +813,18 @@ test "Db.query" {
             },
             .expected = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 },
         },
+        .{
+            .name = "supports_name_match",
+            .query = "needle",
+            .entries = &.{
+                genRandFile("/because/needle"),
+                genRandFile("/dreaming/costs/money"),
+                genRandFile("/my/dear/needle"),
+            },
+            .expected = &.{ 0,  2, },
+        },
     };
-    var ha7r = std.testing.allocator;
-    var big_buf = [_]u8{0} ** 1024;
-    for (table) |case| {
-        var mmap_pager = try mod_mmap.MmapPager.init(
-            ha7r, 
-            try std.fmt.bufPrint(big_buf[0..], "/tmp/Database.query.{s}", .{ case.name }),
-            .{}
-        );
-        defer mmap_pager.deinit();
-
-        var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
-        defer lru.deinit();
-
-        var pager = lru.pager();
-
-        var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
-        defer ma7r.deinit();
-
-        var sa7r = ma7r.allocator();
-
-        var db = Database.init(ha7r, pager, sa7r, .{});
-        defer db.deinit();
-
-        var querier = Querier.init(&db);
-        defer querier.deinit();
-
-        var expected_map = std.ArrayList(Id).init(ha7r);
-        defer expected_map.deinit();
-
-        // add the files
-        {
-            var path_id_map = std.StringHashMap(Id).init(ha7r);
-            defer {
-                var it = path_id_map.keyIterator();
-                while(it.next()) |key| {
-                    ha7r.free(key.*);
-                }
-                path_id_map.deinit();
-            }
-
-            var stack = std.ArrayList(FsEntry([] const u8, [] const u8)).init(ha7r);
-            defer stack.deinit();
-
-            for (case.entries) |entry| {
-                defer stack.clearRetainingCapacity();
-                try stack.append(entry);
-                while (true) {
-                    // println(
-                    //     "name: {s}, parent: {s}",
-                    //     .{
-                    //         stack.items[stack.items.len - 1].name,
-                    //         stack.items[stack.items.len - 1].parent,
-                    //      }
-                    // );
-                    if (
-                        path_id_map.contains(stack.items[stack.items.len - 1].parent)
-                        or
-                        std.mem.eql(u8, stack.items[stack.items.len - 1].name, "/")
-                    ) break;
-                    try stack.append(genRandFile(stack.items[stack.items.len - 1].parent));
-                }
-                var id: Id = undefined;
-                while (stack.popOrNull()) |s_entry| {
-                    var is_root = std.mem.eql(u8, s_entry.name, "/");
-
-                    const parent = path_id_map.get(s_entry.parent) 
-                        orelse if (is_root)
-                            Id { .id = 0, .gen = 0 }
-                        else { 
-                            println("name: {s}, parent: {s}", .{ s_entry.name, s_entry.parent });
-                            unreachable;
-                        };
-
-                    id = try db.file_created(
-                        &s_entry.conv(Id, []const u8, parent, s_entry.name)
-                    );
-                    try path_id_map.put(
-                        try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
-                        // if (is_root)
-                        //     try ha7r.dupe(u8, "/")
-                        // else 
-                        //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
-                        id
-                    );
-                }
-                try expected_map.append(id);
-            }
-        }
-        var results = try querier.query(&case.query);
-        try std.testing.expectEqualSlices(Id, expected_map.items, results);
-    }
+    try e2e.run(table[0..]);
 }
 
 // pub const ColumnarDatabase = struct {

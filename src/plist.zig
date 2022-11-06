@@ -94,6 +94,24 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
             }
         }
 
+        /// Returned slice is only valid until next modification of `self`.
+        pub fn gramItems(
+            self: *const Self,
+            gram: Gram,
+            sa7r: SwapAllocator,
+            pager: Pager,
+            appender: Appender(I)
+        ) !void {
+            if (self.map.get(gram)) |list| {
+                var it = list.iterator(sa7r, pager);
+                defer it.close();
+                while (try it.next()) |ptr| {
+                    const id = ptr.*;
+                    try appender.append(id);
+                }
+            }
+        }
+
         pub const StrMatcher = struct {
             out_vec: std.ArrayListUnmanaged(I) = .{},
             check: std.AutoHashMapUnmanaged(I, void) = .{},
@@ -124,7 +142,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
 
             /// Returned slice is invalid by next usage of this func.
             /// FIXME: optimize
-            pub fn str_match(
+            pub fn strMatch(
                 self: *StrMatcher, 
                 ha7r: Allocator, 
                 sa7r: SwapAllocator, 
@@ -199,7 +217,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
     };
 }
 
-test "SwapPlist.str_match" {
+test "SwapPlist.strMatch" {
     const TriPList = SwapPostingList(u64, 3);
         // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
     const Expected = union(enum){
@@ -255,7 +273,7 @@ test "SwapPlist.str_match" {
     inline for (table) |case| {
         var ha7r = std.testing.allocator;
 
-        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, "/tmp/SwapPlist.str_match", .{});
+        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, "/tmp/SwapPlist.strMatch", .{});
         defer mmap_pager.deinit();
 
         var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
@@ -278,7 +296,7 @@ test "SwapPlist.str_match" {
             );
         }
 
-        var res = matcher.str_match(ha7r, sa7r, pager, &plist, case.query, std.ascii.spaces[0..]);
+        var res = matcher.strMatch(ha7r, sa7r, pager, &plist, case.query, std.ascii.spaces[0..]);
         switch (case.expected) {
             .ok => |expected|{
                 var matches = try res;
@@ -372,7 +390,19 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
             }
         }
 
-        pub fn str_matcher(allocator: Allocator) StrMatcher {
+        /// Returned slice is only valid until next modification of `self`.
+        pub fn gramItems(
+            self: *const Self,
+            gram: Gram,
+        ) []const I {
+            if (self.map.get(gram)) |list| {
+                return list.items;
+            } else {
+                return &[_]I{};
+            }
+        }
+
+        pub fn strMatcher(allocator: Allocator) StrMatcher {
             return StrMatcher.init(allocator);
         }
 
@@ -413,7 +443,7 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
 
             /// Returned slice is invalid by next usage of this func.
             /// FIXME: optimize
-            pub fn str_match(
+            pub fn strMatch(
                 self: *StrMatcher, 
                 plist: *const Self,
                 string: []const u8, 
@@ -474,7 +504,7 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
     };
 }
 
-test "plist.str_match" {
+test "plist.strMatch" {
     const TriPList = PostingListUnmanaged(u64, 3);
         // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
     const Expected = union(enum){
@@ -532,14 +562,14 @@ test "plist.str_match" {
         var plist = TriPList.init();
         defer plist.deinit(allocator);
 
-        var matcher = TriPList.str_matcher(allocator);
+        var matcher = TriPList.strMatcher(allocator);
         defer matcher.deinit();
 
         for (case.items) |name, id| {
             try plist.insert(std.testing.allocator, @as(u64, id), name, std.ascii.spaces[0..]);
         }
 
-        var res = matcher.str_match(&plist, case.query, std.ascii.spaces[0..]);
+        var res = matcher.strMatch(&plist, case.query, std.ascii.spaces[0..]);
         switch (case.expected) {
             .ok => |expected|{
                 var matches = try res;

@@ -816,11 +816,11 @@ pub const LRUSwapCache = struct {
         self.cold.deinit(self.a7r);
     }
 
-    pub fn hot_count(self: *const Self) u32 {
+    pub fn hotCount(self: *const Self) u32 {
         return self.hot.count();
     }
     
-    pub fn cold_count(self: *const Self) u32 {
+    pub fn coldCount(self: *const Self) u32 {
         return self.cold.map.count();
     }
 

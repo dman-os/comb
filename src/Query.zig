@@ -23,6 +23,12 @@ sorting_field: SortingField = .noSorting,
 sorting_order: SortingOrder = .ascending,
 filter: ?Filter = null,
 
+pub fn deinit(self: *@This(), ha7r: Allocator) void {
+    if (self.filter) |*filter| {
+        filter.root.deinit(ha7r);
+    }
+}
+
 pub const SortingField = enum {
     noSorting,
     name,
@@ -47,29 +53,58 @@ pub const SortingOrder = enum {
 
 pub const Filter = struct {
     pub const Param = union(enum) {
-        pub const NameMatch = struct {
+        nameMatch: struct {
             string: []const u8,
-        };
-        nameMatch: NameMatch,
+            pub fn deinit(self: *@This(), ha7r: Allocator) void {
+                ha7r.free(self.string);
+            }
+        },
+
+        pub fn deinit(self: *@This(), ha7r: Allocator) void {
+            switch (self.*) {
+                .nameMatch => |*load| load.deinit(ha7r),
+            }
+        }
     };
     pub const Clause = union(enum) {
         pub const Op = union(enum) {
-            pub const Tag = @typeInfo(@This()).Union.tag_type;
+            pub const Tag = @typeInfo(@This()).Union.tag_type orelse unreachable;
 
             @"and": []Clause,
             @"or": []Clause,
             not: *Clause,
 
             pub fn deinit(self: *@This(), ha7r: Allocator) void {
-                switch (self) {
-                    .@"and" => |clauses| ha7r.free(clauses),
-                    .@"or" => |clauses| ha7r.free(clauses),
-                    .not => |clause| ha7r.destroy(clause),
+                switch (self.*) {
+                    .@"and" => |clauses| {
+                        for (clauses) |*clause| {
+                            clause.deinit(ha7r);
+                        }
+                        ha7r.free(clauses);
+                    },
+                    .@"or" => |clauses| {
+                        for (clauses) |*clause| {
+                            clause.deinit(ha7r);
+                        }
+                        ha7r.free(clauses);
+                    },
+                    .not => |clause| { 
+                        clause.deinit(ha7r);
+                        ha7r.destroy(clause); 
+                    },
                 }
             }
         };
         op: Op,
         param: Param,
+
+        pub fn deinit(self: *Clause, ha7r: Allocator) void {
+            switch (self.*) {
+                .op => |*load| load.deinit(ha7r),
+                .param => |*load| load.deinit(ha7r),
+//                 else => unreachable, // FIXME:
+            }
+        }
 
         pub const Builder = struct {
             ha7r: Allocator,
@@ -113,7 +148,7 @@ pub const Filter = struct {
                     self.ha7r, 
                     Clause { 
                         .param = Param{ 
-                            .nameMatch = Param.NameMatch{ 
+                            .nameMatch = .{ 
                                 .string = try self.ha7r.dupe(u8, string) 
                             } 
                         } 
@@ -121,7 +156,7 @@ pub const Filter = struct {
                 );
             }
 
-            pub inline fn build(self: @This()) !Clause {
+            pub inline fn build(self: *@This()) !Clause {
                 defer self.deinit();
                 if (self.sub_clauses.items.len == 0) 
                     @panic(@typeName(@This()) ++ " need at least one sub clauses");
@@ -132,7 +167,7 @@ pub const Filter = struct {
                                 @panic(".and operator need more than one sub clause");
                             return Clause { 
                                 .op = Op { 
-                                    .@"and" = try self.sub_clauses.toOwnedSlice(self.ha7r),
+                                    .@"and" = self.sub_clauses.toOwnedSlice(self.ha7r),
                                 } 
                             };
                         },
@@ -141,7 +176,7 @@ pub const Filter = struct {
                                 @panic(".or operator need more than one sub clause");
                             return Clause { 
                                 .op = Op { 
-                                    .@"or" = try self.sub_clauses.toOwnedSlice(self.ha7r),
+                                    .@"or" = self.sub_clauses.toOwnedSlice(self.ha7r),
                                 } 
                             };
                         },
@@ -227,3 +262,17 @@ pub const Builder = struct {
         return self.query;
     }
 };
+
+pub fn parse(ha7r: Allocator, string: [] const u8) !Self {
+    _ = string;
+    var builder = Builder.init();
+    var clause_builder = Filter.Clause.Builder.init(ha7r);
+    var it = std.mem.tokenize(u8, string, "");
+    while (it.next()) |token| {
+        try clause_builder.addNameMatch(token);
+    }
+    if(clause_builder.sub_clauses.items.len > 0) {
+        builder.setFilter(try clause_builder.build());
+    }
+    return builder.build();
+}

@@ -92,7 +92,7 @@ fn swapping () !void {
                 new_ids[t_entry.parent], 
                 t_entry.name,
             );
-            new_ids[ii] = try db.file_created(&i_entry);
+            new_ids[ii] = try db.fileCreated(&i_entry);
         }
         const index_elapsed = timer.read();
         std.log.info(

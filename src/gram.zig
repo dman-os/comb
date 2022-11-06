@@ -32,20 +32,20 @@ pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, 
     if (delimiters.len > 0) {
         var iter = std.mem.tokenize(u8, string, delimiters);
         while (iter.next()) |token| {
-            try token_grammer(gram_len, token, @ptrToInt(token.ptr) - @ptrToInt(string.ptr), boundary_grams, out);
+            try tokenGrammer(gram_len, token, @ptrToInt(token.ptr) - @ptrToInt(string.ptr), boundary_grams, out);
         }
     } else {
-        try token_grammer(gram_len, string, 0, boundary_grams, out);
+        try tokenGrammer(gram_len, string, 0, boundary_grams, out);
     }
 }
 
-fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, boundary_grams: bool, out: Appender(GramPos(gram_len))) !void {
+fn tokenGrammer(comptime gram_len: u4, string: []const u8, offset: usize, boundary_grams: bool, out: Appender(GramPos(gram_len))) !void {
     if (gram_len == 0) {
         @compileError("gram_len is 0");
     }
     if (gram_len <= string.len) {
         if (boundary_grams) {
-            try left_boundaries(gram_len, string, offset, out);
+            try leftBoundaries(gram_len, string, offset, out);
         }
         var pos: usize = 0;
         while (pos + gram_len <= string.len) : ({
@@ -61,11 +61,11 @@ fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, bound
             try out.append(GramPos(gram_len).new(offset + pos, gram));
         }
         if (boundary_grams) {
-            try right_boundaries(gram_len, string, offset, out);
+            try rightBoundaries(gram_len, string, offset, out);
         }
     } else {
         // left boundaries
-        // we can't use the fn `left_boundaries`, which's partially comtime
+        // we can't use the fn `leftBoundaries`, which's partially comtime
         // because we're constrained by the string.len now (which is shorter
         // than gram_len)
         if (boundary_grams) {
@@ -83,7 +83,7 @@ fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, bound
                 // }) {
                 //     gram[gram_ii] = string[str_ii];
                 // }
-                const gram = fill_gram(gram_len, string[0..ii], gram_len - ii);
+                const gram = fillGram(gram_len, string[0..ii], gram_len - ii);
                 try out.append(GramPos(gram_len).new(offset, gram));
             }
         }
@@ -91,7 +91,7 @@ fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, bound
         // i.e TECs on the left
         // this isn't a boundary since the string.len is shorter than gram_len
         {
-            const gram = fill_gram(gram_len, string, gram_len - string.len);
+            const gram = fillGram(gram_len, string, gram_len - string.len);
             try out.append(GramPos(gram_len).new(offset, gram));
         }
         // if it's short enough to have TECs on both side
@@ -100,14 +100,14 @@ fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, bound
             while (ii > 0) : ({
                 ii -= 1;
             }) {
-                const gram = fill_gram(gram_len, string, ii);
+                const gram = fillGram(gram_len, string, ii);
                 try out.append(GramPos(gram_len).new(offset, gram));
             }
         }
         // fill it in from the left
         // i.e. TECS on the right
         {
-            const gram = fill_gram(gram_len, string, 0);
+            const gram = fillGram(gram_len, string, 0);
             try out.append(GramPos(gram_len).new(offset, gram));
         }
         // right boundaries
@@ -117,7 +117,7 @@ fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, bound
             while (start < string.len) : ({
                 start += 1;
             }) {
-                const gram = fill_gram(gram_len, string[start..], 0);
+                const gram = fillGram(gram_len, string[start..], 0);
                 try out.append(GramPos(gram_len).new(offset + start, gram));
             }
         }
@@ -125,7 +125,7 @@ fn token_grammer(comptime gram_len: u4, string: []const u8, offset: usize, bound
 }
 
 /// Panics if gram_len - start > string.len
-inline fn fill_gram(comptime gram_len: u4, string: []const u8, start: usize) Gram(gram_len) {
+inline fn fillGram(comptime gram_len: u4, string: []const u8, start: usize) Gram(gram_len) {
     var gram = [1]u8{TEC} ** gram_len;
     for (string) |char, ii| {
         gram[start + ii] = char;
@@ -137,7 +137,7 @@ inline fn fill_gram(comptime gram_len: u4, string: []const u8, start: usize) Gra
     return gram;
 }
 
-inline fn left_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
+inline fn leftBoundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
     // the following code will do something similar to what's shown below but for any gram_len
     // the commented out example is how it'd look if gram_len is 3
     // -- out.append(GramPos(2).new(0, .{ TEC, TEC, str[pos] }));
@@ -166,7 +166,7 @@ inline fn left_boundaries(comptime gram_len: u4, string: []const u8, offset: usi
     }
 }
 
-inline fn right_boundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
+inline fn rightBoundaries(comptime gram_len: u4, string: []const u8, offset: usize, out: Appender(GramPos(gram_len))) !void {
     const pos = string.len - gram_len;
     // the following code will do something similar to what's shown below but for any gram_len
     // the commented out example is how it'd look if gram_len is 3

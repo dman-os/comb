@@ -36,6 +36,37 @@
 - [ ] CLI client
 - [ ] IPC interface
 
+### Comb Query Executor
+
+Prolly a DAG; but except nodes can be deduplicated.
+
+- Nodes are lists of ids: *shortlist*
+- Edges are *filters*
+- Start node is the entire table, end the result
+
+Concerns:
+- how to identify duplicate nodes?
+- how to and when to use indices?
+- pagination strategy?
+- how to maximize page motion?
+- logical operators
+- multi threading
+- debugging tools: convert dag to exec trace
+- good algos for set operations, graph transformations...etc
+
+#### Node actions
+
+- Query Plan
+- Op 
+  - and
+    - set intersection
+  - or
+    - set union
+  - not
+    - inverse previous ops?
+- Param
+  - nameMatch
+
 ## devlog
 
 ### Upstream Issues

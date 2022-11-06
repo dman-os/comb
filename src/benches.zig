@@ -167,7 +167,7 @@ fn bench_plist(
         search_str: []const u8,
         matcher: mod_plist.PostingListUnmanaged(I, gram_len).StrMatcher,
         fn do(self: *Self) void {
-            _ = self.matcher.str_match(
+            _ = self.matcher.strMatch(
                     self.plist, 
                     self.search_str,
                     std.ascii.spaces[0..]
@@ -178,12 +178,12 @@ fn bench_plist(
         .a7r = a7r, 
         .plist = plist,
         .search_str = search_str,
-        .matcher = mod_plist.PostingListUnmanaged(I, gram_len).str_matcher(a7r),
+        .matcher = mod_plist.PostingListUnmanaged(I, gram_len).strMatcher(a7r),
     };
     defer {
         ctx.matcher.deinit();
     }
-    try mod_bench.bench("str_match", &ctx, BenchCtx.do, .{});
+    try mod_bench.bench("strMatch", &ctx, BenchCtx.do, .{});
 }
 
 test "rowscan.bench.gen" {
@@ -293,7 +293,7 @@ test "Db.NaiveNameMatcher" {
                 .atime = 2,
                 .mtime = 2,
             };
-            new_ids[ii] = try db.file_created(&i_entry);
+            new_ids[ii] = try db.fileCreated(&i_entry);
         }
         std.log.info(
             "Done adding items to index in {d} seconds", 
@@ -527,7 +527,7 @@ fn bench_plist_swapping(
         search_str: []const u8,
         matcher: PList.StrMatcher = .{},
         fn do(self: *Self) void {
-            _ = self.matcher.str_match(
+            _ = self.matcher.strMatch(
                     self.a7r, self.sa7r, self.pager,
                     self.plist, 
                     self.search_str,
@@ -545,7 +545,7 @@ fn bench_plist_swapping(
     defer {
         ctx.matcher.deinit(a7r);
     }
-    try mod_bench.bench("str_match", &ctx, BenchCtx.do, .{});
+    try mod_bench.bench("strMatch", &ctx, BenchCtx.do, .{});
 }
 
 test "SwapPList.bench.gen" {
@@ -588,7 +588,7 @@ test "SwapPList.bench.gen" {
         try plist.insert(a7r, sa7r, pager, @intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
         if (id % 10_000 == 0 ) {
             println("added {} items to plist, now at {s}", .{ id, entry.name });
-            // println("{} hot pages and {} cold pages items to plist", .{ lru.hot_count(), lru.cold_count() });
+            // println("{} hot pages and {} cold pages items to plist", .{ lru.hotCount(), lru.coldCount() });
         }
         if (entry.name.len > longest){
             longest = entry.name.len;

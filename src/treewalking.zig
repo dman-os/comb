@@ -277,7 +277,7 @@ pub const Tree = struct {
                         try self.scanDir(entry.name, dir, dir_id, depth + 1, dev);
                     } else {
                         const posix_name = try std.os.toPosixPath(entry.name);
-                        const meta = meta_no_follow(dir.fd, &posix_name) catch |err| {
+                        const meta = metaNoFollow(dir.fd, &posix_name) catch |err| {
                             const parent_path = try self.weaver.pathOf(
                                 self.tree.allocator, 
                                 self.tree,
@@ -358,7 +358,7 @@ const ReadMetaError = error {
 
 /// Name has to be sentinel terminated, I think.
 /// Modified from zig std lib
-fn meta_no_follow(dir_handle: std.os.fd_t, name: [*]const u8) !std.fs.File.MetadataLinux {
+fn metaNoFollow(dir_handle: std.os.fd_t, name: [*]const u8) !std.fs.File.MetadataLinux {
     const os = std.os;
     var stx = std.mem.zeroes(os.linux.Statx);
     const rcx = os.linux.statx(
@@ -446,10 +446,10 @@ pub const PlasticTree = struct {
         try self.list.append(Entry { .name = name, .depth = 0, .parent = 0 });
 
         // generate the rest
-        try self.gen_dir(0, 1, self.config.size - 1);
+        try self.genDir(0, 1, self.config.size - 1);
     }
 
-    fn gen_name(self: *Self) ![]u8 {
+    fn genName(self: *Self) ![]u8 {
         var rng = std.crypto.random;
 
         // random length
@@ -469,7 +469,7 @@ pub const PlasticTree = struct {
         return name;
     }
 
-    fn gen_dir(self: *Self, dir_id: u64, depth: usize, share: usize) Allocator.Error!void {
+    fn genDir(self: *Self, dir_id: u64, depth: usize, share: usize) Allocator.Error!void {
         var rng = std.crypto.random;
 
         const child_count = rng.uintAtMost(usize, std.math.min(share, self.config.max_dir_size));
@@ -477,19 +477,19 @@ pub const PlasticTree = struct {
         var remaining_share = share - child_count;
         var ii: usize = 0;
         while(ii < child_count): ({ ii += 1; }){
-            const name = try self.gen_name();
+            const name = try self.genName();
             try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
 
             if(remaining_share > 0 and rng.float(f64) > self.config.file_v_dir){
                 const sub_dir_share = @floatToInt(usize, rng.float(f64) * @intToFloat(f64, remaining_share));
                 remaining_share -= sub_dir_share;
-                try self.gen_dir(self.list.items.len - 1, depth + 1, sub_dir_share);
+                try self.genDir(self.list.items.len - 1, depth + 1, sub_dir_share);
             }
         }
         if (remaining_share > 0){
-            const name = try self.gen_name();
+            const name = try self.genName();
             try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
-            try self.gen_dir(self.list.items.len - 1, depth + 1, remaining_share - 1);
+            try self.genDir(self.list.items.len - 1, depth + 1, remaining_share - 1);
         }
     }
     test "PlasticTree.usage" {
