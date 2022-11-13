@@ -59,10 +59,20 @@ pub const Filter = struct {
                 ha7r.free(self.string);
             }
         },
+        childOf: *Clause,
+        descendantOf: *Clause,
 
         pub fn deinit(self: *@This(), ha7r: Allocator) void {
             switch (self.*) {
                 .nameMatch => |*load| load.deinit(ha7r),
+                .childOf => |subclause| { 
+                    subclause.deinit(ha7r);
+                    ha7r.destroy(subclause); 
+                },
+                .descendantOf => |subclause| { 
+                    subclause.deinit(ha7r);
+                    ha7r.destroy(subclause); 
+                },
             }
         }
     };
@@ -155,6 +165,25 @@ pub const Filter = struct {
                     }
                 );
             }
+
+            // pub inline fn withChildOf(self: @This(), parentFilter: Clause) !@This() {
+            //     self.addChildOf(parentFilter);
+            //     return self;
+            // }
+
+            // pub inline fn addChildOf(self: *@This(), parentFilter: Clause) !void {
+            //     if (string.len == 0) @panic("NameMatch string can not empty");
+            //     try self.sub_clauses.append(
+            //         self.ha7r, 
+            //         Clause { 
+            //             .param = Param{ 
+            //                 .nameMatch = .{ 
+            //                     .string = try self.ha7r.dupe(u8, string) 
+            //                 } 
+            //             } 
+            //         }
+            //     );
+            // }
 
             pub inline fn build(self: *@This()) !Clause {
                 defer self.deinit();
@@ -267,12 +296,22 @@ pub fn parse(ha7r: Allocator, string: [] const u8) !Self {
     _ = string;
     var builder = Builder.init();
     var clause_builder = Filter.Clause.Builder.init(ha7r);
-    var it = std.mem.tokenize(u8, string, "");
+    var it = std.mem.tokenize(u8, string, " ");
     while (it.next()) |token| {
+        // println("{s}", .{ token });
         try clause_builder.addNameMatch(token);
     }
     if(clause_builder.sub_clauses.items.len > 0) {
         builder.setFilter(try clause_builder.build());
     }
     return builder.build();
+}
+
+test "Query.parse" {
+    if (true) return error.SkipZigTest;
+    var ha7r = std.testing.allocator;
+
+    var query = try parse(ha7r, "bye dye");
+    defer query.deinit(ha7r);
+    println("{!}", .{ query });
 }

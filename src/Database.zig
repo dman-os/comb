@@ -90,6 +90,7 @@ table: SwapList(Entry),
 meta: SwapList(RowMeta),
 plist: PList = .{},
 free_slots: FreeSlots,
+lock: std.Thread.RwLock = .{},
 
 pub fn init(
     ha7r: Allocator, 
@@ -139,6 +140,8 @@ fn appendEntry(self: *Self, entry: Entry) !void {
 
 /// Add an entry to the database.
 pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
+    self.lock.lock();
+    defer self.lock.unlock();
     // clone the entry but store the name on the swap this time
     const swapped_entry = entry.clone(
         try self.sa7r.dupeJustPtr(entry.name)
@@ -188,13 +191,15 @@ pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
 pub const DatabseErr = error { StaleHandle,};
 
 pub fn isStale(self: *Self, id: Id) !bool {
+    self.lock.lockShared();
+    defer self.lock.unlockShared();
     if (self.meta.len <= id.id) return true;
     const row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
     defer self.meta.swapOut(self.sa7r, self.pager, id.id);
     return row.gen > id.gen;
 }
 
-pub fn idAt(self: *Self, idx: usize) !Id {
+fn idAt(self: *Self, idx: usize) !Id {
     const row = try self.meta.swapIn(self.sa7r, self.pager, idx);
     defer self.meta.swapOut(self.sa7r, self.pager, idx);
     return Id {
@@ -227,6 +232,9 @@ pub const Reader = struct {
     /// The returned slice borrows from `self` and is invalidated by the 
     /// next call of this method.
     pub fn get(self: *@This(), db: *Database, id: Id) !*Entry {
+        db.lock.lockShared();
+        defer db.lock.unlockShared();
+
         if (try db.isStale(id)) return error.StaleHandle;
         self.swapOutTableCache(db);
         const item = try db.table.swapIn(db.sa7r, db.pager, id.id);
@@ -249,10 +257,15 @@ pub const FullPathWeaver = struct {
         id: Id, 
         delimiter: u8
     ) ![]const u8 {
+
         self.buf.clearRetainingCapacity();
         var next_id = id;
         // const names = db.table.items(.name);
         // const parents = db.table.items(.parent);
+        
+        db.lock.lockShared();
+        defer db.lock.unlockShared();
+
         while (true) {
             if (try db.isStale(next_id)) return error.StaleHandle;
 
@@ -302,6 +315,9 @@ pub const NaiveNameMatcher = struct {
         self: *@This(),
         string: []const u8,
     ) ![]const Id {
+        self.db.lock.lockShared();
+        defer self.db.lock.unlockShared();
+
         self.out_vec.clearRetainingCapacity();
         var it = self.db.table.iterator(self.db.sa7r, self.db.pager);
         defer it.close();
@@ -328,11 +344,13 @@ pub fn plistNameMatcher(self: *Self) PlistNameMatcher {
 pub const PlistNameMatcher = struct {
     inner: PList.StrMatcher = .{},
 
-    pub fn deinit(self: *@This(), db: *const Database) void {
+    pub fn deinit(self: *@This(), db: *Database) void {
         self.inner.deinit(db.ha7r);
     }
 
-    pub fn match(self: *@This(), db: *const Database, string: []const u8) ![]const Id {
+    pub fn match(self: *@This(), db: *Database, string: []const u8) ![]const Id {
+        db.lock.lockShared();
+        defer db.lock.unlockShared();
         return try self.inner.strMatch(
             db.ha7r, 
             db.sa7r, 
@@ -355,6 +373,8 @@ pub const Quexecutor = struct {
                 @"union": []Node,
                 complement: NodeId,
                 gramMatch: Gram,
+                childOf: NodeId,
+                descendantOf: NodeId,
             };
 
             // parent: NodeId,
@@ -477,7 +497,29 @@ pub const Quexecutor = struct {
                                 .ixion = self.nodes.items[start_idx..],
                             },
                         };
-                    }
+                    },
+                    .childOf => |subclause| blk: {
+                        try self.nodes.append(
+                            ha7r, 
+                            try self.buildQueryDAG(ha7r, subclause)
+                        );
+                        break :blk Node {
+                            .load = Node.Payload {
+                                .childOf = self.nodes.items.len - 1,
+                            },
+                        };
+                    },
+                    .descendantOf => |subclause| blk: {
+                        try self.nodes.append(
+                            ha7r, 
+                            try self.buildQueryDAG(ha7r, subclause)
+                        );
+                        break :blk Node {
+                            .load = Node.Payload {
+                                .descendantOf = self.nodes.items.len - 1,
+                            },
+                        };
+                    },
                 },
             };
         }
@@ -583,7 +625,18 @@ pub const Quexecutor = struct {
                     mod_utils.Appender(Id).forList(&out)
                 );
                 return out.toOwnedSlice();
-            }
+            },
+            .childOf => |child_idx| {
+                var parents = try self.execNode(
+                    &self.plan.nodes.items[child_idx], ha7r
+                );
+                defer ha7r.free(parents);
+                std.debug.todo("fuck3");
+            },
+            .descendantOf => |child| {
+                _ = child;
+                std.debug.todo("fuck2");
+            },
         };
     }
 
@@ -788,7 +841,7 @@ const e2e = struct {
             for (case.expected) |ex_idx, ii| {
                 expected_id_list[ii] = declared_map[ex_idx];
             }
-            println("result: {any}, expected: {any}", .{ results, expected_id_list });
+            // println("result: {any}, expected: {any}", .{ results, expected_id_list });
             try std.testing.expectEqualSlices(Id, expected_id_list, results);
         }
     }
@@ -798,7 +851,7 @@ const e2e = struct {
 test "Db.e2e" {
     var table = [_]e2e.Case {
         .{
-            .name = "supports_no_filter",
+            .name = "supports_empty_query",
             .query = "",
             .entries = &.{
                 genRandFile("/"),

@@ -115,7 +115,7 @@ pub const Tree = struct {
             self.buf.deinit(allocator);
         }
         /// The returned slice is invalidated not long after.
-        pub fn pathOf(self: *FullPathWeaver, allocator: Allocator, tree: Tree, id: usize, delimiter: u8) ![]const u8 {
+        pub fn pathOf(self: *FullPathWeaver, allocator: Allocator, tree: *const Tree, id: usize, delimiter: u8) ![]const u8 {
             self.buf.clearRetainingCapacity();
             var next_id = id;
             while (true) {
@@ -175,7 +175,7 @@ pub const Tree = struct {
             if (self.tree.list.items.len % self.log_interval == 0) {
                 const path = try self.weaver.pathOf(
                     self.tree.allocator, 
-                    self.tree,
+                    &self.tree,
                     self.tree.list.items.len - 1, 
                     '/'
                 );
@@ -215,7 +215,7 @@ pub const Tree = struct {
                     std.fs.Dir.OpenError.AccessDenied => {
                         const parent_path = try self.weaver.pathOf(
                             self.tree.allocator, 
-                            self.tree,
+                            &self.tree,
                             parent_id, 
                             '/'
                         );
@@ -253,7 +253,7 @@ pub const Tree = struct {
                 if (dev != parent_dev) {
                     const parent_path = try self.weaver.pathOf(
                         self.tree.allocator, 
-                        self.tree,
+                        &self.tree,
                         parent_id, 
                         '/'
                     );
@@ -280,7 +280,7 @@ pub const Tree = struct {
                         const meta = metaNoFollow(dir.fd, &posix_name) catch |err| {
                             const parent_path = try self.weaver.pathOf(
                                 self.tree.allocator, 
-                                self.tree,
+                                &self.tree,
                                 dir_id, 
                                 '/'
                             );
@@ -319,7 +319,7 @@ pub const Tree = struct {
                     std.fs.IterableDir.Iterator.Error.AccessDenied => {
                         const parent_path = try self.weaver.pathOf(
                             self.tree.allocator, 
-                            self.tree,
+                            &self.tree,
                             parent_id, 
                             '/'
                         );

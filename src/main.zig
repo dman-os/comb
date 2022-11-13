@@ -19,6 +19,7 @@ pub const mod_mmap = @import("mmap.zig");
 const SwapAllocator = mod_mmap.SwapAllocator;
 
 pub const Database = @import("Database.zig");
+const Db = Database;
 
 pub const mod_index = @import("index.zig");
 
@@ -26,7 +27,7 @@ pub const log_level = std.log.Level.debug;
 
 pub const mod_fanotify = @import("fanotify.zig");
 
-pub const mod_query = @import("Query.zig");
+pub const Query = @import("Query.zig");
 
 pub fn main() !void {
     try swapping();
@@ -34,9 +35,84 @@ pub fn main() !void {
     // try mod_fanotify.demo();
 }
 
-fn swapping () !void {
-    const Db = Database;
+const FanotifyThread = struct {
+    ha7r: Allocator,
+    db: *Db,
+    thread: ?std.Thread = null,
+    die_signal: bool = false,
+    querier: Db.Quexecutor,
 
+    fn init(ha7r: Allocator, db: *Db) @This() {
+        return @This() { 
+            .ha7r = ha7r, 
+            .db = db,
+            .querier = Db.Quexecutor.init(db),
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.die_signal = true;
+        if (self.thread) |thread| {
+            thread.detach();
+        }
+        self.querier.deinit();
+    }
+
+    fn start(self: *@This()) !void {
+        self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
+    }
+
+    fn threadFn(self: *@This()) !void {
+        try mod_fanotify.listener(
+            self.ha7r,
+            "/",
+            &self.die_signal,
+            mod_utils.Appender(mod_fanotify.FanotifyEvent).new(
+                self,
+                @This().appendEvent
+            )
+        );
+    }
+
+    fn appendEvent(self: *@This(), event_in: mod_fanotify.FanotifyEvent) !void {
+        _ = self;
+        var event = event_in;
+        std.log.info("evt: {any}", .{ event });
+        defer event.deinit(self.ha7r);
+        //const FAN = mod_fanotify.FAN;
+        if (
+            event.kind.attrib and
+            event.name == null and
+            event.dir == null 
+        ) {
+            std.log.debug("neutrino attrib event", .{});
+        } else if (
+            event.kind.create and event.kind.delete
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.create 
+        ) {
+            //var dir = event.dir.?;
+            //const fb = Query.Filter.Clause.Builder.init(self.ha7r);
+            //try fb.addNameMatch(dir);
+            //var query = Query.Builder
+            //                .init()
+            //                .withFilter(
+            //                )
+            //                .build();
+            //
+            //var parent = self.querier.query();
+            // self.db.fileCreated()
+        }
+        else {
+            std.log.warn("unreconized event: {any}", .{ event });
+        }
+        // std.debug.todo("append");
+    }
+};
+
+fn swapping () !void {
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
 
@@ -65,6 +141,10 @@ fn swapping () !void {
 
     var name_arena = std.heap.ArenaAllocator.init(a7r);
     defer name_arena.deinit();
+
+    var fanotify_th = FanotifyThread.init(a7r, &db);
+    defer fanotify_th.deinit();
+    try fanotify_th.start();
 
     var timer = try std.time.Timer.start();
     {
@@ -114,8 +194,10 @@ fn swapping () !void {
     var stdin_rdr = stdin.reader();
     var phrase = std.ArrayList(u8).init(a7r);
     defer phrase.deinit();
-    var matcher = db.plistNameMatcher();
-    defer matcher.deinit(&db);
+    // var matcher = db.plistNameMatcher();
+    // defer matcher.deinit(&db);
+    var querier = Db.Quexecutor.init(&db);
+    defer querier.deinit();
     var weaver = Db.FullPathWeaver{};
     defer weaver.deinit(a7r);
 
@@ -125,7 +207,10 @@ fn swapping () !void {
         std.log.info("Searching...", .{});
 
         _ = timer.reset();
-        var matches = try matcher.match(&db, phrase.items);
+        var query = try Query.parse(a7r, phrase.items);
+        defer query.deinit(a7r);
+        // var matches = try matcher.match(&db, phrase.items);
+        var matches = try querier.query(&query);
         const elapsed = timer.read();
 
         for (matches) |id, ii| {
@@ -142,14 +227,16 @@ fn swapping () !void {
 
 test {
     std.testing.refAllDecls(@This());
-    // _ = mod_gram;
-    // _ = mod_utils;
-    // _ = mod_treewalking;
-    // _ = mod_plist;
-    // _ = mod_index;
-    // _ = mod_mmap;
-    // _ = mod_tpool;
-    // _ = BinarySearchTree;
+    // _ = ThreadPool;
+    _ = mod_utils;
+    _ = mod_mmap;
+    _ = mod_gram;
+    _ = mod_plist;
+    _ = mod_index;
+    _ = mod_fanotify;
+    _ = mod_treewalking;
+    _ = Database;
+    _ = Query;
 }
 
 // fn BinarySearchTree(
@@ -205,93 +292,125 @@ test {
 //     };
 // }
 
+//test "anyopaque.fn"{
+//    const inner = struct {
+//        num: usize,
+//        fn my_fn(self: *@This(), also: usize) void {
+//            std.debug.print("num = {}, also = {}", . {self.num, also} );
+//        }
+//    };
+//    const fn_ptr = @ptrCast(*const anyopaque, inner.my_fn);
+//    var args = .{ inner {.num = 10 }, 20 };
+//    var arg_ptr = @ptrCast(*anyopaque, &args);
+//    _ = arg_ptr;
+//    @call(.{}, fn_ptr, .{});
+//}
 
-
-// test "anyopaque.fn"{
-//     const inner = struct {
-//         num: usize,
-//         fn my_fn(self: *@This(), also: usize) void {
-//             std.debug.print("num = {}, also = {}", . {self.num, also} );
-//         }
+// const ThreadPool = struct {
+//     const Self = @This();
+//     const Task = struct {
+//         args: *anyopaque,
+//         func: fn (*anyopaque) void,
 //     };
-//     const fn_ptr = @ptrCast(*const anyopaque, inner.my_fn);
-//     var args = .{ inner {.num = 10 }, 20 };
-//     var arg_ptr = @ptrCast(*anyopaque, &args);
-//     _ = arg_ptr;
-//     @call(.{}, fn_ptr, .{});
-// }
-
-// const mod_tpool = struct {
-//     const ThreadPool = struct {
-//         const Self = @This();
-//         const Allocator = Allocator;
-//         const Task = struct {
-//             args: *anyopaque,
-//             func: fn (*anyopaque) void,
+//     const Queue = std.atomic.Queue(Task);
+// 
+//     ha7r: Allocator,
+//     queue: Queue,
+//     opt_threads: ?[]std.Thread = null,
+//     break_signal: bool = false,
+//     opt_death_signal: ?[]bool = null,
+// 
+//     /// You can use `std.Thread.getCpuCount` to set the count.
+//     fn init(ha7r: Allocator) Self {
+//         return Self {
+//             .ha7r = ha7r,
+//             .queue = Queue.init(),
 //         };
-
-//         allocator: Allocator,
-//         threads: []std.Thread,
-//         queue: std.atomic.Queue(Task),
-//         break_signal: bool = false,
-//         dead_signal: []bool,
-
-//         /// You can use `std.Thread.getCpuCount` to set the count.
-//         fn init(allocator: Allocator, size: usize, ) !Self {
-//             var threads = try allocator.alloc(std.Thread, size);
-//             errdefer allocator.free(threads);
-//             var dead_signal = try allocator.alloc(bool, size);
-//             errdefer allocator.free(dead_signal);
-
-//             const queue = std.atomic.Queue(Task).init();
-
-//             var self = Self {
-//                 .allocator = allocator,
-//                 .threads = threads,
-//                 .queue = queue,
-//                 .tasks = std.ArrayListUnmanaged(Task){},
-//             };
-
-//             for (self.threads) |*thread, id| {
-//                 thread.* = try std.Thread.spawn(.{}, Self.thread_start, .{ &self, id });
-//                 dead_signal[id] = false;
+//     }
+// 
+//     fn start(self: *Self, size: usize) !void {
+//         if (self.opt_threads != null) return error.ThreadPoolAreadyStarted;
+//         var threads = try self.ha7r.alloc(std.Thread, size);
+//         errdefer self.ha7r.free(threads);
+//         var death_signal = try self.ha7r.alloc(bool, size);
+//         errdefer self.ha7r.free(death_signal);
+//         // var nameBuf = [_]u8{0} ** 128;
+//         for (threads) |*thread, id| {
+//             thread.* = try std.Thread.spawn(.{}, Self.threadStart, .{ self, id });
+//             // try thread.setName(
+//             //     try std.fmt.bufPrint(nameBuf[0..], "thread_pool_worker_{}", .{ id })
+//             // );
+//             death_signal[id] = false;
+//         }
+//         self.opt_threads = threads;
+//         self.opt_death_signal = death_signal;
+//     }
+// 
+//     /// Detachs threads after waiting for timeout.
+//     fn deinit(self: *Self, timeout_ns: u64) void {
+//         if (self.opt_threads == null) return;
+//         var threads = self.opt_threads.?;
+//         var death_signal = self.opt_death_signal.?;
+//         self.break_signal = true;
+//         std.time.sleep(timeout_ns);
+//         for (death_signal) |signal, id| {
+//             if (signal) {
+//                 threads[id].join();
+//             } else {
+//                 threads[id].detach();
 //             }
-
-//             return self;
 //         }
-
-//         /// Detachs threads after waiting for timeout.
-//         fn deinit(self: *Self, timeout_ns: u64) void{
-//             self.break_signal = true;
-//             std.time.sleep(timeout_ns);
-//             for (self.dead_signal) |signal, id| {
-//                 if(signal) {
-//                     self.threads[id].join();
-//                 } else {
-//                     self.threads[id].detach();
-//                 }
+//         self.ha7r.free(threads);
+//         self.ha7r.free(death_signal);
+//     }
+// 
+//     fn threadStart(self: *Self, id: usize) void {
+//         var death_signal = self.opt_death_signal.?;
+//         while (true) {
+//             if (self.break_signal){
+//                 break;
 //             }
-//             self.allocator.free(self.threads);
-//             self.allocator.free(self.dead_signal);
-//         }
-
-//         fn thread_start (self: *Self, id: usize) noreturn {
-//             while (true) {
-//                 if (self.break_signal){
-//                     break;
-//                 }
-//                 if (self.queue.get()) |node|{
-//                     var task = node.data;
-//                     @call(.{}, task.func, .{ task.args });
-//                     self.allocator.destroy(node);
-//                 }else{
-//                     _ = std.Thread.yield();
-//                 }
+//             if (self.queue.get()) |node|{
+//                 var task = node.data;
+//                 @call(.{}, task.func, .{ task.args });
+//                 self.ha7r.destroy(node);
+//             } else{
+//                 std.Thread.yield() catch @panic("ThreadYieldErr");
 //             }
-//             self.dead_signal[id] = true;
 //         }
-//         fn do() void {
-//             std.debug.todo("we need to do");
-//         }
-//     };
+//         death_signal[id] = true;
+//     }
+// 
+//     fn do(
+//         self: *Self,
+//         //comptime func: fn (*anyopaque) void,
+//         comptime func: anytype,
+//         args: anytype,
+//     ) !void {
+//         var node = try self.ha7r.create(Queue.Node);
+//         node.data = Task {
+//             .args = @as(*anyopaque, args),
+//             .func = @ptrCast(fn (*anyopaque) void, func)
+//         };
+//         self.queue.put(node);
+//     }
+// 
+//     test "ThreadPool" {
+//         var ha7r = std.testing.allocator;
+//         var pool = ThreadPool.init(ha7r);
+//         defer pool.deinit(1 * 1_000_000_000);
+//         try pool.start(8);
+//         // const MyTask = struct {
+//         //     id: usize,
+//         //     fn printThreadName(self: *@This()) void {
+//         //         var id = std.Thread.getCurrentId();
+//         //         println("task {} from thread {}", .{ self.id, id });
+//         //     }
+//         // };
+//         // var tasks: [300]MyTask = undefined;
+//         // for (tasks) |*task, id|{
+//         //     task.* = MyTask { .id = id };
+//         //     try pool.do(MyTask.printThreadName, task);
+//         // }
+//     }
 // };

@@ -1083,6 +1083,109 @@ pub fn demo() !void {
     }
 }
 
+pub fn listener(
+    ha7r: Allocator,
+    fs_path: [:0]const u8,
+    die_signal: *const bool,
+    event_sink: mod_utils.Appender(FanotifyEvent),
+) !void {
+    const fd = blk: {
+        const fd = try init(
+            FAN.CLASS.NOTIF,
+            FAN.INIT {
+                .report_fid = true,
+                .report_dir_fid = true,
+                .report_name = true,
+            },
+            std.os.O.RDONLY | std.os.O.CLOEXEC,
+        );
+        try mark(
+            fd, 
+            FAN.MARK.MOD.ADD, 
+            FAN.MARK.FILESYSTEM, 
+            FAN.EVENT {
+                .create = true,
+                .modify = true,
+                .attrib = true,
+                .delete = true,
+                .moved_to = true,
+                .ondir = true,
+            },
+            std.os.AT.FDCWD, 
+            fs_path
+        );
+        break :blk fd;
+    };
+    defer std.os.close(fd);
+
+    var pollfds = [_]std.os.pollfd{std.os.pollfd{
+        .fd = fd,
+        .events = std.os.POLL.IN,
+        .revents = 0,
+    }};
+    std.log.info("entering fanotify poll loop", .{});
+    var buf = [_]u8{0} ** 256;
+
+    while (true) {
+        if (die_signal.*) break;
+        const poll_num = try std.os.poll(&pollfds, -1);
+        if (die_signal.*) break;
+
+        if (poll_num < 1) {
+            continue;
+            // std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
+            // @panic("err on poll");
+        }
+
+        const timestamp = std.time.timestamp();
+
+        for (&pollfds) |pollfd| {
+            if (pollfd.revents == 0 or (pollfd.revents & std.os.POLL.IN) == 0) {
+                continue;
+            }
+            const fanotify_fd = pollfd.fd;
+            const read_len = try std.os.read(fanotify_fd, &buf);
+
+            var ptr = &buf[0];
+            var left_bytes = read_len;
+            var event_count: usize = 0;
+            while (true) {
+                const meta_ptr = @ptrCast(*align(1) const event_metadata, ptr);
+                const meta = meta_ptr.*;
+                if (
+                    left_bytes < @sizeOf(event_metadata) 
+                    or left_bytes < @intCast(usize, meta.event_len)
+                    // FIXME: is this case even possible?
+                    or meta.event_len < @sizeOf(event_metadata)
+                ) {
+                    break;
+                }
+
+                if (meta.vers != METADATA_VERSION) {
+                    @panic("unexpected " ++ @typeName(event_metadata) ++ " version");
+                }
+
+                if ((meta.mask & FAN.Q_OVERFLOW) > 0) @panic("queue overflowed");
+
+                if (try parseRawEvent(ha7r, timestamp, meta_ptr)) |event|
+                    try event_sink.append(event);
+
+                ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
+                left_bytes -= meta.event_len;
+                event_count += 1;
+            }
+            // std.log.info("{} events read this cycle:", .{ event_count, });
+            // for (events.items) |event, ii| {
+            //     std.log.info(
+            //         "Event: {} at {} with mask {} from pid {}",
+            //         .{ ii, event.timestamp, event.mask, event.pid }
+            //     );
+            //     std.log.info("  - {s}/{s}", .{ event.dir, event.name });
+            // }
+        }
+    }
+}
+
 inline fn parseRawEvent(
     a7r: Allocator, 
     timestamp: i64, 

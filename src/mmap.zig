@@ -768,6 +768,7 @@ pub const LRUSwapCache = struct {
                 .que = Que{},
                 .free_list = std.ArrayListUnmanaged(usize){},
             };
+            errdefer self.deinit(a7r);
             try self.vec.ensureTotalCapacity(a7r, max_cold);
             try self.map.ensureTotalCapacity(a7r, max_cold);
             try self.free_list.ensureTotalCapacity(a7r, max_cold);
