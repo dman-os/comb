@@ -1,5 +1,7 @@
 # > *Comb* dev-doc
 
+JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
+
 ## TODO
 
 - Work stack
@@ -72,6 +74,7 @@ Concerns:
 ### Upstream Issues
 
 - [Zig compiler bug surrounding optional const slices](https://github.com/ziglang/zig/issues/4907)
+- [Max depth for `std.fmt.formatType` isn't configurable](https://github.com/ziglang/zig/issues/2370)
 
 ### IPC less design?
 

@@ -42,6 +42,7 @@ pub const FanotifyEvent = struct {
             a7r.free(slice);
         }
     }
+
     pub fn format(
         self: Self, 
         comptime fmt: []const u8, 

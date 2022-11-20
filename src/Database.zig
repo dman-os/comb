@@ -217,7 +217,7 @@ pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         }
         try kv.value_ptr.put(self.ha7r, id, {});
     }
-    {
+    if (false) {
         var id_self = id;
         var parent = entry.parent;
         while (true) {
@@ -241,6 +241,9 @@ pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     }
     return id;
 }
+
+//pub fn fileDeleted(self: *Self, id: Id) !void {
+//}
 
 pub const DatabseErr = error { StaleHandle,};
 
@@ -602,7 +605,7 @@ pub const Quexecutor = struct {
     id_buf: std.ArrayListUnmanaged(Id) = .{},
     check: std.AutoHashMapUnmanaged(Id, void) = .{},
     plan: Plan = .{},
-    timer: std.time.Timer,
+    // timer: std.time.Timer,
     // lists: std.ArrayListUnmanaged(Plan.Shortlist) = {},
     // filters: std.ArrayListUnmanaged(Plan.Filter) = {},
 
@@ -816,8 +819,7 @@ test "Database.usage" {
 
 fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
     var prng = std.crypto.random;
-    var name = std.fs.path.basename(path);
-    if (std.mem.eql(u8, path, "/")) name = "/";
+    const name = if (std.mem.eql(u8, path, "/")) "/" else std.fs.path.basename(path);
     return FsEntry([]const u8, []const u8) {
         .name = name,
         .parent = std.fs.path.dirname(path) orelse "/"[0..],
@@ -840,7 +842,8 @@ const e2e = struct {
         name: []const u8,
         query: []const u8,
         entries: []const FsEntry([] const u8, [] const u8),
-        expected: [] const usize,
+        expected: []const usize,
+        preQueryAction: ?fn (*Database, []Id) anyerror!void = null,
     };
 
     fn run(table: []const Case) !void {
@@ -872,6 +875,9 @@ const e2e = struct {
 
             var declared_map = try ha7r.alloc(Id, case.entries.len);
             defer ha7r.free(declared_map);
+
+            var parser = Query.Parser{};
+            defer parser.deinit(ha7r);
 
             // add the files while making sure any implied parent dir 
             // in path string is also present
@@ -921,6 +927,10 @@ const e2e = struct {
                         id = try db.fileCreated(
                             &s_entry.conv(Id, []const u8, parent, s_entry.name)
                         );
+                        //println(
+                        //    "inserted entry: {s}/{s} at id {}", 
+                        //    .{ s_entry.parent, s_entry.name, id }
+                        //);
                         try path_id_map.put(
                             try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
                             // if (is_root)
@@ -933,7 +943,13 @@ const e2e = struct {
                     declared_map[ii] = id;
                 }
             }
-            var parsed_query = try Query.parse(ha7r, case.query);
+            {
+                if (case.preQueryAction) |action| {
+                    try action(&db, declared_map);
+                }
+            }
+            // var parsed_query = try Query.parse(ha7r, case.query);
+            var parsed_query = try parser.parse(ha7r, case.query);
             defer parsed_query.deinit(ha7r);
             var results = try querier.query(&parsed_query);
             var expected_id_list = try ha7r.alloc(Id, case.expected.len);
@@ -941,8 +957,14 @@ const e2e = struct {
             for (case.expected) |ex_idx, ii| {
                 expected_id_list[ii] = declared_map[ex_idx];
             }
-            // println("result: {any}, expected: {any}", .{ results, expected_id_list });
-            try std.testing.expectEqualSlices(Id, expected_id_list, results);
+            std.testing.expectEqualSlices(Id, expected_id_list, results) catch |err| {
+                println(
+                    "unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}", 
+                    .{ results, expected_id_list, case.query, parsed_query }
+                );
+                println("{any}", .{ declared_map });
+                return err;
+            };
         }
     }
 };
@@ -952,7 +974,6 @@ test "Db.e2e" {
     var table = [_]e2e.Case {
         .{
             .name = "supports_empty_query",
-            .query = "",
             .entries = &.{
                 genRandFile("/"),
                 genRandFile("/you"),
@@ -964,17 +985,29 @@ test "Db.e2e" {
                 genRandFile("/you/are/the/generation/that/bought/more"),
                 genRandFile("/you/are/the/generation/that/bought/more/shoes"),
             },
+            .query = "",
             .expected = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 },
         },
         .{
             .name = "supports_name_match",
-            .query = "needle",
             .entries = &.{
                 genRandFile("/because/needle"),
                 genRandFile("/dreaming/costs/money"),
                 genRandFile("/my/dear/needle"),
             },
+            .query = "needle",
             .expected = &.{ 0,  2, },
+        },
+        .{
+            .name = "supports_path_match",
+            .query = "kero/kero",
+            .entries = &.{
+                genRandFile("/kero/bonito/kero"),
+                genRandFile("/kero/kero"),
+                genRandFile("/kero/kero/bonito"),
+                genRandFile("/bonito/kero/kero"),
+            },
+            .expected = &.{ 1, 3 },
         },
     };
     try e2e.run(table[0..]);

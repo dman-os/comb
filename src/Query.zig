@@ -15,6 +15,8 @@ const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 
+pub const Parser = @import("Query/Parser.zig");
+
 const Self = @This();
 
 limit: u64 = 25,
@@ -129,28 +131,28 @@ pub const Filter = struct {
                 self.sub_clauses.deinit(self.ha7r);
             }
 
-            pub inline fn withOperator(self: @This(), op: Op.Tag) @This() {
-                self.setOperator(op);
-                return self;
-            }
+            //pub inline fn withOperator(self: @This(), op: Op.Tag) @This() {
+            //    self.setOperator(op);
+            //    return self;
+            //}
 
             pub inline fn setOperator(self: *@This(), op: Op.Tag) void {
                 self.op = op;
             }
 
-            pub inline fn withSubClause(self: @This(), clause: Clause) !@This() {
-                self.addSubClause(clause);
-                return self;
-            }
+            //pub inline fn withSubClause(self: @This(), clause: Clause) !@This() {
+            //    self.addSubClause(clause);
+            //    return self;
+            //}
 
             pub inline fn addSubClause(self: *@This(), clause: Clause) !void {
                 try self.sub_clauses.append(self.ha7r, clause);
             }
 
-            pub inline fn withNameMatch(self: @This(), string: []const u8) !@This() {
-                self.addNameMatch(string);
-                return self;
-            }
+            //pub inline fn withNameMatch(self: @This(), string: []const u8) !@This() {
+            //    self.addNameMatch(string);
+            //    return self;
+            //}
 
             pub inline fn addNameMatch(self: *@This(), string: []const u8) !void {
                 if (string.len == 0) @panic("NameMatch string can not empty");
@@ -166,10 +168,10 @@ pub const Filter = struct {
                 );
             }
 
-            pub inline fn withChildOf(self: @This(), parentFilter: Clause) !@This() {
-                self.addChildOf(parentFilter);
-                return self;
-            }
+            //pub inline fn withChildOf(self: @This(), parentFilter: Clause) !@This() {
+            //    self.addChildOf(parentFilter);
+            //    return self;
+            //}
 
             pub inline fn addChildOf(self: *@This(), parentFilter: Clause) !void {
                 var clause = try self.ha7r.create(Clause);
@@ -183,10 +185,11 @@ pub const Filter = struct {
                     }
                 );
             }
-            pub inline fn withDescendantOf(self: @This(), ancestorFilter: Clause) !@This() {
-                self.addChildOf(ancestorFilter);
-                return self;
-            }
+
+            //pub inline fn withDescendantOf(self: @This(), ancestorFilter: Clause) !@This() {
+            //    self.addChildOf(ancestorFilter);
+            //    return self;
+            //}
 
             pub inline fn addDescendantOf(self: *@This(), ancestorFilter: Clause) !void {
                 var clause = try self.ha7r.create(Clause);
@@ -202,7 +205,6 @@ pub const Filter = struct {
             }
 
             pub inline fn build(self: *@This()) !Clause {
-                defer self.deinit();
                 if (self.sub_clauses.items.len == 0) 
                     @panic(@typeName(@This()) ++ " need at least one sub clauses");
                 if (self.op) |op| {
@@ -244,6 +246,33 @@ pub const Filter = struct {
                 }
             }
         };
+
+        pub fn format(
+            value: @This(), 
+            comptime fmt: []const u8, 
+            options: std.fmt.FormatOptions, 
+            writer: anytype
+        ) !void {
+            const T = @This();
+            const info = @typeInfo(T).Union;
+            if (fmt.len != 0) std.fmt.invalidFmtErr(fmt, value);
+            try writer.writeAll(@typeName(T));
+            if (info.tag_type) |UnionTagType| {
+                try writer.writeAll("{ .");
+                try writer.writeAll(@tagName(@as(UnionTagType, value)));
+                try writer.writeAll(" = ");
+                inline for (info.fields) |u_field| {
+                    if (value == @field(UnionTagType, u_field.name)) {
+                        try std.fmt.formatType(
+                            @field(value, u_field.name), "any", options, writer, std.fmt.default_max_depth
+                        );
+                    }
+                }
+                try writer.writeAll(" }");
+            } else {
+                try std.fmt.format(writer, "@{x}", .{@ptrToInt(&value)});
+            }
+        }
     };
     root: Clause,
 };
@@ -253,6 +282,10 @@ pub const Builder = struct {
 
     pub fn init() @This() {
         return .{};
+    }
+
+    pub fn discard(self: *Builder, ha7r: Allocator) void {
+        self.query.deinit(ha7r);
     }
 
     pub inline fn withPagination(
@@ -308,235 +341,26 @@ pub const Builder = struct {
     }
 };
 
-
-const Parser = struct {
-    const param_val_delimiter = ':';
-    const Token = union(enum) {
-        lparen,
-        rparen,
-        andOp,
-        orOp,
-        notOp,
-        param: []const u8,
-        value: []const u8,
-    };
-
-    fn tokenize(raw: []const u8, appender: mod_utils.Appender(Token)) !void {
-        var it1 = std.mem.tokenize(u8, raw, " ");
-        while (it1.next()) |token_init| {
-            var token = token_init;
-            switch(token) {
-                "(" => {
-                    try appender.append(Token.lparen);
-                },
-                ")" => {
-                    try appender.append(Token.rparen);
-                },
-                "&", "and", "AND" => {
-                    try appender.append(Token.andOp);
-                },
-                "|", "or", "OR" => {
-                    try appender.append(Token.orOp);
-                },
-                "not", "NOT" => {
-                    try appender.append(Token.notOp);
-                },
-                else => {
-                    var add_r_paren = false;
-                    // handle lparen without whitespace
-                    // eg. (dan | joe)
-                    if (token[0] == '(') {
-                        try appender.append(Token.lparen);
-                        token = token[1..];
-                    }
-                    // handle not without whitespace seprating it 
-                    // eg. ^joking
-                    if (token[0] == '^') {
-                        try appender.append(Token.notOp);
-                        token = token[1..];
-                    }
-                    // handle rparen without whitespace
-                    // eg. (dan | joe)
-                    if (token[token.len - 1] == ')') {
-                        add_r_paren = true;
-                        token = token[1..(token.len - 1)];
-                    }
-                    var it2 = std.mem.split(u8, token, .{ param_val_delimiter });
-                    var val = it2.next().?;
-                    var rest = it2.rest();
-                    if (rest.len == 0) {
-                        try appender.append(Token{ .value = val });
-                    } else {
-                        try appender.append(Token{ .param = val });
-                        try appender.append(Token{ .value = rest });
-                    }
-                    if (add_r_paren) {
-                        try appender.append(Token.rparen);
-                    }
-                }
-            }
-        }
-    }
-    const Param = union(enum) {
-        limit: u64,
-        offset: u64,
-        filter: Filter
-    };
-
-    const Error = error {
-        UnexpectedToken,
-        UnexpectedNonTerm,
-        UnexpectedParam,
-        InvalidValue
-    };
-
-    ha7r: Allocator,
-    string: []const u8,
-    tokens: std.ArrayListUnmanaged(Token) = .{},
-    cur_token_idx: usize = 0,
-    // cur_term: ?[]const u8,
-    // utf8_iter: std.unicode.Utf8Iterator,
-
-    fn init(ha7r: Allocator, raw: []const u8) !Parser {
-        const str = std.mem.trim(u8, raw, " \n\t");
-        // var iter = (try std.unicode.Utf8View.init(str)).iterator();
-        // var uno = iter.nextCodepointSlice();
-        var tokens = std.ArrayListUnmanaged(Token);
-        try tokenize(str, mod_utils.Appender(Token).new(
-            &tokens,
-            mod_utils.Appender(Token).Curry.UnamanagedList
-        ));
-        return Parser {
-            .string = str,
-            .ha7r = ha7r,
-            .tokens = tokens,
-            // .cur_term = uno,
-            // .utf8_iter = iter,
-        };
-    }
-
-    fn deinit(self: *Parser) void {
-        self.tokens.deinit(self.ha7r);
-    }
-
-    fn cur(self: *const Parser) ?Token {
-        return if (self.cur_token_idx < self.tokens.len)
-             self.tokens[self.cur_token_idx]
-        else null;
-    }
-
-    fn advance(self: *Parser) void {
-        self.cur_term = self.utf8_iter.nextCodepointSlice();
-    }
-
-    fn query(self: *Parser) !Self {
-        var builder = Builder.init();
-        var filters = std.ArrayList(Filter).init(self.ha7r);
-        defer filters.deint();
-        while (true) {
-            switch(self.cur()) {
-                null => break,
-                else => {
-                    switch (try self.param()) {
-                        .limit => |limit| {
-                            builder.setPagination(limit, builder.query.offset);
-                        },
-                        .offset => |offset| {
-                            builder.setPagination(builder.query.limit,offset);
-                        },
-                        .filter => |filter| {
-                            filters.append(filter);
-                        }
-                    }
-                }
-            }
-            self.advance();
-        }
-        return builder.build();
-    }
-
-    fn param(self: *Parser) !Param {
-        return switch(self.cur()) {
-            Token.lparen, Token.value => Param { .filter = try self.clause() },
-            Token.param => |name| switch (name) {
-                "limit" => blk: { 
-                    self.advance();
-                    break :blk Param { .limit = try self.int() };
-                },
-                "offset" => blk: { 
-                    self.advance();
-                    break :blk Param { .offset = try self.int() };
-                },
-                else => Param { .filter = try self.clause() },
-            },
-            else => error.UnexpectedToken,
-        };
-    }
-
-    fn clause(self: *Parser) !Filter.Clause {
-        return switch(self.cur()) {
-            Token.param => |name| switch (name) {
-                else => error.UnexpectedParam,
-            },
-            Token.notOp => blk: {
-                self.advance();
-                var cb = Filter.Clause.Builder.init(self.ha7r);
-                cb.setOperator(.not);
-                cb.withSubClause(try self.clause());
-                break :blk try cb.build();
-            },
-            Token.value => |value| blk: {
-                var cb = Filter.Clause.Builder.init(self.ha7r);
-                try cb.withNameMatch(value);
-                break :blk try cb.build();
-            },
-            Token.lparen => blk: { 
-                var cb = Filter.Clause.Builder.init(self.ha7r);
-                self.advance();
-                while (true) {
-                    switch (self.cur()) {
-                        Token.rparen => break,
-                        Token.andOp => {
-                            switch (cb.op) {
-                                .@"and" => {}, 
-                                .@"or" => {}, 
-                            }
-                        }
-                    }
-                }
-                break :blk cb.build();
-            },
-        };
-    }
-
-    fn int(self: *Parser) !u64 {
-        return switch(self.cur()) {
-            Token.value => |value| std.fmt.parseUnsigned(u64, value, 0) catch error.InvalidValue,
-            else => error.UnexpectedToken,
-        };
-    }
-};
-
-pub fn parse(ha7r: Allocator, string: [] const u8) !Self {
-    _ = string;
-    var builder = Builder.init();
-    var clause_builder = Filter.Clause.Builder.init(ha7r);
-    var it = std.mem.tokenize(u8, string, " ");
-    while (it.next()) |token| {
-        // println("{s}", .{ token });
-        try clause_builder.addNameMatch(token);
-    }
-    if(clause_builder.sub_clauses.items.len > 0) {
-        builder.setFilter(try clause_builder.build());
-    }
-    return builder.build();
-}
-
-test "Query.parse" {
-    if (true) return error.SkipZigTest;
-    var ha7r = std.testing.allocator;
-
-    var query = try parse(ha7r, "bye dye");
-    defer query.deinit(ha7r);
-    println("{!}", .{ query });
-}
+//pub fn parse(ha7r: Allocator, string: [] const u8) !Self {
+//    _ = string;
+//    var builder = Builder.init();
+//    var clause_builder = Filter.Clause.Builder.init(ha7r);
+//    var it = std.mem.tokenize(u8, string, " ");
+//    while (it.next()) |token| {
+//        // println("{s}", .{ token });
+//        try clause_builder.addNameMatch(token);
+//    }
+//    if(clause_builder.sub_clauses.items.len > 0) {
+//        builder.setFilter(try clause_builder.build());
+//    }
+//    return builder.build();
+//}
+//
+//test "Query.parse" {
+//    if (true) return error.SkipZigTest;
+//    var ha7r = std.testing.allocator;
+//
+//    var query = try parse(ha7r, "bye dye");
+//    defer query.deinit(ha7r);
+//    println("{!}", .{ query });
+//}

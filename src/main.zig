@@ -87,6 +87,14 @@ const FanotifyThread = struct {
         ) {
             std.log.debug("neutrino attrib event", .{});
         } else if (
+            event.kind.delete and event.kind.ondir
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.delete and event.kind.delete
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
             event.kind.create and event.kind.delete
         ) {
             std.log.debug("neutrino create event", .{});
@@ -94,26 +102,9 @@ const FanotifyThread = struct {
             event.kind.create 
         ) {
             var dir = event.dir.?;
-            // std.fs.path.join
-            // var buf = []u8{0} ** 128;
-            var root_clause = blk: {
-                var fb = Query.Filter.Clause.Builder.init(self.ha7r);
-                try fb.addNameMatch("/");
-                break :blk try fb.build();
-            };
-            var it = std.mem.tokenize(u8, dir, std.fs.path.sep_str);
-            while (it.next()) |name| {
-                var fb = Query.Filter.Clause.Builder.init(self.ha7r);
-                fb.setOperator(.@"and");
-                try fb.addChildOf(root_clause);
-                try fb.addNameMatch(name);
-                root_clause = try fb.build();
-            }
-            var query = blk: {
-                var qb = Query.Builder.init();
-                qb.setFilter(root_clause);
-                break :blk qb.build();
-            };
+            var parser = Query.Parser{};
+            defer parser.deinit(self.ha7r);
+            var query = parser.parse(self.ha7r, dir) catch @panic("error parsing dir to query");
             defer query.deinit(self.ha7r);
             // var parents = try self.querier.query(&query);
             var timer = std.time.Timer.start() catch @panic("timer unsupported");
@@ -202,7 +193,9 @@ fn swapping () !void {
             );
             new_ids[ii] = try db.fileCreated(&i_entry);
             if (ii % 10_000 == 0) {
-                const path = try weaver.pathOf(&db, Db.Id { .id = @truncate(u24, ii), .gen = 0}, '/');
+                const path = try weaver.pathOf(
+                    &db, Db.Id { .id = @truncate(u24, ii), .gen = 0}, std.fs.path.sep
+                );
                 println("indexed {} items, at: {s}", .{ ii, path });
             }
         }
@@ -230,6 +223,8 @@ fn swapping () !void {
     var stdin_rdr = stdin.reader();
     var phrase = std.ArrayList(u8).init(a7r);
     defer phrase.deinit();
+    var parser = Query.Parser{};
+    defer parser.deinit(a7r);
     // var matcher = db.plistNameMatcher();
     // defer matcher.deinit(&db);
 
@@ -239,14 +234,14 @@ fn swapping () !void {
         std.log.info("Searching...", .{});
 
         _ = timer.reset();
-        var query = try Query.parse(a7r, phrase.items);
+        var query = try parser.parse(a7r, phrase.items);
         defer query.deinit(a7r);
         // var matches = try matcher.match(&db, phrase.items);
         var matches = try querier.query(&query);
         const elapsed = timer.read();
 
         for (matches) |id, ii| {
-            const path = try weaver.pathOf(&db, id, '/');
+            const path = try weaver.pathOf(&db, id, std.fs.path.sep);
             std.debug.print("{}. {s}\n", .{ ii, path });
         }
 
