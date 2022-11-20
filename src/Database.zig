@@ -26,8 +26,8 @@ const Database = Self;
 
 /// Handle for each `Entry`
 pub const Id = packed struct {
-    id: u24,
     gen: u8,
+    id: u24,
     comptime {
         if (@sizeOf(Id) != @sizeOf(u32)) {
             @compileError(std.fmt.comptimePrint(
@@ -41,6 +41,10 @@ pub const Id = packed struct {
                 .{ @bitSizeOf(Id), @bitSizeOf(u32) }
             ));
         }
+    }
+    
+    inline fn toInt(self: @This()) u32 {
+        return @bitCast(u32, self);
     }
 };
 /// Represents a single file system object.
@@ -89,6 +93,8 @@ pager: Pager,
 table: SwapList(Entry),
 meta: SwapList(RowMeta),
 plist: PList = .{},
+childOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
+descendantOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
 free_slots: FreeSlots,
 lock: std.Thread.RwLock = .{},
 
@@ -111,16 +117,34 @@ pub fn init(
 }
 
 pub fn deinit(self: *Self) void {
-    var it = self.table.iterator(self.sa7r, self.pager);
-    while (it.next() catch unreachable) |entry|{
-        self.sa7r.free(entry.name);
+    {
+        var it = self.table.iterator(self.sa7r, self.pager);
+        while (it.next() catch unreachable) |entry|{
+            self.sa7r.free(entry.name);
+        }
+        it.close();
     }
-    it.close();
 
     self.table.deinit(self.ha7r, self.sa7r, self.pager);
     self.meta.deinit(self.ha7r, self.sa7r, self.pager);
     self.free_slots.deinit();
     self.plist.deinit(self.ha7r, self.sa7r, self.pager);
+    {
+        var it = self.childOfIndex.iterator();
+        while (it.next()) |entry| {
+            // entry.value_ptr.deinit(self.ha7r, self.sa7r, self.pager);
+            entry.value_ptr.deinit(self.ha7r);
+        }
+        self.childOfIndex.deinit(self.ha7r);
+    }
+    {
+        var it = self.descendantOfIndex.iterator();
+        while (it.next()) |entry| {
+            // entry.value_ptr.deinit(self.ha7r, self.sa7r, self.pager);
+            entry.value_ptr.deinit(self.ha7r);
+        }
+        self.descendantOfIndex.deinit(self.ha7r);
+    }
 }
 
 fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
@@ -140,8 +164,8 @@ fn appendEntry(self: *Self, entry: Entry) !void {
 
 /// Add an entry to the database.
 pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
-    self.lock.lock();
-    defer self.lock.unlock();
+    // self.lock.lock();
+    // defer self.lock.unlock();
     // clone the entry but store the name on the swap this time
     const swapped_entry = entry.clone(
         try self.sa7r.dupeJustPtr(entry.name)
@@ -185,6 +209,36 @@ pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         std.ascii.spaces[0..]
         // &[_]u8{ self.config.delimiter }
     );
+    {
+        var kv = try self.childOfIndex.getOrPut(self.ha7r, entry.parent);
+        if (!kv.found_existing) {
+            // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
+            kv.value_ptr.* = .{};
+        }
+        try kv.value_ptr.put(self.ha7r, id, {});
+    }
+    {
+        var id_self = id;
+        var parent = entry.parent;
+        while (true) {
+            // FIXME: a better way of detecting root
+            if (id_self.id == parent.id) break;
+            var kv = try self.descendantOfIndex.getOrPut(self.ha7r, parent);
+            if (!kv.found_existing) {
+                // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
+                kv.value_ptr.* = .{};
+            }
+            try kv.value_ptr.put(self.ha7r, id, {});
+
+            id_self = parent;
+
+            var old_parent = parent;
+            // println(" id: {}, parent: {}, entry: {} ", .{ id, parent, entry });
+            var parent_desc = try self.table.swapIn(self.sa7r, self.pager, old_parent.id);
+            defer self.table.swapOut(self.sa7r, self.pager, old_parent.id);
+            parent = parent_desc.parent;
+        }
+    }
     return id;
 }
 
@@ -366,11 +420,16 @@ pub const Quexecutor = struct {
     pub const Error = error { InvalidQuery };
     const Plan = struct {
         const NodeId = usize;
+        const NodeSlice = struct {
+            start: usize,
+            len: usize,
+        };
+
         const Node = struct {
             const Payload = union(enum) {
                 pub const Tag = @typeInfo(@This()).Union.tag_type orelse unreachable;
-                ixion: []Node,
-                @"union": []Node,
+                ixion: NodeSlice,
+                @"union": NodeSlice,
                 complement: NodeId,
                 gramMatch: Gram,
                 childOf: NodeId,
@@ -405,8 +464,13 @@ pub const Quexecutor = struct {
             _ = ha7r;
             _ = clause;
             self.nodes.clearRetainingCapacity();
-            var root = try self.nodes.addOne(ha7r);
-            root.* = try self.buildQueryDAG(ha7r, clause);
+            // don't rely on the return pointer since it might be
+            // invalid when sub nodes resize the arraylist
+            _ = try self.nodes.addOne(ha7r);
+            var root = try self.buildQueryDAG(ha7r, clause);
+            // separate addressing the array elt and making the root node
+            // since the arraylist might resize/move when DAG is built
+            self.nodes.items[0] = root;
         }
 
         fn buildQueryDAG(
@@ -425,16 +489,19 @@ pub const Quexecutor = struct {
                         // allocate the children contigiously in `self.nodes`
                         // and just return a slice from that
                         try self.nodes.resize(ha7r, start_idx + clauses.len);
-                        var children = self.nodes.items[start_idx..(start_idx + clauses.len)];
                         for (clauses) |subclause, ii| {
-                            children[ii] = try self.buildQueryDAG(ha7r, &subclause);
+                            var node = try self.buildQueryDAG(ha7r, &subclause);
+                            // `buildQueryDAG` might grow the nodes array
+                            // thus moving the location so always address it 
+                            // through `self.nodes`
+                            self.nodes.items[start_idx + ii] = node;
                         }
                         // TODO: consider using an arena allocator and pointers instead
                         // there's no advatage in this scheme if the NodeId's don't have
                         // generations
                         break :blk Node {
                             .load = Node.Payload {
-                                .ixion = children,
+                                .ixion = NodeSlice { .start = start_idx, .len = clauses.len },
                             },
                         };
                     },
@@ -445,17 +512,18 @@ pub const Quexecutor = struct {
                         }
                         var start_idx = self.nodes.items.len;
                         try self.nodes.resize(ha7r, start_idx + clauses.len);
-                        var children = self.nodes.items[start_idx..(start_idx + clauses.len)];
                         for (clauses) |subclause, ii| {
-                            children[ii] = try self.buildQueryDAG(ha7r, &subclause);
+                            var node = try self.buildQueryDAG(ha7r, &subclause);
+                            self.nodes.items[start_idx + ii] = node;
                         }
                         break :blk Node {
                             .load = Node.Payload {
-                                .@"union" = children,
+                                .@"union" = NodeSlice { .start = start_idx, .len = clauses.len },
                             },
                         };
                     },
                     .not => |subclause| blk: { 
+                        println("ERROR: we are her for some reason: {}", .{ clause });
                         try self.nodes.append(
                             ha7r, 
                             try self.buildQueryDAG(ha7r, subclause)
@@ -494,7 +562,10 @@ pub const Quexecutor = struct {
                         );
                         break :blk Node {
                             .load = Node.Payload {
-                                .ixion = self.nodes.items[start_idx..],
+                                .ixion = NodeSlice { 
+                                    .start = start_idx, 
+                                    .len = self.nodes.items.len - start_idx 
+                                },
                             },
                         };
                     },
@@ -531,6 +602,7 @@ pub const Quexecutor = struct {
     id_buf: std.ArrayListUnmanaged(Id) = .{},
     check: std.AutoHashMapUnmanaged(Id, void) = .{},
     plan: Plan = .{},
+    timer: std.time.Timer,
     // lists: std.ArrayListUnmanaged(Plan.Shortlist) = {},
     // filters: std.ArrayListUnmanaged(Plan.Filter) = {},
 
@@ -554,8 +626,9 @@ pub const Quexecutor = struct {
         // const IdSet = std.AutoHashMapUnmanaged(Id, void);
         // const IdSet = std.ArrayListUnmanaged(Id, void);
         const IdSet = std.AutoHashMap(Id, void);
-        return switch (node.load) {
-            .ixion => |children| blk: {
+        var res_set = switch (node.load) {
+            .ixion => |slice| blk: {
+                var children = self.plan.nodes.items[slice.start..(slice.start + slice.len)];
                 var check = IdSet.init(ha7r);
                 defer check.deinit();
                 // println("ixion: ", .{});
@@ -585,7 +658,8 @@ pub const Quexecutor = struct {
                 }
                 break :blk result.toOwnedSlice();
             },
-            .@"union" => |children| blk: {
+            .@"union" => |slice| blk: {
+                var children = self.plan.nodes.items[slice.start..(slice.start + slice.len)];
                 var result = std.ArrayList(Id).fromOwnedSlice(
                     ha7r,
                     try self.execNode(&children[0], ha7r), 
@@ -631,13 +705,38 @@ pub const Quexecutor = struct {
                     &self.plan.nodes.items[child_idx], ha7r
                 );
                 defer ha7r.free(parents);
-                std.debug.todo("fuck3");
+                var result = std.ArrayList(Id).init(ha7r);
+                defer result.deinit();
+                for (parents) |id| {
+                    if (self.db.childOfIndex.get(id)) |children| {
+                        var it = children.keyIterator();
+                        while (it.next()) |child| {
+                            try result.append(child.*);
+                        }
+                    }
+                }
+                return result.toOwnedSlice();
             },
-            .descendantOf => |child| {
-                _ = child;
-                std.debug.todo("fuck2");
+            .descendantOf => |child_idx| {
+                var ancestors = try self.execNode(
+                    &self.plan.nodes.items[child_idx], ha7r
+                );
+                defer ha7r.free(ancestors);
+                var result = std.ArrayList(Id).init(ha7r);
+                defer result.deinit();
+                for (ancestors) |id| {
+                    if (self.db.descendantOfIndex.get(id)) |descendants| {
+                        var it = descendants.keyIterator();
+                        while (it.next()) |child| {
+                            try result.append(child.*);
+                        }
+                    }
+                }
+                return result.toOwnedSlice();
             },
         };
+        // println("res_set: {any} for node: {}", .{ res_set, node });
+        return res_set;
     }
 
     pub fn query(self: *@This(), input: *const Query) ![]const Id {
@@ -646,6 +745,7 @@ pub const Quexecutor = struct {
             try self.plan.build(self.db.ha7r, &filter.root);
             var arena = std.heap.ArenaAllocator.init(self.db.ha7r);
             defer arena.deinit();
+            // println("plan: {any}", .{ self.plan.nodes.items, });
             var ha7r = arena.allocator();
             var temp_result = try self.execNode(&self.plan.nodes.items[0], ha7r);
             defer ha7r.free(temp_result);

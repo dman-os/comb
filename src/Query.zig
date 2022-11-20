@@ -112,7 +112,7 @@ pub const Filter = struct {
             switch (self.*) {
                 .op => |*load| load.deinit(ha7r),
                 .param => |*load| load.deinit(ha7r),
-//                 else => unreachable, // FIXME:
+                // else => unreachable, // FIXME:
             }
         }
 
@@ -157,7 +157,7 @@ pub const Filter = struct {
                 try self.sub_clauses.append(
                     self.ha7r, 
                     Clause { 
-                        .param = Param{ 
+                        .param = Param { 
                             .nameMatch = .{ 
                                 .string = try self.ha7r.dupe(u8, string) 
                             } 
@@ -166,24 +166,40 @@ pub const Filter = struct {
                 );
             }
 
-            // pub inline fn withChildOf(self: @This(), parentFilter: Clause) !@This() {
-            //     self.addChildOf(parentFilter);
-            //     return self;
-            // }
+            pub inline fn withChildOf(self: @This(), parentFilter: Clause) !@This() {
+                self.addChildOf(parentFilter);
+                return self;
+            }
 
-            // pub inline fn addChildOf(self: *@This(), parentFilter: Clause) !void {
-            //     if (string.len == 0) @panic("NameMatch string can not empty");
-            //     try self.sub_clauses.append(
-            //         self.ha7r, 
-            //         Clause { 
-            //             .param = Param{ 
-            //                 .nameMatch = .{ 
-            //                     .string = try self.ha7r.dupe(u8, string) 
-            //                 } 
-            //             } 
-            //         }
-            //     );
-            // }
+            pub inline fn addChildOf(self: *@This(), parentFilter: Clause) !void {
+                var clause = try self.ha7r.create(Clause);
+                clause.* = parentFilter;
+                try self.sub_clauses.append(
+                    self.ha7r, 
+                    Clause { 
+                        .param = Param { 
+                            .childOf = clause
+                        } 
+                    }
+                );
+            }
+            pub inline fn withDescendantOf(self: @This(), ancestorFilter: Clause) !@This() {
+                self.addChildOf(ancestorFilter);
+                return self;
+            }
+
+            pub inline fn addDescendantOf(self: *@This(), ancestorFilter: Clause) !void {
+                var clause = try self.ha7r.create(Clause);
+                clause.* = ancestorFilter;
+                try self.sub_clauses.append(
+                    self.ha7r, 
+                    Clause { 
+                        .param = Param { 
+                            .descendantOf = clause
+                        } 
+                    }
+                );
+            }
 
             pub inline fn build(self: *@This()) !Clause {
                 defer self.deinit();
@@ -289,6 +305,215 @@ pub const Builder = struct {
 
     pub inline fn build(self: @This()) Self {
         return self.query;
+    }
+};
+
+
+const Parser = struct {
+    const param_val_delimiter = ':';
+    const Token = union(enum) {
+        lparen,
+        rparen,
+        andOp,
+        orOp,
+        notOp,
+        param: []const u8,
+        value: []const u8,
+    };
+
+    fn tokenize(raw: []const u8, appender: mod_utils.Appender(Token)) !void {
+        var it1 = std.mem.tokenize(u8, raw, " ");
+        while (it1.next()) |token_init| {
+            var token = token_init;
+            switch(token) {
+                "(" => {
+                    try appender.append(Token.lparen);
+                },
+                ")" => {
+                    try appender.append(Token.rparen);
+                },
+                "&", "and", "AND" => {
+                    try appender.append(Token.andOp);
+                },
+                "|", "or", "OR" => {
+                    try appender.append(Token.orOp);
+                },
+                "not", "NOT" => {
+                    try appender.append(Token.notOp);
+                },
+                else => {
+                    var add_r_paren = false;
+                    // handle lparen without whitespace
+                    // eg. (dan | joe)
+                    if (token[0] == '(') {
+                        try appender.append(Token.lparen);
+                        token = token[1..];
+                    }
+                    // handle not without whitespace seprating it 
+                    // eg. ^joking
+                    if (token[0] == '^') {
+                        try appender.append(Token.notOp);
+                        token = token[1..];
+                    }
+                    // handle rparen without whitespace
+                    // eg. (dan | joe)
+                    if (token[token.len - 1] == ')') {
+                        add_r_paren = true;
+                        token = token[1..(token.len - 1)];
+                    }
+                    var it2 = std.mem.split(u8, token, .{ param_val_delimiter });
+                    var val = it2.next().?;
+                    var rest = it2.rest();
+                    if (rest.len == 0) {
+                        try appender.append(Token{ .value = val });
+                    } else {
+                        try appender.append(Token{ .param = val });
+                        try appender.append(Token{ .value = rest });
+                    }
+                    if (add_r_paren) {
+                        try appender.append(Token.rparen);
+                    }
+                }
+            }
+        }
+    }
+    const Param = union(enum) {
+        limit: u64,
+        offset: u64,
+        filter: Filter
+    };
+
+    const Error = error {
+        UnexpectedToken,
+        UnexpectedNonTerm,
+        UnexpectedParam,
+        InvalidValue
+    };
+
+    ha7r: Allocator,
+    string: []const u8,
+    tokens: std.ArrayListUnmanaged(Token) = .{},
+    cur_token_idx: usize = 0,
+    // cur_term: ?[]const u8,
+    // utf8_iter: std.unicode.Utf8Iterator,
+
+    fn init(ha7r: Allocator, raw: []const u8) !Parser {
+        const str = std.mem.trim(u8, raw, " \n\t");
+        // var iter = (try std.unicode.Utf8View.init(str)).iterator();
+        // var uno = iter.nextCodepointSlice();
+        var tokens = std.ArrayListUnmanaged(Token);
+        try tokenize(str, mod_utils.Appender(Token).new(
+            &tokens,
+            mod_utils.Appender(Token).Curry.UnamanagedList
+        ));
+        return Parser {
+            .string = str,
+            .ha7r = ha7r,
+            .tokens = tokens,
+            // .cur_term = uno,
+            // .utf8_iter = iter,
+        };
+    }
+
+    fn deinit(self: *Parser) void {
+        self.tokens.deinit(self.ha7r);
+    }
+
+    fn cur(self: *const Parser) ?Token {
+        return if (self.cur_token_idx < self.tokens.len)
+             self.tokens[self.cur_token_idx]
+        else null;
+    }
+
+    fn advance(self: *Parser) void {
+        self.cur_term = self.utf8_iter.nextCodepointSlice();
+    }
+
+    fn query(self: *Parser) !Self {
+        var builder = Builder.init();
+        var filters = std.ArrayList(Filter).init(self.ha7r);
+        defer filters.deint();
+        while (true) {
+            switch(self.cur()) {
+                null => break,
+                else => {
+                    switch (try self.param()) {
+                        .limit => |limit| {
+                            builder.setPagination(limit, builder.query.offset);
+                        },
+                        .offset => |offset| {
+                            builder.setPagination(builder.query.limit,offset);
+                        },
+                        .filter => |filter| {
+                            filters.append(filter);
+                        }
+                    }
+                }
+            }
+            self.advance();
+        }
+        return builder.build();
+    }
+
+    fn param(self: *Parser) !Param {
+        return switch(self.cur()) {
+            Token.lparen, Token.value => Param { .filter = try self.clause() },
+            Token.param => |name| switch (name) {
+                "limit" => blk: { 
+                    self.advance();
+                    break :blk Param { .limit = try self.int() };
+                },
+                "offset" => blk: { 
+                    self.advance();
+                    break :blk Param { .offset = try self.int() };
+                },
+                else => Param { .filter = try self.clause() },
+            },
+            else => error.UnexpectedToken,
+        };
+    }
+
+    fn clause(self: *Parser) !Filter.Clause {
+        return switch(self.cur()) {
+            Token.param => |name| switch (name) {
+                else => error.UnexpectedParam,
+            },
+            Token.notOp => blk: {
+                self.advance();
+                var cb = Filter.Clause.Builder.init(self.ha7r);
+                cb.setOperator(.not);
+                cb.withSubClause(try self.clause());
+                break :blk try cb.build();
+            },
+            Token.value => |value| blk: {
+                var cb = Filter.Clause.Builder.init(self.ha7r);
+                try cb.withNameMatch(value);
+                break :blk try cb.build();
+            },
+            Token.lparen => blk: { 
+                var cb = Filter.Clause.Builder.init(self.ha7r);
+                self.advance();
+                while (true) {
+                    switch (self.cur()) {
+                        Token.rparen => break,
+                        Token.andOp => {
+                            switch (cb.op) {
+                                .@"and" => {}, 
+                                .@"or" => {}, 
+                            }
+                        }
+                    }
+                }
+                break :blk cb.build();
+            },
+        };
+    }
+
+    fn int(self: *Parser) !u64 {
+        return switch(self.cur()) {
+            Token.value => |value| std.fmt.parseUnsigned(u64, value, 0) catch error.InvalidValue,
+            else => error.UnexpectedToken,
+        };
     }
 };
 

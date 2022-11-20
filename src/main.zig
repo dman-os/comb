@@ -23,7 +23,7 @@ const Db = Database;
 
 pub const mod_index = @import("index.zig");
 
-pub const log_level = std.log.Level.debug;
+pub const log_level = std.log.Level.info;
 
 pub const mod_fanotify = @import("fanotify.zig");
 
@@ -74,10 +74,10 @@ const FanotifyThread = struct {
         );
     }
 
-    fn appendEvent(self: *@This(), event_in: mod_fanotify.FanotifyEvent) !void {
+    fn appendEvent(self: *@This(), event_in: mod_fanotify.FanotifyEvent) std.mem.Allocator.Error!void {
         _ = self;
         var event = event_in;
-        std.log.info("evt: {any}", .{ event });
+        std.log.debug("evt: {any}", .{ event });
         defer event.deinit(self.ha7r);
         //const FAN = mod_fanotify.FAN;
         if (
@@ -93,20 +93,42 @@ const FanotifyThread = struct {
         } else if (
             event.kind.create 
         ) {
-            //var dir = event.dir.?;
-            //const fb = Query.Filter.Clause.Builder.init(self.ha7r);
-            //try fb.addNameMatch(dir);
-            //var query = Query.Builder
-            //                .init()
-            //                .withFilter(
-            //                )
-            //                .build();
-            //
-            //var parent = self.querier.query();
-            // self.db.fileCreated()
+            var dir = event.dir.?;
+            // std.fs.path.join
+            // var buf = []u8{0} ** 128;
+            var root_clause = blk: {
+                var fb = Query.Filter.Clause.Builder.init(self.ha7r);
+                try fb.addNameMatch("/");
+                break :blk try fb.build();
+            };
+            var it = std.mem.tokenize(u8, dir, std.fs.path.sep_str);
+            while (it.next()) |name| {
+                var fb = Query.Filter.Clause.Builder.init(self.ha7r);
+                fb.setOperator(.@"and");
+                try fb.addChildOf(root_clause);
+                try fb.addNameMatch(name);
+                root_clause = try fb.build();
+            }
+            var query = blk: {
+                var qb = Query.Builder.init();
+                qb.setFilter(root_clause);
+                break :blk qb.build();
+            };
+            defer query.deinit(self.ha7r);
+            // var parents = try self.querier.query(&query);
+            var timer = std.time.Timer.start() catch @panic("timer unsupported");
+            var parents = self.querier.query(&query) catch |err| {
+                println("error querying: {}", .{ err });
+                @panic("error querying");
+            };
+            var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
+            println(
+                " -- found possilbe parents: {any} in {}", 
+                .{ parents, elapsed }
+            );
         }
         else {
-            std.log.warn("unreconized event: {any}", .{ event });
+            std.log.debug("unreconized event: {any}", .{ event });
         }
         // std.debug.todo("append");
     }
@@ -126,7 +148,9 @@ fn swapping () !void {
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
     defer mmap_pager.deinit();
 
-    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size);
+    var lru = try mod_mmap.LRUSwapCache.init(
+        a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size
+    );
     // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
@@ -142,9 +166,11 @@ fn swapping () !void {
     var name_arena = std.heap.ArenaAllocator.init(a7r);
     defer name_arena.deinit();
 
-    var fanotify_th = FanotifyThread.init(a7r, &db);
-    defer fanotify_th.deinit();
-    try fanotify_th.start();
+    var querier = Db.Quexecutor.init(&db);
+    defer querier.deinit();
+    var weaver = Db.FullPathWeaver{};
+    defer weaver.deinit(a7r);
+
 
     var timer = try std.time.Timer.start();
     {
@@ -164,6 +190,8 @@ fn swapping () !void {
 
         var new_ids = try arena.allocator().alloc(Db.Id, tree.list.items.len);
         defer arena.allocator().free(new_ids);
+        // root has itself set as parent
+        new_ids[0] = Db.Id { .id = 0, .gen = 0 };
         timer.reset();
         for (tree.list.items) |t_entry, ii| {
             const i_entry = t_entry.conv(
@@ -173,6 +201,10 @@ fn swapping () !void {
                 t_entry.name,
             );
             new_ids[ii] = try db.fileCreated(&i_entry);
+            if (ii % 10_000 == 0) {
+                const path = try weaver.pathOf(&db, Db.Id { .id = @truncate(u24, ii), .gen = 0}, '/');
+                println("indexed {} items, at: {s}", .{ ii, path });
+            }
         }
         const index_elapsed = timer.read();
         std.log.info(
@@ -180,6 +212,10 @@ fn swapping () !void {
             .{ @divFloor(index_elapsed, std.time.ns_per_s) }
         );
     }
+    var fanotify_th = FanotifyThread.init(a7r, &db);
+    defer fanotify_th.deinit();
+    try fanotify_th.start();
+    
     // std.debug.print("file size: {} KiB\n", .{ (pager.pages.items.len * pager.config.page_size) / 1024 });
     // std.debug.print("page count: {} pages\n", .{ pager.pages.items.len });
     // std.debug.print("page meta bytes: {} KiB\n", .{ (pager.pages.items.len * @sizeOf(mod_mmap.MmapPager.Page)) / 1024  });
@@ -196,10 +232,6 @@ fn swapping () !void {
     defer phrase.deinit();
     // var matcher = db.plistNameMatcher();
     // defer matcher.deinit(&db);
-    var querier = Db.Quexecutor.init(&db);
-    defer querier.deinit();
-    var weaver = Db.FullPathWeaver{};
-    defer weaver.deinit(a7r);
 
     while (true) {
         std.debug.print("Ready to search: ", .{});
@@ -283,10 +315,21 @@ test {
 //     };
 // }
 
-// fn BTree(comptime order: usize) type {
+// const BTreeConfig = struct {
+//     order: usize,
+// };
+
+// fn BTree(
+//     comptime T: type,
+//     comptime order: usize,
+// ) type {
 //      return struct {
-//         const Node = struct {
-//             children: [order]Node,
+//         const Node = union(enum) {
+//             internal: struct {
+//             },
+//             leaf: struct {
+//                 children: []T,
+//             },
 //         };
 //         root: Node,
 //     };
