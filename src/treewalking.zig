@@ -70,6 +70,8 @@ pub fn FsEntry(comptime P: type, comptime N: type) type {
     };
 }
 
+/// As a convention, the root of the tree's at index 0 and has itself set as
+/// a parent.
 pub const Tree = struct {
     pub fn walk(allocator: Allocator, path: []const u8, limit: ?usize) !Tree {
         var walker = Tree.Walker.init(allocator, limit orelse std.math.maxInt(usize));

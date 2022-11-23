@@ -179,26 +179,8 @@ fn swapping () !void {
             .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
         );
 
-        var new_ids = try arena.allocator().alloc(Db.Id, tree.list.items.len);
-        defer arena.allocator().free(new_ids);
-        // root has itself set as parent
-        new_ids[0] = Db.Id { .id = 0, .gen = 0 };
         timer.reset();
-        for (tree.list.items) |t_entry, ii| {
-            const i_entry = t_entry.conv(
-                Db.Id, 
-                []const u8, 
-                new_ids[t_entry.parent], 
-                t_entry.name,
-            );
-            new_ids[ii] = try db.fileCreated(&i_entry);
-            if (ii % 10_000 == 0) {
-                const path = try weaver.pathOf(
-                    &db, Db.Id { .id = @truncate(u24, ii), .gen = 0}, std.fs.path.sep
-                );
-                println("indexed {} items, at: {s}", .{ ii, path });
-            }
-        }
+        try db.treeCreated(&tree, Db.Id { .id = 0, .gen = 0 });
         const index_elapsed = timer.read();
         std.log.info(
             "Done adding items to index in {d} seconds", 

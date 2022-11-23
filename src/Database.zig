@@ -162,10 +162,43 @@ fn appendEntry(self: *Self, entry: Entry) !void {
     );
 }
 
+pub inline fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
+    self.lock.lock();
+    defer self.lock.unlock();
+    return try self.fileCreatedUnsafe(entry);
+}
+
+pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: Id) !void {
+    self.lock.lock();
+    defer self.lock.unlock();
+
+    var new_ids = try self.ha7r.alloc(Id, tree.list.items.len);
+    defer self.ha7r.free(new_ids);
+
+    // handle the special root case first at index 0
+    {
+        const t_entry = tree.list.items[0];
+        const i_entry = t_entry.conv(
+            Id, 
+            []const u8, 
+            root_parent, 
+            t_entry.name,
+        );
+        new_ids[0] = try self.fileCreatedUnsafe(&i_entry);
+    }
+    for (tree.list.items[1..]) |t_entry, ii| {
+        const i_entry = t_entry.conv(
+            Id, 
+            []const u8, 
+            new_ids[t_entry.parent], 
+            t_entry.name,
+        );
+        new_ids[ii] = try self.fileCreatedUnsafe(&i_entry);
+    }
+}
+
 /// Add an entry to the database.
-pub fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
-    // self.lock.lock();
-    // defer self.lock.unlock();
+fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     // clone the entry but store the name on the swap this time
     const swapped_entry = entry.clone(
         try self.sa7r.dupeJustPtr(entry.name)
