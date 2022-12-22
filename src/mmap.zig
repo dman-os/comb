@@ -40,16 +40,16 @@ pub const Pager = struct {
     };
 
     const VTable = struct {
-        alloc: fn (self: *anyopaque) AllocError!Pager.PageNo,
-        allocBlock: fn (self: *anyopaque, len: u32) AllocError!Pager.BlockId,
-        free: fn (self: *anyopaque, no: Pager.PageNo) void,
-        freeBlock: fn (self: *anyopaque, id: Pager.BlockId) void,
-        swapIn: fn (self: *anyopaque, no: Pager.PageNo) SwapInError!Pager.PageSlice,
-        swapInBlock: fn (self: *anyopaque, id: Pager.BlockId) SwapInError!Pager.PageSlice,
-        swapOut: fn (self: *anyopaque, no: Pager.PageNo) void,
-        swapOutBlock: fn (self: *anyopaque, id: Pager.BlockId) void,
-        isSwappedIn: fn (self: *const anyopaque, no: Pager.PageNo) bool,
-        pageSize: fn (self: *const anyopaque) usize,
+        alloc: *const fn (self: *anyopaque) AllocError!Pager.PageNo,
+        allocBlock: *const fn (self: *anyopaque, len: u32) AllocError!Pager.BlockId,
+        free: *const fn (self: *anyopaque, no: Pager.PageNo) void,
+        freeBlock: *const fn (self: *anyopaque, id: Pager.BlockId) void,
+        swapIn: *const fn (self: *anyopaque, no: Pager.PageNo) SwapInError!Pager.PageSlice,
+        swapInBlock: *const fn (self: *anyopaque, id: Pager.BlockId) SwapInError!Pager.PageSlice,
+        swapOut: *const fn (self: *anyopaque, no: Pager.PageNo) void,
+        swapOutBlock: *const fn (self: *anyopaque, id: Pager.BlockId) void,
+        isSwappedIn: *const fn (self: *const anyopaque, no: Pager.PageNo) bool,
+        pageSize: *const fn (self: *const anyopaque) usize,
     };
 
     ptr: *anyopaque,
@@ -105,16 +105,16 @@ pub const Pager = struct {
     pub fn init(
         pointer: anytype,
         const_ptr: anytype,
-        comptime allocFn: fn (self: @TypeOf(pointer)) AllocError!Pager.PageNo,
-        comptime allocBlockFn: fn (self: @TypeOf(pointer), len: u32) AllocError!Pager.BlockId,
-        comptime freeFn: fn (self: @TypeOf(pointer), no: Pager.PageNo) void,
-        comptime freeBlockFn: fn (self: @TypeOf(pointer), no: Pager.BlockId) void,
-        comptime swapInFn: fn (self: @TypeOf(pointer), no: Pager.PageNo) SwapInError!Pager.PageSlice,
-        comptime swapInBlockFn: fn (self: @TypeOf(pointer), id: Pager.BlockId) SwapInError!Pager.PageSlice,
-        comptime swapOutFn: fn (self: @TypeOf(pointer), no: Pager.PageNo) void,
-        comptime swapOutBlockFn: fn (self: @TypeOf(pointer), id: Pager.BlockId) void,
-        comptime pageSizeFn: fn (self: @TypeOf(const_ptr)) usize,
-        comptime isSwappedInFn: fn (self: @TypeOf(const_ptr), no: Pager.PageNo) bool,
+        comptime allocFn: *const fn (self: @TypeOf(pointer)) AllocError!Pager.PageNo,
+        comptime allocBlockFn: *const fn (self: @TypeOf(pointer), len: u32) AllocError!Pager.BlockId,
+        comptime freeFn: *const fn (self: @TypeOf(pointer), no: Pager.PageNo) void,
+        comptime freeBlockFn: *const fn (self: @TypeOf(pointer), no: Pager.BlockId) void,
+        comptime swapInFn: *const fn (self: @TypeOf(pointer), no: Pager.PageNo) SwapInError!Pager.PageSlice,
+        comptime swapInBlockFn: *const fn (self: @TypeOf(pointer), id: Pager.BlockId) SwapInError!Pager.PageSlice,
+        comptime swapOutFn: *const fn (self: @TypeOf(pointer), no: Pager.PageNo) void,
+        comptime swapOutBlockFn: *const fn (self: @TypeOf(pointer), id: Pager.BlockId) void,
+        comptime pageSizeFn: *const fn (self: @TypeOf(const_ptr)) usize,
+        comptime isSwappedInFn: *const fn (self: @TypeOf(const_ptr), no: Pager.PageNo) bool,
     ) Self {
         const PagerPtr = @TypeOf(pointer);
         const ptr_info = @typeInfo(PagerPtr);
@@ -132,52 +132,52 @@ pub const Pager = struct {
         const gen = struct {
             fn allocImpl(alloc_ptr: *anyopaque) AllocError!Pager.PageNo {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, allocFn, .{ self, });
+                return @call(.always_inline, allocFn, .{ self, });
             }
 
             fn allocBlockImpl(alloc_ptr: *anyopaque, len: u32) AllocError!Pager.BlockId {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, allocBlockFn, .{ self, len });
+                return @call(.always_inline, allocBlockFn, .{ self, len });
             }
 
             fn swapInImpl(alloc_ptr: *anyopaque, no: Pager.PageNo) SwapInError!Pager.PageSlice {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, swapInFn, .{ self, no });
+                return @call(.always_inline, swapInFn, .{ self, no });
             }
 
             fn swapInBlockImpl(alloc_ptr: *anyopaque, id: Pager.BlockId) SwapInError!Pager.PageSlice {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, swapInBlockFn, .{ self, id });
+                return @call(.always_inline, swapInBlockFn, .{ self, id });
             }
 
             fn swapOutImpl(alloc_ptr: *anyopaque, no: Pager.PageNo) void {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, swapOutFn, .{ self, no });
+                return @call(.always_inline, swapOutFn, .{ self, no });
             }
 
             fn swapOutBlockImpl(alloc_ptr: *anyopaque, id: Pager.BlockId) void {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, swapOutBlockFn, .{ self, id });
+                return @call(.always_inline, swapOutBlockFn, .{ self, id });
             }
 
             fn freeImpl(alloc_ptr: *anyopaque, no: Pager.PageNo) void {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, freeFn, .{ self, no });
+                return @call(.always_inline, freeFn, .{ self, no });
             }
 
             fn freeBlockImpl(alloc_ptr: *anyopaque, id: Pager.BlockId) void {
                 const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, freeBlockFn, .{ self, id });
+                return @call(.always_inline, freeBlockFn, .{ self, id });
             }
 
             fn isSwappedInImpl(alloc_ptr: *const anyopaque, no: Pager.PageNo) bool {
                 const self = @ptrCast(*const PagerPtr, &@alignCast(alignment, alloc_ptr)).*;
-                return @call(.{ .modifier = .always_inline }, isSwappedInFn, .{ self, no });
+                return @call(.always_inline, isSwappedInFn, .{ self, no });
             }
 
             fn pageSizeImpl(alloc_ptr: *const anyopaque) usize {
                 const self = @ptrCast(*const PagerPtr, &@alignCast(alignment, alloc_ptr)).*;
-                return @call(.{ .modifier = .always_inline }, pageSizeFn, .{ self });
+                return @call(.always_inline, pageSizeFn, .{ self });
             }
 
             const vtable = VTable {
@@ -408,7 +408,7 @@ pub const MmapPager = struct {
             break :blk res.value_ptr;
         }; 
         // println("putting in free block of len {} at slot {}", .{ block_len, start });
-        try list.put(self.a7r, start, .{});
+        try list.put(self.a7r, start, {});
     }
 
     fn allocFreeBlock(self: *Self, len: u32) !?BlockId {
@@ -484,8 +484,8 @@ pub const MmapPager = struct {
             try self.pages.ensureUnusedCapacity(self.a7r, block_len);
             // // ensure capacity on the free list to avoid error checking on free calls
             // try self.free_list.ensureUnusedCapacity(block_len);
-            try std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + block_len) * self.config.page_size)
-                catch |err| switch (err) {
+            std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + block_len) * self.config.page_size)
+                catch |err| return switch (err) {
                     std.os.TruncateError.AccessDenied => unreachable,
                     std.os.TruncateError.FileTooBig => error.FileTooBig,
                     std.os.TruncateError.InputOutput=> error.InputOutput,
@@ -519,7 +519,7 @@ pub const MmapPager = struct {
     }
 
     pub fn freeBlock(self: *Self, id: BlockId) void {
-        if (self.blocks.get(id.len)) |*set| {
+        if (self.blocks.getPtr(id.len)) |set| {
             if (set.fetchRemove(id.idx)) |pair| {
                 if (pair.value != null) {
                     std.log.warn("page {} was freed while swapped in", .{ id });
@@ -557,7 +557,7 @@ pub const MmapPager = struct {
                 if (opt.*) |slice| {
                     return slice;
                 } else  {
-                    var slice = try std.os.mmap(
+                    var slice = std.os.mmap(
                         null,
                         self.config.page_size * id.len,
                         std.os.PROT.READ | std.os.PROT.WRITE,
@@ -565,7 +565,7 @@ pub const MmapPager = struct {
                         self.backing_file.handle,
                         // -1,
                         id.idx * self.config.page_size,
-                    ) catch |err| switch(err) {
+                    ) catch |err| return switch(err) {
                         std.os.MMapError.MemoryMappingNotSupported => @panic("system doesn't support mmaping"),
                         std.os.MMapError.AccessDenied => unreachable,
                         std.os.MMapError.PermissionDenied => unreachable,
@@ -612,7 +612,7 @@ pub const MmapPager = struct {
         if (page.slice) |slice| {
             return slice;
         } else {
-            var slice = try std.os.mmap(
+            var slice = std.os.mmap(
                 null,
                 self.config.page_size,
                 std.os.PROT.READ | std.os.PROT.WRITE,
@@ -620,7 +620,7 @@ pub const MmapPager = struct {
                 self.backing_file.handle,
                 // -1,
                 no * self.config.page_size,
-            ) catch |err| switch(err) {
+            ) catch |err| return switch(err) {
                 std.os.MMapError.MemoryMappingNotSupported => @panic("system doesn't support mmaping"),
                 std.os.MMapError.AccessDenied => unreachable,
                 std.os.MMapError.PermissionDenied => unreachable,
@@ -1118,10 +1118,10 @@ pub const SwapAllocator = struct {
     pub const Error = AllocError || SwapInError;
 
     const VTable = struct {
-        alloc: fn (self: *anyopaque, len: usize) AllocError!Ptr,
-        swapIn: fn (self: *anyopaque, ptr: Ptr) SwapInError![]u8,
-        swapOut: fn (self: *anyopaque, ptr: Ptr) void,
-        free: fn (self: *anyopaque, ptr: Ptr) void,
+        alloc: *const fn (self: *anyopaque, len: usize) AllocError!Ptr,
+        swapIn: *const fn (self: *anyopaque, ptr: Ptr) SwapInError![]u8,
+        swapOut: *const fn (self: *anyopaque, ptr: Ptr) void,
+        free: *const fn (self: *anyopaque, ptr: Ptr) void,
     };
 
     ptr: *anyopaque,
@@ -1185,22 +1185,22 @@ pub const SwapAllocator = struct {
         const gen = struct {
             fn allocImpl(alloc_ptr: *anyopaque, len: usize) AllocError!Ptr {
                 const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, allocFn, .{ self, len,  });
+                return @call(.always_inline, allocFn, .{ self, len,  });
             }
 
             fn swapInImpl(alloc_ptr: *anyopaque, ptr: Ptr) SwapInError![]u8 {
                 const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, swapInFn, .{ self, ptr,  });
+                return @call(.always_inline, swapInFn, .{ self, ptr,  });
             }
 
             fn swapOutImpl(alloc_ptr: *anyopaque, ptr: Ptr) void {
                 const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, swapOutFn, .{ self, ptr, });
+                return @call(.always_inline, swapOutFn, .{ self, ptr, });
             }
 
             fn freeImpl(alloc_ptr: *anyopaque, ptr: Ptr) void {
                 const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.{ .modifier = .always_inline }, freeFn, .{ self, ptr, });
+                return @call(.always_inline, freeFn, .{ self, ptr, });
             }
 
             const vtable = VTable{
@@ -1225,7 +1225,7 @@ pub const PagingSwapAllocatorConfig = struct {
 
 /// Implements the `SwapAllocator` interface using a `Pager` and a similar
 /// bucketing approach as the `std.mem.GeneralPurposeAllocator`.
-pub fn PagingSwapAllocator(config: PagingSwapAllocatorConfig) type {
+pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
     return struct {
         const Self = @This();
 
@@ -1296,7 +1296,7 @@ pub fn PagingSwapAllocator(config: PagingSwapAllocatorConfig) type {
                     // .allocs = std.MultiArrayList(Allocation){},
                     .allocs = std.ArrayListUnmanaged(Allocation){},
                     .pages = std.ArrayListUnmanaged(PageNo){},
-                    .free_list = FreeList.init(ha7r, .{}),
+                    .free_list = FreeList.init(ha7r, {}),
                     // .class = class,
                     .per_page = per_page,
                 };

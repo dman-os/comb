@@ -17,7 +17,7 @@ test:
     zig build test
 
 bench *ARGS:
-    zig test -fstage1 src/benches.zig -O ReleaseFast {{ARGS}}
+    zig test src/benches.zig -O ReleaseFast {{ARGS}}
 
 clean:
     find -name tmpfs | sudo xargs umount 2> /dev/null || true

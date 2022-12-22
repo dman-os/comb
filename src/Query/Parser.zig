@@ -109,6 +109,11 @@ pub fn deinit(self: *Self, ha7r: Allocator) void {
     self.tokens.deinit(ha7r);
 }
 
+fn reset(self: *Self) void {
+    self.tokens.clearRetainingCapacity();
+    self.cur_token_idx = 0;
+}
+
 fn cur(self: *const Self) ?Token {
     return if (self.cur_token_idx < self.tokens.items.len)
          self.tokens.items[self.cur_token_idx]
@@ -129,6 +134,7 @@ fn advance(self: *Self) void {
 pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
     // var iter = (try std.unicode.Utf8View.init(str)).iterator();
     // var uno = iter.nextCodepointSlice();
+    self.reset();
 
     var builder = Query.Builder.init();
     errdefer {
@@ -138,7 +144,6 @@ pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
     const str = std.mem.trim(u8, raw, " \n\t");
 
     if (str.len > 0) {
-        self.tokens.clearRetainingCapacity();
         try tokenize(
             str, 
             mod_utils.Appender(Token).new(

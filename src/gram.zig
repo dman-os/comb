@@ -24,7 +24,7 @@ pub fn GramPos(comptime gram_len: u4) type {
 }
 
 /// This will tokenize the string before gramming it according to the provided delimiter.
-/// For example, provide std.ascii.spaces to tokenize using whitespace.
+/// For example, provide std.ascii.whitespace to tokenize using whitespace.
 pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, delimiters: []const u8, out: Appender(GramPos(gram_len))) !void {
     if (gram_len == 0) {
         @compileError("gram_len is 0");
@@ -295,7 +295,7 @@ test "grammer.trigram" {
             3, 
             case.string, 
             case.boundary_grams, 
-            &std.ascii.spaces, 
+            &std.ascii.whitespace, 
             Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append)
         );
         std.testing.expectEqualSlices(GramPos(3), case.expected, list.items) catch |err| {
@@ -400,7 +400,7 @@ test "grammer.quadgram" {
             4, 
             case.string, 
             case.boundary_grams, 
-            &std.ascii.spaces, 
+            &std.ascii.whitespace, 
             Appender(GramPos(4)).new(&list, std.ArrayList(GramPos(4)).append)
         );
         std.testing.expectEqualSlices(GramPos(4), case.expected, list.items) catch |err| {

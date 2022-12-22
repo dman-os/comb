@@ -110,7 +110,7 @@ pub fn init(
         .pager = pager,
         .meta = SwapList(RowMeta).init(pager.pageSize()),
         .table = SwapList(Entry).init(pager.pageSize()),
-        .free_slots = FreeSlots.init(ha7r, .{}),
+        .free_slots = FreeSlots.init(ha7r, {}),
         .config = config,
     };
     return self;
@@ -162,12 +162,6 @@ fn appendEntry(self: *Self, entry: Entry) !void {
     );
 }
 
-pub inline fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
-    self.lock.lock();
-    defer self.lock.unlock();
-    return try self.fileCreatedUnsafe(entry);
-}
-
 pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: Id) !void {
     self.lock.lock();
     defer self.lock.unlock();
@@ -193,8 +187,14 @@ pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: 
             new_ids[t_entry.parent], 
             t_entry.name,
         );
-        new_ids[ii] = try self.fileCreatedUnsafe(&i_entry);
+        new_ids[ii + 1] = try self.fileCreatedUnsafe(&i_entry);
     }
+}
+
+pub inline fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
+    self.lock.lock();
+    defer self.lock.unlock();
+    return try self.fileCreatedUnsafe(entry);
 }
 
 /// Add an entry to the database.
@@ -239,7 +239,7 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         self.pager, 
         id, 
         entry.name, 
-        std.ascii.spaces[0..]
+        std.ascii.whitespace[0..]
         // &[_]u8{ self.config.delimiter }
     );
     {
@@ -447,7 +447,7 @@ pub const PlistNameMatcher = struct {
             db.pager,
             &db.plist,
             string,
-            std.ascii.spaces[0..],
+            std.ascii.whitespace[0..],
         );
     }
 };
@@ -496,9 +496,6 @@ pub const Quexecutor = struct {
             ha7r: Allocator,
             clause: *const Query.Filter.Clause
         ) !void {
-            _ = self;
-            _ = ha7r;
-            _ = clause;
             self.nodes.clearRetainingCapacity();
             // don't rely on the return pointer since it might be
             // invalid when sub nodes resize the arraylist
@@ -722,7 +719,7 @@ pub const Quexecutor = struct {
             },
             .complement => |child| {
                 _ = child;
-                std.debug.todo("fuck");
+                @panic("fuck");
             },
             .gramMatch => |gram| {
                 // println("gramMatch: {any}", .{ gram });
@@ -876,7 +873,7 @@ const e2e = struct {
         query: []const u8,
         entries: []const FsEntry([] const u8, [] const u8),
         expected: []const usize,
-        preQueryAction: ?fn (*Database, []Id) anyerror!void = null,
+        preQueryAction: ?*const fn (*Database, []Id) anyerror!void = null,
     };
 
     fn run(table: []const Case) !void {

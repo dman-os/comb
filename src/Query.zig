@@ -214,7 +214,7 @@ pub const Filter = struct {
                                 @panic(".and operator need more than one sub clause");
                             return Clause { 
                                 .op = Op { 
-                                    .@"and" = self.sub_clauses.toOwnedSlice(self.ha7r),
+                                    .@"and" = try self.sub_clauses.toOwnedSlice(self.ha7r),
                                 } 
                             };
                         },
@@ -223,7 +223,7 @@ pub const Filter = struct {
                                 @panic(".or operator need more than one sub clause");
                             return Clause { 
                                 .op = Op { 
-                                    .@"or" = self.sub_clauses.toOwnedSlice(self.ha7r),
+                                    .@"or" = try self.sub_clauses.toOwnedSlice(self.ha7r),
                                 } 
                             };
                         },

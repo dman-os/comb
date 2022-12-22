@@ -170,7 +170,7 @@ fn bench_plist(
             _ = self.matcher.strMatch(
                     self.plist, 
                     self.search_str,
-                    std.ascii.spaces[0..]
+                    std.ascii.whitespace[0..]
             ) catch @panic("wtf");
         }
     };
@@ -233,7 +233,7 @@ test "rowscan.bench.gen" {
 }
 
 test "Db.NaiveNameMatcher" {
-    const Db = comb.mod_db.Database;
+    const Db = comb.Database;
     const size: usize = 1_000_000;
 
     var a7r = std.testing.allocator;
@@ -348,7 +348,7 @@ test "plist.bench.gen" {
     var longest_name = try a7r.alloc(u8, 1);
     defer a7r.free(longest_name);
     for (tree.list.items) |entry, id|{
-        try plist.insert(a7r, @intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
+        try plist.insert(a7r, @intCast(id_t, id), entry.name, std.ascii.whitespace[0..]);
         if (id % 10_000 == 0 ) {
             std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
         }
@@ -400,21 +400,21 @@ test "plist.bench.walk" {
 
         var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
         for (tree.list.items) |entry, id| {
-            try plist.insert(a7r, id, entry.name, std.ascii.spaces[0..]);
+            try plist.insert(a7r, id, entry.name, std.ascii.whitespace[0..]);
             if (id % 10_000 == 0 ) {
                 std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
             }
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 a7r.free(deepest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 deepest_name = try a7r.dupe(u8, path);
             }
             avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
             if (entry.name.len > longest) {
                 longest = entry.name.len;
                 a7r.free(longest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 longest_name = try a7r.dupe(u8, path);
             }
             var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);
@@ -531,7 +531,7 @@ fn bench_plist_swapping(
                     self.a7r, self.sa7r, self.pager,
                     self.plist, 
                     self.search_str,
-                    std.ascii.spaces[0..]
+                    std.ascii.whitespace[0..]
             ) catch @panic("wtf");
         }
     };
@@ -585,7 +585,7 @@ test "SwapPList.bench.gen" {
     var longest_name = try a7r.alloc(u8, 1);
     defer a7r.free(longest_name);
     for (tree.list.items) |entry, id|{
-        try plist.insert(a7r, sa7r, pager, @intCast(id_t, id), entry.name, std.ascii.spaces[0..]);
+        try plist.insert(a7r, sa7r, pager, @intCast(id_t, id), entry.name, std.ascii.whitespace[0..]);
         if (id % 10_000 == 0 ) {
             println("added {} items to plist, now at {s}", .{ id, entry.name });
             // println("{} hot pages and {} cold pages items to plist", .{ lru.hotCount(), lru.coldCount() });
@@ -660,21 +660,21 @@ test "SwapPList.bench.walk" {
 
         var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
         for (tree.list.items) |entry, id| {
-            try plist.insert(a7r, sa7r, pager, id, entry.name, std.ascii.spaces[0..]);
+            try plist.insert(a7r, sa7r, pager, id, entry.name, std.ascii.whitespace[0..]);
             if (id % 10_000 == 0 ) {
                 std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
             }
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 a7r.free(deepest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 deepest_name = try a7r.dupe(u8, path);
             }
             avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
             if (entry.name.len > longest) {
                 longest = entry.name.len;
                 a7r.free(longest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 longest_name = try a7r.dupe(u8, path);
             }
             var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);

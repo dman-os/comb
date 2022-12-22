@@ -12,7 +12,7 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     const exe = b.addExecutable("comb", "src/main.zig");
-    exe.use_stage1 = true;
+    // exe.use_stage1 = true;
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
@@ -27,7 +27,7 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest("src/main.zig");
-    exe_tests.use_stage1 = true;
+    // exe_tests.use_stage1 = true;
     exe_tests.setTarget(target);
     exe_tests.setBuildMode(mode);
 

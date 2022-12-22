@@ -292,11 +292,11 @@ test "SwapPlist.strMatch" {
 
         for (case.items) |name, id| {
             try plist.insert(
-               ha7r, sa7r, pager, @as(u64, id), name, std.ascii.spaces[0..]
+               ha7r, sa7r, pager, @as(u64, id), name, std.ascii.whitespace[0..]
             );
         }
 
-        var res = matcher.strMatch(ha7r, sa7r, pager, &plist, case.query, std.ascii.spaces[0..]);
+        var res = matcher.strMatch(ha7r, sa7r, pager, &plist, case.query, std.ascii.whitespace[0..]);
         switch (case.expected) {
             .ok => |expected|{
                 var matches = try res;
@@ -566,10 +566,10 @@ test "plist.strMatch" {
         defer matcher.deinit();
 
         for (case.items) |name, id| {
-            try plist.insert(std.testing.allocator, @as(u64, id), name, std.ascii.spaces[0..]);
+            try plist.insert(std.testing.allocator, @as(u64, id), name, std.ascii.whitespace[0..]);
         }
 
-        var res = matcher.strMatch(&plist, case.query, std.ascii.spaces[0..]);
+        var res = matcher.strMatch(&plist, case.query, std.ascii.whitespace[0..]);
         switch (case.expected) {
             .ok => |expected|{
                 var matches = try res;

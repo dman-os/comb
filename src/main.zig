@@ -35,96 +35,6 @@ pub fn main() !void {
     // try mod_fanotify.demo();
 }
 
-const FanotifyThread = struct {
-    ha7r: Allocator,
-    db: *Db,
-    thread: ?std.Thread = null,
-    die_signal: bool = false,
-    querier: Db.Quexecutor,
-
-    fn init(ha7r: Allocator, db: *Db) @This() {
-        return @This() { 
-            .ha7r = ha7r, 
-            .db = db,
-            .querier = Db.Quexecutor.init(db),
-        };
-    }
-
-    fn deinit(self: *@This()) void {
-        self.die_signal = true;
-        if (self.thread) |thread| {
-            thread.detach();
-        }
-        self.querier.deinit();
-    }
-
-    fn start(self: *@This()) !void {
-        self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
-    }
-
-    fn threadFn(self: *@This()) !void {
-        try mod_fanotify.listener(
-            self.ha7r,
-            "/",
-            &self.die_signal,
-            mod_utils.Appender(mod_fanotify.FanotifyEvent).new(
-                self,
-                @This().appendEvent
-            )
-        );
-    }
-
-    fn appendEvent(self: *@This(), event_in: mod_fanotify.FanotifyEvent) std.mem.Allocator.Error!void {
-        _ = self;
-        var event = event_in;
-        std.log.debug("evt: {any}", .{ event });
-        defer event.deinit(self.ha7r);
-        //const FAN = mod_fanotify.FAN;
-        if (
-            event.kind.attrib and
-            event.name == null and
-            event.dir == null 
-        ) {
-            std.log.debug("neutrino attrib event", .{});
-        } else if (
-            event.kind.delete and event.kind.ondir
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.delete and event.kind.delete
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.create and event.kind.delete
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.create 
-        ) {
-            var dir = event.dir.?;
-            var parser = Query.Parser{};
-            defer parser.deinit(self.ha7r);
-            var query = parser.parse(self.ha7r, dir) catch @panic("error parsing dir to query");
-            defer query.deinit(self.ha7r);
-            // var parents = try self.querier.query(&query);
-            var timer = std.time.Timer.start() catch @panic("timer unsupported");
-            var parents = self.querier.query(&query) catch |err| {
-                println("error querying: {}", .{ err });
-                @panic("error querying");
-            };
-            var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
-            println(
-                " -- found possilbe parents: {any} in {}", 
-                .{ parents, elapsed }
-            );
-        }
-        else {
-            std.log.debug("unreconized event: {any}", .{ event });
-        }
-        // std.debug.todo("append");
-    }
-};
-
 fn swapping () !void {
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
@@ -187,9 +97,9 @@ fn swapping () !void {
             .{ @divFloor(index_elapsed, std.time.ns_per_s) }
         );
     }
-    var fanotify_th = FanotifyThread.init(a7r, &db);
-    defer fanotify_th.deinit();
-    try fanotify_th.start();
+    // var fanotify_th = FanotifyThread.init(a7r, &db);
+    // defer fanotify_th.deinit();
+    // try fanotify_th.start();
     
     // std.debug.print("file size: {} KiB\n", .{ (pager.pages.items.len * pager.config.page_size) / 1024 });
     // std.debug.print("page count: {} pages\n", .{ pager.pages.items.len });
@@ -222,7 +132,8 @@ fn swapping () !void {
         var matches = try querier.query(&query);
         const elapsed = timer.read();
 
-        for (matches) |id, ii| {
+        var last_idx = @min(matches.len, 10);
+        for (matches[0..last_idx]) |id, ii| {
             const path = try weaver.pathOf(&db, id, std.fs.path.sep);
             std.debug.print("{}. {s}\n", .{ ii, path });
         }
@@ -230,6 +141,9 @@ fn swapping () !void {
         std.log.info(
             "{} results in {d} seconds", 
             .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},
+        );
+        std.log.info(
+            "query: {}", .{ query }
         );
     }
 }

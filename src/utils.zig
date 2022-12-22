@@ -54,15 +54,15 @@ pub fn Appender(comptime T: type) type {
         const Err = Allocator.Error;
 
         vptr: *anyopaque,
-        func: fn (*anyopaque, T) Err!void,
+        func: *const fn (*anyopaque, T) Err!void,
 
-        pub fn new(coll: anytype, func: fn (@TypeOf(coll), T) Err!void) Self {
+        pub fn new(coll: anytype, func: *const fn (@TypeOf(coll), T) Err!void) Self {
             if (!comptime std.meta.trait.isSingleItemPtr(@TypeOf(coll))) {
                 @compileError("was expecting single item pointer, got type = " ++ @typeName(@TypeOf(coll)));
             }
             return Self{
                 .vptr = @ptrCast(*anyopaque, coll),
-                .func = @ptrCast(fn (*anyopaque, T) Err!void, func),
+                .func = @ptrCast(*const fn (*anyopaque, T) Err!void, func),
             };
         }
 

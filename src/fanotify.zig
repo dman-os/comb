@@ -1,12 +1,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const Queue = std.atomic.Queue;
 
 const mod_utils = @import("utils.zig");
 const println = mod_utils.println;
 const dbg = mod_utils.dbg;
 const Option = mod_utils.Option;
 const OptionStr = Option([]const u8);
+
+const Db = @import("Database.zig");
+const Query = @import("Query.zig");
 
 pub const FanotifyEvent = struct {
     const Self = @This();
@@ -243,7 +247,7 @@ pub const FAN = struct {
             // try std.fmt.format(writer, " {}: ", .{ self.asInt() });
             comptime var tinfo: std.builtin.Type.Struct = @typeInfo(@This()).Struct;
             inline for (tinfo.fields) |field| {
-                if (field.field_type == bool)
+                if (field.type == bool)
                     if (@field(self, field.name))
                         try std.fmt.format(writer, " {s},", .{ field.name });
             }
@@ -537,7 +541,7 @@ pub const file_handle = extern struct {
     /// I'm opqaue, just point to me
     f_handle: u8,
 
-    pub fn file_name(self: @This()) [*:0]const u8 {
+    pub fn file_name(self: *@This()) [*:0]const u8 {
         return @intToPtr([*:0]u8, @ptrToInt(&self.f_handle) + @as(usize, self.handle_bytes));
     }
 };
@@ -736,248 +740,6 @@ pub fn mount(
         else => |err| return std.os.unexpectedErrno(err),
     }
 }
-
-const TestFanotify = struct {
-    const Self = @This();
-    pub const TouchFn = fn (a7r: Allocator, dir: std.fs.Dir) anyerror!void;
-
-    events: std.ArrayList(FanotifyEvent),
-    tmpfs_path: [:0]u8,
-    tmp_dir: std.testing.TmpDir,
-    tmpfs_dir: std.fs.Dir,
-
-    /// Context for the test threads
-    const Context = struct {
-        const ContexSelf = @This();
-        path: [:0]const u8,
-        dir: std.fs.Dir,
-
-        prePollTouch: TouchFn,
-        touch: TouchFn,
-
-        doDone: std.Thread.ResetEvent = .{},
-        listenDone: std.Thread.ResetEvent = .{},
-        startListen: std.Thread.ResetEvent = .{},
-        listenReady: std.Thread.ResetEvent = .{},
-        events: *std.ArrayList(FanotifyEvent),
-
-        doErr: ?anyerror = null,
-        listenErr: ?anyerror = null,
-
-        fn doFn(ctx: *ContexSelf, alloc8orOuter: Allocator) void {
-            defer ctx.doDone.set();
-            ctx.doActual(alloc8orOuter) catch |err| {
-                ctx.doErr = err;
-            };
-        }
-        fn doActual(ctx: *ContexSelf, alloc8or: Allocator) !void {
-            try @call(.{}, ctx.prePollTouch, .{ alloc8or, ctx.dir });
-            // make sure they're ready to poll before you start doing shit
-            ctx.listenReady.wait();
-            // give them the heads up to start polling
-            ctx.startListen.set();
-            try @call(.{}, ctx.touch, .{ alloc8or, ctx.dir });
-        }
-
-        fn listenFn(ctx: *ContexSelf, alloc8or: Allocator) void {
-            defer ctx.listenDone.set();
-            ctx.listenActual(alloc8or) catch |err| {
-                ctx.listenErr = err;
-            };
-        }
-
-        fn listenActual(ctx: *ContexSelf, alloc8or: Allocator) !void {
-            const fd = blk: {
-                const fd = try init(
-                    FAN.CLASS.NOTIF,
-                    FAN.INIT {
-                        .report_fid = true,
-                        .report_dir_fid = true,
-                        .report_name = true,
-                    },
-                    std.os.O.RDONLY | std.os.O.CLOEXEC,
-                );
-                try mark(
-                    fd, 
-                    FAN.MARK.MOD.ADD, 
-                    FAN.MARK.FILESYSTEM, 
-                    FAN.EVENT {
-                        .create = true,
-                        .modify = true,
-                        .attrib = true,
-                        .delete = true,
-                        .moved_to = true,
-                        .ondir = true,
-                    },
-                    std.os.AT.FDCWD, 
-                    ctx.path
-                );
-                break :blk fd;
-            };
-            defer std.os.close(fd);
-
-            var pollfds = [_]std.os.pollfd{std.os.pollfd{
-                .fd = fd,
-                .events = std.os.POLL.IN,
-                .revents = 0,
-            }};
-            std.log.info("entering poll loop", .{});
-            var buf = [_]u8{0} ** 256;
-
-            // tell them we're ready to poll
-            ctx.listenReady.set();
-            // wait until they give us the heads up inorder to avoid
-            // catching events they don't want us seeing
-            ctx.startListen.wait();
-            var breakOnNext = false;
-            while (true) {
-                if (breakOnNext) break;
-                if (ctx.doDone.isSet()) {
-                    // poll at least one cycle after they're done
-                    // in case they give set `startListen` and `finishPoll`
-                    // before we get to run
-                    breakOnNext = true;
-                }
-                // println("looping", .{});
-
-                // set timeout to zero to avoid polling forver incase
-                // we start polling just before they set `doDone`
-                const poll_num = try std.os.poll(&pollfds, 0);
-
-                if (poll_num < 1) {
-                    continue;
-                    // std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
-                    // @panic("err on poll");
-                }
-
-                const timestamp = std.time.timestamp();
-
-                for (&pollfds) |pollfd| {
-                    if (pollfd.revents == 0 or (pollfd.revents & std.os.POLL.IN) == 0) {
-                        continue;
-                    }
-                    const fanotify_fd = pollfd.fd;
-                    const read_len = try std.os.read(fanotify_fd, &buf);
-
-                    var ptr = &buf[0];
-                    var left_bytes = read_len;
-                    var event_count: usize = 0;
-                    while (true) {
-                        const meta_ptr = @ptrCast(*align(1) const event_metadata, ptr);
-                        const meta = meta_ptr.*;
-                        if (
-                            left_bytes < @sizeOf(event_metadata) 
-                            or left_bytes < @intCast(usize, meta.event_len)
-                            // FIXME: is this case even possible?
-                            or meta.event_len < @sizeOf(event_metadata)
-                        ) {
-                            break;
-                        }
-
-                        if (meta.vers != METADATA_VERSION) {
-                            @panic("unexpected " ++ @typeName(event_metadata) ++ " version");
-                        }
-
-                        if ((meta.mask & FAN.Q_OVERFLOW) > 0) @panic("queue overflowed");
-
-                        if (try parseRawEvent(alloc8or, timestamp, meta_ptr)) |event|
-                            try ctx.events.append(event);
-
-                        ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
-                        left_bytes -= meta.event_len;
-                        event_count += 1;
-                    }
-                    // std.log.info("{} events read this cycle:", .{ event_count, });
-                    // for (events.items) |event, ii| {
-                    //     std.log.info(
-                    //         "Event: {} at {} with mask {} from pid {}",
-                    //         .{ ii, event.timestamp, event.mask, event.pid }
-                    //     );
-                    //     std.log.info("  - {s}/{s}", .{ event.dir, event.name });
-                    // }
-                }
-            }
-        }
-    };
-
-    pub fn deinit(self: *Self, a7r: Allocator) void {
-        for (self.events.items) |*evt| {
-            evt.deinit(a7r);
-        }
-        self.events.deinit();
-        self.tmpfs_dir.close();
-        var sleep_time: usize = 0;
-        while (true) {
-            const resp = std.os.linux.umount(self.tmpfs_path);
-            switch (std.os.errno(resp)) {
-                .SUCCESS => break,
-                .BUSY => {
-                    if (sleep_time > 1 * 1_000_000_000) {
-                        @panic("umount way too busy");
-                    }
-                    const ns = 1_000_000_00;
-                    sleep_time += ns;
-                    std.time.sleep(ns);
-                },
-                else => |err| {
-                    println("err: {}", .{err});
-                    @panic("umount failed");
-                },
-            }
-        }
-        a7r.free(self.tmpfs_path);
-        self.tmp_dir.cleanup();
-    }
-
-    pub fn run(
-        a7r: Allocator,
-        prePollTouchFn: TouchFn,
-        touchFn: TouchFn,
-    ) !Self {
-        var tmp_dir = std.testing.tmpDir(.{});
-
-        const tmpfs_name = "tmpfs";
-        try tmp_dir.dir.makeDir(tmpfs_name);
-
-        var tmpfs_path = blk: {
-            var path = try tmp_dir.dir.realpathAlloc(a7r, tmpfs_name);
-            defer a7r.free(path);
-            break :blk try std.mem.concatWithSentinel(a7r, u8, &.{path}, 0);
-        };
-
-        try mount("tmpfs", tmpfs_path, "tmpfs", 0, 0);
-
-        var tmpfs_dir = try tmp_dir.dir.openDir("tmpfs", .{});
-
-        var out = std.ArrayList(FanotifyEvent).init(a7r);
-        var ctx = Context{
-            .dir = tmpfs_dir,
-            .path = tmpfs_path,
-            .events = &out,
-            .touch = touchFn,
-            .prePollTouch = prePollTouchFn,
-        };
-
-        var listen_thread = try std.Thread.spawn(.{}, Context.listenFn, .{ &ctx, a7r });
-        var do_thread = try std.Thread.spawn(.{}, Context.doFn, .{ &ctx, a7r });
-        do_thread.detach();
-        listen_thread.detach();
-
-        ctx.doDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for do");
-        ctx.listenDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for listen");
-
-        if (ctx.doErr) |err| return err;
-        if (ctx.listenErr) |err| return err;
-
-        // @call(.{}, testFn, .{ a7r, ctx.events, })
-        return Self{
-            .tmp_dir = tmp_dir,
-            .tmpfs_dir = tmpfs_dir,
-            .tmpfs_path = tmpfs_path,
-            .events = out,
-        };
-    }
-};
 
 pub fn demo() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -1187,7 +949,7 @@ pub fn listener(
     }
 }
 
-inline fn parseRawEvent(
+fn parseRawEvent(
     a7r: Allocator, 
     timestamp: i64, 
     meta_ptr: *align(1) const event_metadata
@@ -1199,25 +961,30 @@ inline fn parseRawEvent(
         // and we're not interested
         @panic("todo");
     } else {
-        const fid_info = @intToPtr(*event_info_fid, @ptrToInt(meta_ptr) + @sizeOf(event_metadata));
+        const fid_info = @intToPtr(
+            *event_info_fid, 
+            @ptrToInt(meta_ptr) + @sizeOf(event_metadata)
+        );
         // lifted from the manual fanotify(7)
-        // Note that for the directory entry modification events FAN_CREATE, FAN_DELETE, and FAN_MOVE, 
-        // the file_handle identifies the modified directory and not the created/deleted/moved child 
-        // object. If the value of  info_type  field is FAN_EVENT_INFO_TYPE_DFID_NAME, the file handle 
-        // is followed by a null terminated string that identifies the created/deleted/moved  
-        // directory entry name.  
+        // Note that for the directory entry modification events FAN_CREATE,
+        // FAN_DELETE, and FAN_MOVE, the file_handle identifies the modified
+        // directory and not the created/deleted/moved child object. If the
+        // value of  info_type  field is FAN_EVENT_INFO_TYPE_DFID_NAME, the
+        // file handle is followed by a null terminated string that identifies
+        // the created/deleted/moved  directory entry name.  
 
-        // For other events such as FAN_OPEN, FAN_ATTRIB, FAN_DELETE_SELF,  and 
-        // FAN_MOVE_SELF, if the value of info_type field is FAN_EVENT_INFO_TYPE_FID,
-        // the file_handle identifies the object correlated to the event.   
-        // If the value of info_type field is FAN_EVENT_INFO_TYPE_DFID, the file_handle 
-        // identifies the directory object correlated to the event or the parent 
-        // directory of a non-directory object correlated to the event.  
-        // If the value of info_type field is FAN_EVENT_INFO_TYPE_DFID_NAME, the 
-        // file_handle identifies the same directory object that would be reported 
-        // with FAN_EVENT_INFO_TYPE_DFID and the file handle is followed by a null
-        // terminated string that identifies the name of a directory entry in that directory, 
-        // or '.' to identify the directory object itself.
+        // For other events such as FAN_OPEN, FAN_ATTRIB, FAN_DELETE_SELF,  and
+        // FAN_MOVE_SELF, if the value of info_type field is
+        // FAN_EVENT_INFO_TYPE_FID, the file_handle identifies the object
+        // correlated to the event.   If the value of info_type field is
+        // FAN_EVENT_INFO_TYPE_DFID, the file_handle identifies the directory
+        // object correlated to the event or the parent directory of a
+        // non-directory object correlated to the event.  If the value of
+        // info_type field is FAN_EVENT_INFO_TYPE_DFID_NAME, the file_handle
+        // identifies the same directory object that would be reported with
+        // FAN_EVENT_INFO_TYPE_DFID and the file handle is followed by a null
+        // terminated string that identifies the name of a directory entry in
+        // that directory, or '.' to identify the directory object itself.
         const handle = &fid_info.handle;
 
         // if just fid
@@ -1278,9 +1045,12 @@ inline fn parseRawEvent(
             )) |dir_fd| blk: {
                 defer std.os.close(dir_fd);
                 break :blk try mod_utils.fdPath(dir_fd);
-            } else |err| switch (err) {
-                OpenByHandleErr.StaleFileHandle => null,
-                else => @panic("open_by_handle_at failed"),
+            } else |err| blk: {
+                switch (err) {
+                    OpenByHandleErr.StaleFileHandle => {},
+                    else => @panic("open_by_handle_at failed"),
+                }
+                break :blk null;
             };
 
             var opt_name = OptionStr.None;
@@ -1291,7 +1061,7 @@ inline fn parseRawEvent(
                     opt_name = OptionStr{ .some = std.fs.path.basename(path) };
                     opt_dir = OptionStr{ .some = std.fs.path.dirname(path) orelse "/"[0..] };
                 } else {
-                    // if we don't have a path or a name
+                    // if we don't have a path or a name - probably an attrib event
                     println("this fucking happened", .{});
                 }
             } else {
@@ -1309,6 +1079,248 @@ inline fn parseRawEvent(
         }
     }
 }
+
+const TestFanotify = struct {
+    const Self = @This();
+    pub const TouchFn = *const fn (a7r: Allocator, dir: std.fs.Dir) anyerror!void;
+
+    events: std.ArrayList(FanotifyEvent),
+    tmpfs_path: [:0]u8,
+    tmp_dir: std.testing.TmpDir,
+    tmpfs_dir: std.fs.Dir,
+
+    /// Context for the test threads
+    const Context = struct {
+        const ContexSelf = @This();
+        path: [:0]const u8,
+        dir: std.fs.Dir,
+
+        prePollTouch: TouchFn,
+        touch: TouchFn,
+
+        doDone: std.Thread.ResetEvent = .{},
+        listenDone: std.Thread.ResetEvent = .{},
+        startListen: std.Thread.ResetEvent = .{},
+        listenReady: std.Thread.ResetEvent = .{},
+        events: *std.ArrayList(FanotifyEvent),
+
+        doErr: ?anyerror = null,
+        listenErr: ?anyerror = null,
+
+        fn doFn(ctx: *ContexSelf, alloc8orOuter: Allocator) void {
+            defer ctx.doDone.set();
+            ctx.doActual(alloc8orOuter) catch |err| {
+                ctx.doErr = err;
+            };
+        }
+        fn doActual(ctx: *ContexSelf, alloc8or: Allocator) !void {
+            try @call(.auto, ctx.prePollTouch, .{ alloc8or, ctx.dir });
+            // make sure they're ready to poll before you start doing shit
+            ctx.listenReady.wait();
+            // give them the heads up to start polling
+            ctx.startListen.set();
+            try @call(.auto, ctx.touch, .{ alloc8or, ctx.dir });
+        }
+
+        fn listenFn(ctx: *ContexSelf, alloc8or: Allocator) void {
+            defer ctx.listenDone.set();
+            ctx.listenActual(alloc8or) catch |err| {
+                ctx.listenErr = err;
+            };
+        }
+
+        fn listenActual(ctx: *ContexSelf, alloc8or: Allocator) !void {
+            const fd = blk: {
+                const fd = try init(
+                    FAN.CLASS.NOTIF,
+                    FAN.INIT {
+                        .report_fid = true,
+                        .report_dir_fid = true,
+                        .report_name = true,
+                    },
+                    std.os.O.RDONLY | std.os.O.CLOEXEC,
+                );
+                try mark(
+                    fd, 
+                    FAN.MARK.MOD.ADD, 
+                    FAN.MARK.FILESYSTEM, 
+                    FAN.EVENT {
+                        .create = true,
+                        .modify = true,
+                        .attrib = true,
+                        .delete = true,
+                        .moved_to = true,
+                        .ondir = true,
+                    },
+                    std.os.AT.FDCWD, 
+                    ctx.path
+                );
+                break :blk fd;
+            };
+            defer std.os.close(fd);
+
+            var pollfds = [_]std.os.pollfd{std.os.pollfd{
+                .fd = fd,
+                .events = std.os.POLL.IN,
+                .revents = 0,
+            }};
+            std.log.info("entering poll loop", .{});
+            var buf = [_]u8{0} ** 256;
+
+            // tell them we're ready to poll
+            ctx.listenReady.set();
+            // wait until they give us the heads up inorder to avoid
+            // catching events they don't want us seeing
+            ctx.startListen.wait();
+            var breakOnNext = false;
+            while (true) {
+                if (breakOnNext) break;
+                if (ctx.doDone.isSet()) {
+                    // poll at least one cycle after they're done
+                    // in case they give set `startListen` and `finishPoll`
+                    // before we get to run
+                    breakOnNext = true;
+                }
+                // println("looping", .{});
+
+                // set timeout to zero to avoid polling forver incase
+                // we start polling just before they set `doDone`
+                const poll_num = try std.os.poll(&pollfds, 0);
+
+                if (poll_num < 1) {
+                    continue;
+                    // std.log.err("err on poll: {}", .{ std.os.errno(poll_num) });
+                    // @panic("err on poll");
+                }
+
+                const timestamp = std.time.timestamp();
+
+                for (&pollfds) |pollfd| {
+                    if (pollfd.revents == 0 or (pollfd.revents & std.os.POLL.IN) == 0) {
+                        continue;
+                    }
+                    const fanotify_fd = pollfd.fd;
+                    const read_len = try std.os.read(fanotify_fd, &buf);
+
+                    var ptr = &buf[0];
+                    var left_bytes = read_len;
+                    var event_count: usize = 0;
+                    while (true) {
+                        const meta_ptr = @ptrCast(*align(1) const event_metadata, ptr);
+                        const meta = meta_ptr.*;
+                        if (
+                            left_bytes < @sizeOf(event_metadata) 
+                            or left_bytes < @intCast(usize, meta.event_len)
+                            // FIXME: is this case even possible?
+                            or meta.event_len < @sizeOf(event_metadata)
+                        ) {
+                            break;
+                        }
+
+                        if (meta.vers != METADATA_VERSION) {
+                            @panic("unexpected " ++ @typeName(event_metadata) ++ " version");
+                        }
+
+                        if ((meta.mask & FAN.Q_OVERFLOW) > 0) @panic("queue overflowed");
+
+                        if (try parseRawEvent(alloc8or, timestamp, meta_ptr)) |event|
+                            try ctx.events.append(event);
+
+                        ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
+                        left_bytes -= meta.event_len;
+                        event_count += 1;
+                    }
+                    // std.log.info("{} events read this cycle:", .{ event_count, });
+                    // for (events.items) |event, ii| {
+                    //     std.log.info(
+                    //         "Event: {} at {} with mask {} from pid {}",
+                    //         .{ ii, event.timestamp, event.mask, event.pid }
+                    //     );
+                    //     std.log.info("  - {s}/{s}", .{ event.dir, event.name });
+                    // }
+                }
+            }
+        }
+    };
+
+    pub fn deinit(self: *Self, a7r: Allocator) void {
+        for (self.events.items) |*evt| {
+            evt.deinit(a7r);
+        }
+        self.events.deinit();
+        self.tmpfs_dir.close();
+        var sleep_time: usize = 0;
+        while (true) {
+            const resp = std.os.linux.umount(self.tmpfs_path);
+            switch (std.os.errno(resp)) {
+                .SUCCESS => break,
+                .BUSY => {
+                    if (sleep_time > 1 * 1_000_000_000) {
+                        @panic("umount way too busy");
+                    }
+                    const ns = 1_000_000_00;
+                    sleep_time += ns;
+                    std.time.sleep(ns);
+                },
+                else => |err| {
+                    println("err: {}", .{err});
+                    @panic("umount failed");
+                },
+            }
+        }
+        a7r.free(self.tmpfs_path);
+        self.tmp_dir.cleanup();
+    }
+
+    pub fn run(
+        a7r: Allocator,
+        prePollTouchFn: TouchFn,
+        touchFn: TouchFn,
+    ) !Self {
+        var tmp_dir = std.testing.tmpDir(.{});
+
+        const tmpfs_name = "tmpfs";
+        try tmp_dir.dir.makeDir(tmpfs_name);
+
+        var tmpfs_path = blk: {
+            var path = try tmp_dir.dir.realpathAlloc(a7r, tmpfs_name);
+            defer a7r.free(path);
+            break :blk try std.mem.concatWithSentinel(a7r, u8, &.{path}, 0);
+        };
+
+        try mount("tmpfs", tmpfs_path, "tmpfs", 0, 0);
+
+        var tmpfs_dir = try tmp_dir.dir.openDir("tmpfs", .{});
+
+        var out = std.ArrayList(FanotifyEvent).init(a7r);
+        var ctx = Context{
+            .dir = tmpfs_dir,
+            .path = tmpfs_path,
+            .events = &out,
+            .touch = touchFn,
+            .prePollTouch = prePollTouchFn,
+        };
+
+        var listen_thread = try std.Thread.spawn(.{}, Context.listenFn, .{ &ctx, a7r });
+        var do_thread = try std.Thread.spawn(.{}, Context.doFn, .{ &ctx, a7r });
+        do_thread.detach();
+        listen_thread.detach();
+
+        ctx.doDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for do");
+        ctx.listenDone.timedWait(3 * 1_000_000_000) catch @panic("timeout waiting for listen");
+
+        if (ctx.doErr) |err| return err;
+        if (ctx.listenErr) |err| return err;
+
+        // @call(.{}, testFn, .{ a7r, ctx.events, })
+        return Self{
+            .tmp_dir = tmp_dir,
+            .tmpfs_dir = tmpfs_dir,
+            .tmpfs_path = tmpfs_path,
+            .events = out,
+        };
+    }
+};
 
 fn isElevated() bool {
     return std.os.linux.geteuid() == 0;
@@ -1400,15 +1412,14 @@ test "fanotify_create_file_nested" {
     // FIXME: nested create is not being detected and I reckon it's the same for
     // the other events. My suspicion is that this's a `tmpfs` quirk as I have
     // tested the machinery implemented herewithin manually on an `ext4` file 
-    // and "nested" works without a hitch.
-    if (true) return error.SkipZigTest;
-    if (!isElevated()) return error.SkipZigTest;
+    // and "nested" works without a hitch. Find alternatives to tmpfs
+    // if (true) return error.SkipZigTest;
+    // if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const file_dir = "weirdcities";
     const actions = struct {
         fn prePoll(a7r: Allocator, dir: std.fs.Dir) !void {
             _ = a7r;
-            _ = dir;
             try dir.makeDir(file_dir);
         }
         fn touch(a7r: Allocator, dir: std.fs.Dir) !void {
@@ -1674,3 +1685,236 @@ test "fanotify_attrib_dir" {
         return err;
     };
 }
+
+const FanotifyEventListener = struct {
+    ha7r: Allocator,
+    thread: ?std.Thread = null,
+    event_q: *Queue([]FanotifyEvent),
+
+    fn init(ha7r: Allocator, db: *Db) @This() {
+        return @This() { 
+            .ha7r = ha7r, 
+            .db = db,
+            .querier = Db.Quexecutor.init(db),
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.die_signal = true;
+        if (self.thread) |thread| {
+            thread.detach();
+        }
+    }
+
+    fn start(self: *@This()) !void {
+        self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
+    }
+
+    fn threadFn(self: *@This()) !void {
+        try listener(
+            self.ha7r,
+            "/",
+            &self.die_signal,
+            mod_utils.Appender(FanotifyEvent).new(
+                self,
+                @This().appendEvent
+            )
+        );
+    }
+
+    fn appendEvent(
+        self: *@This(), 
+        event_in: FanotifyEvent
+    ) std.mem.Allocator.Error!void {
+        var event = event_in;
+        std.log.debug("evt: {any}", .{ event });
+        defer event.deinit(self.ha7r);
+        //const FAN = FAN;
+        if (
+            event.kind.attrib and
+            event.name == null and
+            event.dir == null 
+        ) {
+            std.log.debug("neutrino attrib event", .{});
+        } else if (
+            event.kind.delete and event.kind.ondir
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.delete and event.kind.delete
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.create and event.kind.delete
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.create 
+        ) {
+            try self.appendFileCreatedEvent(event);
+        } else {
+            std.log.debug("unreconized event: {any}", .{ event });
+        }
+        // std.debug.todo("append");
+    }
+
+    fn appendFileCreatedEvent(self: *@This(), event_in: FanotifyEvent) !void {
+        var event = event_in;
+        var dir = event.dir.?;
+        var parser = Query.Parser{};
+        defer parser.deinit(self.ha7r);
+        var query = parser.parse(self.ha7r, dir) catch @panic("error parsing dir to query");
+        defer query.deinit(self.ha7r);
+        // var parents = try self.querier.query(&query);
+        var timer = std.time.Timer.start() catch @panic("timer unsupported");
+        var parents = self.querier.query(&query) catch |err| {
+            println("error querying: {}", .{ err });
+            @panic("error querying");
+        };
+        var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
+        println(
+            " -- found possilbe parents: {any} in {}", 
+            .{ parents, elapsed }
+        );
+    }
+};
+
+const FanotifyEventMapper = struct {
+    ha7r: Allocator,
+    db: *Db,
+    thread: ?std.Thread = null,
+    querier: Db.Quexecutor,
+
+    fn init(ha7r: Allocator, db: *Db) @This() {
+        return @This() { 
+            .ha7r = ha7r, 
+            .db = db,
+            .querier = Db.Quexecutor.init(db),
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.die_signal = true;
+        if (self.thread) |thread| {
+            thread.detach();
+        }
+        self.querier.deinit();
+    }
+};
+
+const FanotifyEventSender = struct {
+    ha7r: Allocator,
+    db: *Db,
+    thread: ?std.Thread = null,
+    querier: Db.Quexecutor,
+
+    fn init(ha7r: Allocator, db: *Db) @This() {
+        return @This() { 
+            .ha7r = ha7r, 
+            .db = db,
+            .querier = Db.Quexecutor.init(db),
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.die_signal = true;
+        if (self.thread) |thread| {
+            thread.detach();
+        }
+        self.querier.deinit();
+    }
+};
+
+const FanotifyWorker = struct {
+    ha7r: Allocator,
+    db: *Db,
+    event_reciever_thread: ?std.Thread = null,
+    db_modifier_thread: ?std.Thread = null,
+    die_signal: bool = false,
+    querier: Db.Quexecutor,
+
+    fn init(ha7r: Allocator, db: *Db) @This() {
+        return @This() { 
+            .ha7r = ha7r, 
+            .db = db,
+            .querier = Db.Quexecutor.init(db),
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.die_signal = true;
+        if (self.thread) |thread| {
+            thread.detach();
+        }
+        self.querier.deinit();
+    }
+
+    fn start(self: *@This()) !void {
+        self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
+    }
+
+    fn threadFn(self: *@This()) !void {
+        try listener(
+            self.ha7r,
+            "/",
+            &self.die_signal,
+            mod_utils.Appender(FanotifyEvent).new(
+                self,
+                @This().appendEvent
+            )
+        );
+    }
+
+    fn appendEvent(self: *@This(), event_in: FanotifyEvent) std.mem.Allocator.Error!void {
+        var event = event_in;
+        std.log.debug("evt: {any}", .{ event });
+        defer event.deinit(self.ha7r);
+        //const FAN = FAN;
+        if (
+            event.kind.attrib and
+            event.name == null and
+            event.dir == null 
+        ) {
+            std.log.debug("neutrino attrib event", .{});
+        } else if (
+            event.kind.delete and event.kind.ondir
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.delete and event.kind.delete
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.create and event.kind.delete
+        ) {
+            std.log.debug("neutrino create event", .{});
+        } else if (
+            event.kind.create 
+        ) {
+            try self.appendFileCreatedEvent(event);
+        } else {
+            std.log.debug("unreconized event: {any}", .{ event });
+        }
+        // std.debug.todo("append");
+    }
+
+    fn appendFileCreatedEvent(self: *@This(), event_in: FanotifyEvent) !void {
+        var event = event_in;
+        var dir = event.dir.?;
+        var parser = Query.Parser{};
+        defer parser.deinit(self.ha7r);
+        var query = parser.parse(self.ha7r, dir) catch @panic("error parsing dir to query");
+        defer query.deinit(self.ha7r);
+        // var parents = try self.querier.query(&query);
+        var timer = std.time.Timer.start() catch @panic("timer unsupported");
+        var parents = self.querier.query(&query) catch |err| {
+            println("error querying: {}", .{ err });
+            @panic("error querying");
+        };
+        var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
+        println(
+            " -- found possilbe parents: {any} in {}", 
+            .{ parents, elapsed }
+        );
+    }
+};
