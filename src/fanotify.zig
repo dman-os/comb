@@ -12,6 +12,11 @@ const OptionStr = Option([]const u8);
 const Db = @import("Database.zig");
 const Query = @import("Query.zig");
 
+const mod_treewalking = @import("treewalking.zig");
+const FsEntry = mod_treewalking.FsEntry;
+
+const mod_mmap = @import("mmap.zig");
+
 pub const FanotifyEvent = struct {
     const Self = @This();
     dir: ?[]u8,
@@ -846,11 +851,25 @@ pub fn demo() !void {
     }
 }
 
+pub const Config = struct {
+    // the path at which to listen
+    mark_fs_path: [:0]const u8 = "/",
+    /// the events we're interested in
+    mark_event_mask: FAN.EVENT = .{
+        .create = true,
+        .modify = true,
+        .attrib = true,
+        .delete = true,
+        .moved_to = true,
+        .ondir = true,
+    },
+};
+
 pub fn listener(
     ha7r: Allocator,
-    fs_path: [:0]const u8,
-    die_signal: *const bool,
+    die_signal: *const std.Thread.ResetEvent,
     event_sink: mod_utils.Appender(FanotifyEvent),
+    config: Config,
 ) !void {
     const fd = blk: {
         const fd = try init(
@@ -866,16 +885,9 @@ pub fn listener(
             fd, 
             FAN.MARK.MOD.ADD, 
             FAN.MARK.FILESYSTEM, 
-            FAN.EVENT {
-                .create = true,
-                .modify = true,
-                .attrib = true,
-                .delete = true,
-                .moved_to = true,
-                .ondir = true,
-            },
+            config.mark_event_mask,
             std.os.AT.FDCWD, 
-            fs_path
+            config.mark_fs_path
         );
         break :blk fd;
     };
@@ -890,9 +902,9 @@ pub fn listener(
     var buf = [_]u8{0} ** 256;
 
     while (true) {
-        if (die_signal.*) break;
+        if (die_signal.isSet()) break;
         const poll_num = try std.os.poll(&pollfds, -1);
-        if (die_signal.*) break;
+        if (die_signal.isSet()) break;
 
         if (poll_num < 1) {
             continue;
@@ -1279,13 +1291,13 @@ const TestFanotify = struct {
     ) !Self {
         var tmp_dir = std.testing.tmpDir(.{});
 
-        const tmpfs_name = "tmpfs";
-        try tmp_dir.dir.makeDir(tmpfs_name);
-
         var tmpfs_path = blk: {
-            var path = try tmp_dir.dir.realpathAlloc(a7r, tmpfs_name);
-            defer a7r.free(path);
-            break :blk try std.mem.concatWithSentinel(a7r, u8, &.{path}, 0);
+            const tmpfs_name = "tmpfs";
+            try tmp_dir.dir.makeDir(tmpfs_name);
+            var path = try mod_utils.fdPath(tmp_dir.dir.fd);
+            // var path = try tmp_dir.dir.realpath(a7r, tmpfs_name);
+            // defer a7r.free(path);
+            break :blk try std.mem.concatWithSentinel(a7r, u8, &.{path, "/", tmpfs_name}, 0);
         };
 
         try mount("tmpfs", tmpfs_path, "tmpfs", 0, 0);
@@ -1320,66 +1332,67 @@ const TestFanotify = struct {
             .events = out,
         };
     }
+
+    fn expectEvent(
+        self: *const Self,
+        expected_kind: FAN.EVENT, 
+        expected_name: ?[]const u8, 
+        expected_dir: ?[]const u8, 
+    ) !void {
+        for (self.events.items) |event| {
+            if ((expected_kind.asInt() & event.kind.asInt()) > 0) {
+                if (expected_name) |name| {
+                    std.testing.expectEqualSlices(
+                        u8, 
+                        name, 
+                        event.name orelse {
+                            // println(
+                            //     "found event but name was null: {s} != null", 
+                            //     .{ name }
+                            // );
+                            continue;
+                        }
+                    ) catch {
+                        // println(
+                        //     "found event but name slices weren't equal: {s} != {s}", 
+                        //     .{ name, event.name orelse unreachable }
+                        // );
+                        continue;
+                    };
+                }
+                if (expected_dir) |dir| {
+                    std.testing.expectEqualSlices(
+                        u8, 
+                        dir, 
+                        event.dir orelse {
+                            // println(
+                            //     "found event but dir was null: {s} != null", 
+                            //     .{ dir }
+                            // );
+                            continue;
+                        }
+                    ) catch {
+                        // println(
+                        //     "found event but dir slices weren't equal {s} != {s}", 
+                        //     .{ dir, event.dir orelse unreachable }
+                        // );
+                        continue;
+                    };
+                }
+                return;
+            }
+        }
+        // @panic("unable to find expected event");
+        return error.EventNotFound;
+    }
 };
 
 fn isElevated() bool {
     return std.os.linux.geteuid() == 0;
 }
 
-fn expectEvent(
-    expected_kind: FAN.EVENT, 
-    expected_name: ?[]const u8, 
-    expected_dir: ?[]const u8, 
-    events: []const FanotifyEvent
-) !void {
-    for (events) |event| {
-        if ((expected_kind.asInt() & event.kind.asInt()) > 0) {
-            if (expected_name) |name| {
-                std.testing.expectEqualSlices(
-                    u8, 
-                    name, 
-                    event.name orelse {
-                        // println(
-                        //     "found event but name was null: {s} != null", 
-                        //     .{ name }
-                        // );
-                        continue;
-                    }
-                ) catch {
-                    // println(
-                    //     "found event but name slices weren't equal: {s} != {s}", 
-                    //     .{ name, event.name orelse unreachable }
-                    // );
-                    continue;
-                };
-            }
-            if (expected_dir) |dir| {
-                std.testing.expectEqualSlices(
-                    u8, 
-                    dir, 
-                    event.dir orelse {
-                        // println(
-                        //     "found event but dir was null: {s} != null", 
-                        //     .{ dir }
-                        // );
-                        continue;
-                    }
-                ) catch {
-                    // println(
-                    //     "found event but dir slices weren't equal {s} != {s}", 
-                    //     .{ dir, event.dir orelse unreachable }
-                    // );
-                    continue;
-                };
-            }
-            return;
-        }
-    }
-    // @panic("unable to find expected event");
-    return error.EventNotFound;
-}
-
 test "fanotify_create_file" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1397,11 +1410,10 @@ test "fanotify_create_file" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .create = true }, 
         file_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1413,8 +1425,9 @@ test "fanotify_create_file_nested" {
     // the other events. My suspicion is that this's a `tmpfs` quirk as I have
     // tested the machinery implemented herewithin manually on an `ext4` file 
     // and "nested" works without a hitch. Find alternatives to tmpfs
-    // if (true) return error.SkipZigTest;
-    // if (!isElevated()) return error.SkipZigTest;
+    if (true) return error.SkipZigTest;
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const file_dir = "weirdcities";
     const actions = struct {
@@ -1435,11 +1448,10 @@ test "fanotify_create_file_nested" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .create = true }, 
         file_name, 
         file_dir,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1447,6 +1459,7 @@ test "fanotify_create_file_nested" {
 }
 
 test "fanotify_create_dir" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const dir_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1463,11 +1476,10 @@ test "fanotify_create_dir" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .create = true, .ondir = true },
         dir_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1475,6 +1487,7 @@ test "fanotify_create_dir" {
 }
 
 test "fanotify_delete_file" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1492,11 +1505,10 @@ test "fanotify_delete_file" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .delete = true, },
         file_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1504,6 +1516,7 @@ test "fanotify_delete_file" {
 }
 
 test "fanotify_delete_dir" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const dir_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1520,11 +1533,10 @@ test "fanotify_delete_dir" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .delete = true, .ondir = true },
         dir_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1532,6 +1544,7 @@ test "fanotify_delete_dir" {
 }
 
 test "fanotify_move_file" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const new_name = "pensuspendsuspend";
@@ -1550,11 +1563,10 @@ test "fanotify_move_file" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .moved_to = true, },
         new_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1562,6 +1574,7 @@ test "fanotify_move_file" {
 }
 
 test "fanotify_move_dir" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const dir_name = "wheredidyouparkthecar";
     const new_name = "pensuspendsuspend";
@@ -1579,11 +1592,10 @@ test "fanotify_move_dir" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .moved_to = true, .ondir = true },
         new_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1591,6 +1603,7 @@ test "fanotify_move_dir" {
 }
 
 test "fanotify_mod_file" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1608,11 +1621,10 @@ test "fanotify_mod_file" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .modify = true, },
         file_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1620,6 +1632,7 @@ test "fanotify_mod_file" {
 }
 
 test "fanotify_attrib_file" {
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1641,11 +1654,10 @@ test "fanotify_attrib_file" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .attrib = true },
         file_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1655,6 +1667,7 @@ test "fanotify_attrib_file" {
 test "fanotify_attrib_dir" {
     // FIXME: attrib changes on dir an unrealiable
     if (true) return error.SkipZigTest;
+    if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const dir_name = "wheredidyouparkthecar";
     const actions = struct {
@@ -1675,32 +1688,81 @@ test "fanotify_attrib_dir" {
     var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
-    expectEvent(
+    res.expectEvent(
         FAN.EVENT { .attrib = true, .ondir = true },
         dir_name, 
         null,
-        res.events.items
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
     };
 }
 
+pub const FanotifyWorker = struct {
+    ha7r: Allocator,
+    db: *Db,
+    listener: FanotifyEventListener,
+    mapper: FanotifyEventMapper,
+    worker: FsEventWorker,
+    fan_event_q: *Queue(FanotifyEvent),
+    fs_event_q: *Queue(FsEvent),
+
+    pub fn init(ha7r: Allocator, db: *Db, config: Config) !@This() {
+        var fan_event_q = try ha7r.create(Queue(FanotifyEvent));
+        fan_event_q.* = Queue(FanotifyEvent).init();
+        var fs_event_q = try ha7r.create(Queue(FsEvent));
+        fs_event_q.* = Queue(FsEvent).init();
+        return @This() {
+            .ha7r = ha7r,
+            .db = db,
+            .fan_event_q = fan_event_q,
+            .fs_event_q = fs_event_q,
+            .listener  = FanotifyEventListener.init(ha7r, config, fan_event_q),
+            .mapper = FanotifyEventMapper.init(ha7r, db, fan_event_q, fs_event_q),
+            .worker = FsEventWorker.init(ha7r, db, fs_event_q)
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.listener.deinit();
+        self.mapper.deinit();
+        self.worker.deinit();
+        while (self.fan_event_q.get()) |node| {
+            node.data.deinit(self.ha7r);
+            self.ha7r.destroy(node);
+        }
+        self.ha7r.destroy(self.fan_event_q);
+        while (self.fs_event_q.get()) |node| {
+            node.data.deinit(self.ha7r);
+            self.ha7r.destroy(node);
+        }
+        self.ha7r.destroy(self.fs_event_q);
+    }
+
+    pub fn start(self: *@This()) !void {
+        try self.worker.start();
+        try self.mapper.start();
+        try self.listener.start();
+    }
+};
+
 const FanotifyEventListener = struct {
     ha7r: Allocator,
+    config: Config,
+    event_q: *Queue(FanotifyEvent),
     thread: ?std.Thread = null,
-    event_q: *Queue([]FanotifyEvent),
+    die_signal: std.Thread.ResetEvent = .{},
 
-    fn init(ha7r: Allocator, db: *Db) @This() {
+    fn init(ha7r: Allocator, fan_config: Config, que: *Queue(FanotifyEvent)) @This() {
         return @This() { 
             .ha7r = ha7r, 
-            .db = db,
-            .querier = Db.Quexecutor.init(db),
+            .config = fan_config,
+            .event_q = que,
         };
     }
 
     fn deinit(self: *@This()) void {
-        self.die_signal = true;
+        self.die_signal.set();
         if (self.thread) |thread| {
             thread.detach();
         }
@@ -1713,16 +1775,117 @@ const FanotifyEventListener = struct {
     fn threadFn(self: *@This()) !void {
         try listener(
             self.ha7r,
-            "/",
             &self.die_signal,
             mod_utils.Appender(FanotifyEvent).new(
                 self,
                 @This().appendEvent
-            )
+            ),
+            self.config
         );
     }
 
     fn appendEvent(
+        self: *@This(), 
+        event: FanotifyEvent
+    ) std.mem.Allocator.Error!void {
+        var node = try self.ha7r.create(Queue(FanotifyEvent).Node);
+        node.* = Queue(FanotifyEvent).Node {
+            .data = event,
+        };
+        self.event_q.put(node); 
+    }
+};
+
+const FsEvent = union(enum) {
+    fileCreated: FileCreated,
+    fileDeleted,
+    dirDeleted,
+    fileMoved,
+    dirMoved,
+    fileModified,
+
+    pub const FileCreated = struct {
+        timestamp: i64,
+        entry: FsEntry(Db.Id, []const u8),
+
+        fn deinit(self: *@This(), ha7r: Allocator) void {
+            ha7r.free(self.entry.name);
+        }
+    };
+
+    fn deinit(self: *@This(), ha7r: Allocator) void {
+        switch(self.*) {
+            .fileCreated => |*event| {
+                event.deinit(ha7r);
+            },
+            else => {}
+        }
+    }
+};
+
+const FanotifyEventMapper = struct {
+    const MapperErr = error {
+        NameIsNull,
+        DirIsNull,
+        UnrecognizedEvent,
+        ParentNotFound,
+        NeutrinoDuringMeta
+    };
+
+    ha7r: Allocator,
+    thread: ?std.Thread = null,
+    db: *Db,
+    querier: Db.Quexecutor,
+    reader: Db.Reader = .{},
+    weaver: Db.FullPathWeaver = .{},
+    fan_event_q: *Queue(FanotifyEvent),
+    fs_event_q: *Queue(FsEvent),
+    die_signal: std.Thread.ResetEvent = .{},
+
+    fn init(
+        ha7r: Allocator, 
+        db: *Db, 
+        fan_que: *Queue(FanotifyEvent),
+        fs_que: *Queue(FsEvent),
+    ) @This() {
+        return @This() { 
+            .ha7r = ha7r, 
+            .db = db,
+            .querier = Db.Quexecutor.init(db),
+            .fan_event_q = fan_que,
+            .fs_event_q = fs_que,
+        };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.die_signal.set();
+        if (self.thread) |thread| {
+            thread.detach();
+        }
+        self.querier.deinit();
+        self.reader.deinit(self.db);
+        self.weaver.deinit(self.ha7r);
+    }
+
+    fn start(self: *@This()) !void {
+        self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
+    }
+
+    fn threadFn(self: *@This()) !void {
+        while(true) {
+            if (self.die_signal.isSet()) {
+                break;
+            }
+            if (self.fan_event_q.get()) |node| {
+                defer self.ha7r.destroy(node);
+                try self.handleEvent(node.data);
+            } else {
+                std.Thread.yield() catch @panic("ThreadYieldErr");
+            }
+        }
+    }
+
+    fn handleEvent(
         self: *@This(), 
         event_in: FanotifyEvent
     ) std.mem.Allocator.Error!void {
@@ -1730,119 +1893,167 @@ const FanotifyEventListener = struct {
         std.log.debug("evt: {any}", .{ event });
         defer event.deinit(self.ha7r);
         //const FAN = FAN;
+        // std.debug.todo("append");
+        if(self.tryMap(event)) |opt| {
+            if (opt) |fs_event| {
+                var node = try self.ha7r.create(Queue(FsEvent).Node);
+                node.* = Queue(FsEvent).Node {
+                    .data = fs_event,
+                };
+                self.fs_event_q.put(node); 
+            } else {
+                std.log.debug("no FsEvent when processing event {}", .{ event });
+            }
+        } else |err| {
+            std.log.err("error {} processing event {}", .{ err, event });
+        }
+    }
+
+    pub fn tryMap(self: *@This(), event: FanotifyEvent) !?FsEvent {
+        // NOTE: the ordering of these tests is important for sometimes,
+        // we get hard to make sense of flags set like both create and a delete 
+        // (which is treated as a delete here since we're checking for deletes first)
         if (
             event.kind.attrib and
             event.name == null and
             event.dir == null 
         ) {
             std.log.debug("neutrino attrib event", .{});
-        } else if (
-            event.kind.delete and event.kind.ondir
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.delete and event.kind.delete
-        ) {
-            std.log.debug("neutrino create event", .{});
+            return null;
         } else if (
             event.kind.create and event.kind.delete
         ) {
             std.log.debug("neutrino create event", .{});
+            return null;
         } else if (
-            event.kind.create 
+            event.kind.moved_to and event.kind.delete
         ) {
-            try self.appendFileCreatedEvent(event);
+            std.log.debug("neutrino move event", .{});
+            return null;
+        } else if (
+            event.kind.attrib
+        ) {
+            std.log.info("entry attrib modified event: {}", .{ event });
+            return null;
+        } else if (
+            event.kind.modify
+        ) {
+            std.log.info("entry modified event: {}", .{ event });
+            return null;
+        } else if (
+            event.kind.moved_to and event.kind.ondir
+        ) {
+            std.log.info("dir moved event: {}", .{ event });
+            return null;
+        } else if (
+            event.kind.moved_to
+        ) {
+            std.log.info("file moved event: {}", .{ event });
+            return null;
+        } else if (
+            event.kind.delete and event.kind.ondir
+        ) {
+            std.log.info("dir deleted event: {}", .{ event });
+            return null;
+        } else if (
+            event.kind.delete
+        ) {
+            std.log.info("file deleted event: {}", .{ event });
+            return null;
+        } else if (
+            event.kind.create
+        ) {
+            std.log.debug("entry created event: {}", .{ event });
+            var inner = try self.tryToFileCreatedEvent(event);
+            return FsEvent { .fileCreated = inner };
         } else {
             std.log.debug("unreconized event: {any}", .{ event });
+            return MapperErr.UnrecognizedEvent;
         }
-        // std.debug.todo("append");
     }
 
-    fn appendFileCreatedEvent(self: *@This(), event_in: FanotifyEvent) !void {
-        var event = event_in;
-        var dir = event.dir.?;
+    fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
         var parser = Query.Parser{};
         defer parser.deinit(self.ha7r);
-        var query = parser.parse(self.ha7r, dir) catch @panic("error parsing dir to query");
+        var query = parser.parse(self.ha7r, path) catch @panic("error parsing path to query");
         defer query.deinit(self.ha7r);
         // var parents = try self.querier.query(&query);
         var timer = std.time.Timer.start() catch @panic("timer unsupported");
-        var parents = self.querier.query(&query) catch |err| {
+        const candidates = self.querier.query(&query) catch |err| {
             println("error querying: {}", .{ err });
             @panic("error querying");
         };
+        if (candidates.len == 0) {
+            return null;
+        }
         var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
-        println(
-            " -- found possilbe parents: {any} in {}", 
-            .{ parents, elapsed }
+        if (candidates.len > 1) {
+            std.log.warn(
+                " -- found {} possilbe candidates in {} secs", 
+                .{ candidates.len, elapsed }
+            );
+        } else {
+            std.log.debug(
+                " -- found {} possilbe candidates in {} secs", 
+                .{ candidates.len, elapsed }
+            );
+        }
+        return candidates[0];
+    }
+
+    fn assertNeutrino(self: *@This(), event: FanotifyEvent) void {
+        _ = self;
+        _ = event;
+    }
+
+    fn tryToFileCreatedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileCreated {
+        const name = event.name orelse return error.NameIsNull;
+        const dir = event.dir orelse return error.DirIsNull;
+        const parent_id = (try self.idAtPath(dir)) orelse return error.ParentNotFound;
+        std.debug.assert(dir[dir.len - 1] != '/'); // FIXME: remove this
+        var full_path = try std.mem.concatWithSentinel(
+            self.ha7r,
+            u8,
+            &.{dir, "/", name},
+            0
         );
+        defer self.ha7r.free(full_path);
+        const meta = mod_treewalking.metaNoFollow(0, &(try std.os.toPosixPath(full_path))) 
+            catch |err| return switch(err) {
+                std.os.OpenError.FileNotFound => error.NeutrinoDuringMeta,
+                else => err
+            };
+        return FsEvent.FileCreated {
+            .timestamp = event.timestamp,
+            .entry = FsEntry(Db.Id, []const u8).fromMeta(
+                try self.ha7r.dupe(u8, name),
+                parent_id,
+                std.mem.count(u8, full_path, "/"),
+                meta,
+            )
+        };
     }
 };
 
-const FanotifyEventMapper = struct {
+const FsEventWorker = struct {
     ha7r: Allocator,
     db: *Db,
     thread: ?std.Thread = null,
     querier: Db.Quexecutor,
+    event_q: *Queue(FsEvent),
+    die_signal: std.Thread.ResetEvent = .{},
 
-    fn init(ha7r: Allocator, db: *Db) @This() {
+    fn init(ha7r: Allocator, db: *Db, que: *Queue(FsEvent)) @This() {
         return @This() { 
             .ha7r = ha7r, 
             .db = db,
             .querier = Db.Quexecutor.init(db),
+            .event_q = que,
         };
     }
 
     fn deinit(self: *@This()) void {
-        self.die_signal = true;
-        if (self.thread) |thread| {
-            thread.detach();
-        }
-        self.querier.deinit();
-    }
-};
-
-const FanotifyEventSender = struct {
-    ha7r: Allocator,
-    db: *Db,
-    thread: ?std.Thread = null,
-    querier: Db.Quexecutor,
-
-    fn init(ha7r: Allocator, db: *Db) @This() {
-        return @This() { 
-            .ha7r = ha7r, 
-            .db = db,
-            .querier = Db.Quexecutor.init(db),
-        };
-    }
-
-    fn deinit(self: *@This()) void {
-        self.die_signal = true;
-        if (self.thread) |thread| {
-            thread.detach();
-        }
-        self.querier.deinit();
-    }
-};
-
-const FanotifyWorker = struct {
-    ha7r: Allocator,
-    db: *Db,
-    event_reciever_thread: ?std.Thread = null,
-    db_modifier_thread: ?std.Thread = null,
-    die_signal: bool = false,
-    querier: Db.Quexecutor,
-
-    fn init(ha7r: Allocator, db: *Db) @This() {
-        return @This() { 
-            .ha7r = ha7r, 
-            .db = db,
-            .querier = Db.Quexecutor.init(db),
-        };
-    }
-
-    fn deinit(self: *@This()) void {
-        self.die_signal = true;
+        self.die_signal.set();
         if (self.thread) |thread| {
             thread.detach();
         }
@@ -1854,67 +2065,24 @@ const FanotifyWorker = struct {
     }
 
     fn threadFn(self: *@This()) !void {
-        try listener(
-            self.ha7r,
-            "/",
-            &self.die_signal,
-            mod_utils.Appender(FanotifyEvent).new(
-                self,
-                @This().appendEvent
-            )
-        );
-    }
-
-    fn appendEvent(self: *@This(), event_in: FanotifyEvent) std.mem.Allocator.Error!void {
-        var event = event_in;
-        std.log.debug("evt: {any}", .{ event });
-        defer event.deinit(self.ha7r);
-        //const FAN = FAN;
-        if (
-            event.kind.attrib and
-            event.name == null and
-            event.dir == null 
-        ) {
-            std.log.debug("neutrino attrib event", .{});
-        } else if (
-            event.kind.delete and event.kind.ondir
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.delete and event.kind.delete
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.create and event.kind.delete
-        ) {
-            std.log.debug("neutrino create event", .{});
-        } else if (
-            event.kind.create 
-        ) {
-            try self.appendFileCreatedEvent(event);
-        } else {
-            std.log.debug("unreconized event: {any}", .{ event });
+        while(true) {
+            if (self.die_signal.isSet()) {
+                break;
+            }
+            if (self.event_q.get()) |node| {
+                defer self.ha7r.destroy(node);
+                try self.handleEvent(node.data);
+            } else {
+                std.Thread.yield() catch @panic("ThreadYieldErr");
+            }
         }
-        // std.debug.todo("append");
     }
 
-    fn appendFileCreatedEvent(self: *@This(), event_in: FanotifyEvent) !void {
-        var event = event_in;
-        var dir = event.dir.?;
-        var parser = Query.Parser{};
-        defer parser.deinit(self.ha7r);
-        var query = parser.parse(self.ha7r, dir) catch @panic("error parsing dir to query");
-        defer query.deinit(self.ha7r);
-        // var parents = try self.querier.query(&query);
-        var timer = std.time.Timer.start() catch @panic("timer unsupported");
-        var parents = self.querier.query(&query) catch |err| {
-            println("error querying: {}", .{ err });
-            @panic("error querying");
-        };
-        var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
-        println(
-            " -- found possilbe parents: {any} in {}", 
-            .{ parents, elapsed }
-        );
+    fn handleEvent(
+        self: *@This(), 
+        event: FsEvent
+    ) std.mem.Allocator.Error!void {
+        _ = self;
+        println("got event: {}",.{ event });
     }
 };

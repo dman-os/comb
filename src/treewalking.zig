@@ -24,6 +24,30 @@ pub fn FsEntry(comptime P: type, comptime N: type) type {
         atime: i64,
         mtime: i64,
 
+        pub fn fromMeta(
+            name: N, 
+            parent: P, 
+            depth: usize,
+            meta: std.fs.File.MetadataLinux,
+        ) FsEntry(P, N) {
+            var statx = meta.statx;
+            return @This() {
+                .name = name,
+                .kind = kindFromMode(statx.mode),
+                .depth = depth,
+                .parent = parent,
+                .size = statx.size,
+                .inode = statx.ino,
+                .dev = makedev(statx),
+                .mode = statx.mode,
+                .uid = statx.uid,
+                .gid = statx.gid,
+                .ctime = statx.ctime.tv_sec,
+                .atime = statx.atime.tv_sec,
+                .mtime = statx.mtime.tv_sec,
+            };
+        }
+
         pub fn clone(orig: *const @This(), new_name: anytype) FsEntry(P, @TypeOf(new_name)) {
             return FsEntry(P, @TypeOf(new_name)) {
                 // .name = try a7r.dupe(u8, orig.name),
@@ -80,7 +104,7 @@ pub const Tree = struct {
             var dir = try std.fs.openDirAbsolute(path, .{});
             defer dir.close();
             const meta = try dir.metadata();
-            break :blk Walker.makedev(meta.inner.statx);
+            break :blk makedev(meta.inner.statx);
         };
         try walker.scanDir(path, std.fs.cwd(), 0, 0, dev, );
         return walker.toTree();
@@ -189,19 +213,6 @@ pub const Tree = struct {
             }
         }
 
-        /// Lifted this from rust libc binidings
-        pub fn makedev(statx: std.os.linux.Statx) u64 {
-            // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
-            const major = @as(u64, statx.dev_major);
-            const minor = @as(u64, statx.dev_minor);
-            var dev: u64 = 0;
-            dev |= (major & 0x00000fff) << 8;
-            dev |= (major & 0xfffff000) << 32;
-            dev |= (minor & 0x000000ff) << 0;
-            dev |= (minor & 0xffffff00) << 12;
-            return dev;
-        }
-
         fn scanDir(
             self: *@This(), 
             path: []const u8, 
@@ -233,26 +244,15 @@ pub const Tree = struct {
 
             const dev = blk: {
                 const meta = try dir.metadata();
-                const statx = meta.inner.statx;
-                const dev = makedev(statx);
-                try self.append(Entry {
-                    .name = try self.tree.allocator.dupe(u8, path),
-                    .kind = .Directory,
-                    .depth = depth,
-                    .parent = parent_id,
-                    .size = statx.size,
-                    .inode = statx.ino,
-                    .dev = dev,
-                    .mode = statx.mode,
-                    .uid = statx.uid,
-                    .gid = statx.gid,
-                    .ctime = statx.ctime.tv_sec,
-                    .atime = statx.atime.tv_sec,
-                    .mtime = statx.mtime.tv_sec,
-                });
-
+                var entry = Entry.fromMeta(
+                    try self.tree.allocator.dupe(u8, path),
+                    parent_id,
+                    depth,
+                    meta.inner
+                );
+                try self.append(entry);
                 // we don't examine other devices
-                if (dev != parent_dev) {
+                if (entry.dev != parent_dev) {
                     const parent_path = try self.weaver.pathOf(
                         self.tree.allocator, 
                         &self.tree,
@@ -261,11 +261,11 @@ pub const Tree = struct {
                     );
                     std.log.debug(
                         "device ({}) != parent dev ({}), skipping dir at = {s}/{s}", 
-                        .{ dev, parent_dev, parent_path, path },
+                        .{ entry.dev, parent_dev, parent_path, path },
                     );
                     return;
                 }
-                break :blk dev;
+                break :blk entry.dev;
             };
             const dir_id = self.tree.list.items.len - 1;
 
@@ -300,22 +300,12 @@ pub const Tree = struct {
                                 },
                             }
                         };
-                        const statx = meta.statx;
-                        try self.append(Entry {
-                            .name = try self.tree.allocator.dupe(u8, entry.name),
-                            .kind = entry.kind,
-                            .depth = depth,
-                            .parent = dir_id,
-                            .size = statx.size,
-                            .inode = statx.ino,
-                            .dev = makedev(statx),
-                            .mode = statx.mode,
-                            .uid = statx.uid,
-                            .gid = statx.gid,
-                            .ctime = statx.ctime.tv_sec,
-                            .atime = statx.atime.tv_sec,
-                            .mtime = statx.mtime.tv_sec,
-                        });
+                        try self.append(Entry.fromMeta(
+                            try self.tree.allocator.dupe(u8, entry.name),
+                            dir_id,
+                            depth,
+                            meta
+                        ));
                     }
                 } else |err| switch (err) {
                     std.fs.IterableDir.Iterator.Error.AccessDenied => {
@@ -360,12 +350,13 @@ const ReadMetaError = error {
 
 /// Name has to be sentinel terminated, I think.
 /// Modified from zig std lib
-fn metaNoFollow(dir_handle: std.os.fd_t, name: [*]const u8) !std.fs.File.MetadataLinux {
+/// `dir_handle` will be ignored if `path_name` is an absolute path
+pub fn metaNoFollow(dir_handle: std.os.fd_t, path_name: [*]const u8) !std.fs.File.MetadataLinux {
     const os = std.os;
     var stx = std.mem.zeroes(os.linux.Statx);
     const rcx = os.linux.statx(
         dir_handle, 
-        name,
+        path_name,
         os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, 
         os.linux.STATX_BASIC_STATS | 
         os.linux.STATX_BTIME, 
@@ -393,6 +384,34 @@ fn metaNoFollow(dir_handle: std.os.fd_t, name: [*]const u8) !std.fs.File.Metadat
     }
     return std.fs.File.MetadataLinux {
         .statx = stx,
+    };
+}
+
+/// Lifted this from rust libc binidings
+pub fn makedev(statx: std.os.linux.Statx) u64 {
+    // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
+    const major = @as(u64, statx.dev_major);
+    const minor = @as(u64, statx.dev_minor);
+    var dev: u64 = 0;
+    dev |= (major & 0x00000fff) << 8;
+    dev |= (major & 0xfffff000) << 32;
+    dev |= (minor & 0x000000ff) << 0;
+    dev |= (minor & 0xffffff00) << 12;
+    return dev;
+}
+
+fn kindFromMode(mode: std.os.mode_t) std.fs.File.Kind {
+    const S = std.os.linux.S;
+    const Kind = std.fs.File.Kind;
+    return switch (mode & S.IFMT) {
+        S.IFREG => Kind.File,
+        S.IFDIR => Kind.Directory,
+        S.IFLNK => Kind.SymLink,
+        S.IFSOCK => Kind.UnixDomainSocket,
+        S.IFCHR => Kind.CharacterDevice,
+        S.IFBLK => Kind.BlockDevice,
+        S.IFIFO => Kind.NamedPipe,
+        else => Kind.Unknown
     };
 }
 

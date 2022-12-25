@@ -72,7 +72,6 @@ fn swapping () !void {
     var weaver = Db.FullPathWeaver{};
     defer weaver.deinit(a7r);
 
-
     var timer = try std.time.Timer.start();
     {
         std.log.info("Walking tree from /", . {});
@@ -110,6 +109,10 @@ fn swapping () !void {
     // std.debug.print("index table bytes: {} KiB\n", .{ (index.table.pages.items.len * @sizeOf(usize)) / 1024});
     // std.debug.print("index meta pages: {} pages\n", .{ index.meta.pages.items.len });
     // std.debug.print("index meta bytes: {} KiB\n", .{ (index.meta.pages.items.len * @sizeOf(Db.RowMeta)) / 1024});
+
+    var fan_worker = try mod_fanotify.FanotifyWorker.init(a7r, &db, .{});
+    defer fan_worker.deinit();
+    try fan_worker.start();
 
     var stdin = std.io.getStdIn();
     var stdin_rdr = stdin.reader();

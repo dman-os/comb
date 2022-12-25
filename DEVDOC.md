@@ -5,9 +5,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
-    - [x] Swapping PList
-    - [x] FANotify notifications & test suite
-      - [ ] `tmpfs` alternative for testing
+    - [ ] `std.Thread.ResetEvent` based `Queue`
     - [ ] Database modification operations
       - [ ] Created
       - [ ] Updated
@@ -19,6 +17,8 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
     - [ ] FANotify <-> Database integration
     - [ ] B-Tree implementation for field indices
         - [ ] BSTree
+    - [x] FANotify notifications & test suite
+      - [ ] `tmpfs` alternative for testing
 
 - Later
     - [ ] Support less than gram length (3) search strings

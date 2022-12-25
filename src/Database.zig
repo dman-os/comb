@@ -629,7 +629,6 @@ pub const Quexecutor = struct {
         }
     };
 
-
     db: *Database,
     name_matcher: PlistNameMatcher = .{},
     id_buf: std.ArrayListUnmanaged(Id) = .{},
@@ -780,6 +779,10 @@ pub const Quexecutor = struct {
             defer arena.deinit();
             // println("plan: {any}", .{ self.plan.nodes.items, });
             var ha7r = arena.allocator();
+
+            self.db.lock.lockShared();
+            defer self.db.lock.unlockShared();
+
             var temp_result = try self.execNode(&self.plan.nodes.items[0], ha7r);
             defer ha7r.free(temp_result);
             self.id_buf.clearRetainingCapacity();
