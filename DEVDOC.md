@@ -5,7 +5,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
-    - [ ] `std.Thread.ResetEvent` based `Queue`
+    - [x] `std.Thread.ResetEvent` based `Queue`
     - [ ] Database modification operations
       - [ ] Created
       - [ ] Updated

@@ -1,13 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const Queue = std.atomic.Queue;
 
 const mod_utils = @import("utils.zig");
 const println = mod_utils.println;
 const dbg = mod_utils.dbg;
 const Option = mod_utils.Option;
 const OptionStr = Option([]const u8);
+const Queue = mod_utils.Mpmc;
 
 const Db = @import("Database.zig");
 const Query = @import("Query.zig");
@@ -1727,12 +1727,12 @@ pub const FanotifyWorker = struct {
         self.listener.deinit();
         self.mapper.deinit();
         self.worker.deinit();
-        while (self.fan_event_q.get()) |node| {
+        while (self.fan_event_q.getOrNull()) |node| {
             node.data.deinit(self.ha7r);
             self.ha7r.destroy(node);
         }
         self.ha7r.destroy(self.fan_event_q);
-        while (self.fs_event_q.get()) |node| {
+        while (self.fs_event_q.getOrNull()) |node| {
             node.data.deinit(self.ha7r);
             self.ha7r.destroy(node);
         }
@@ -1876,10 +1876,11 @@ const FanotifyEventMapper = struct {
             if (self.die_signal.isSet()) {
                 break;
             }
-            if (self.fan_event_q.get()) |node| {
+            if (self.fan_event_q.getTimed(500_000_000)) |node| {
                 defer self.ha7r.destroy(node);
                 try self.handleEvent(node.data);
-            } else {
+            } else |_| {
+                // _ = err;
                 std.Thread.yield() catch @panic("ThreadYieldErr");
             }
         }
@@ -2069,10 +2070,11 @@ const FsEventWorker = struct {
             if (self.die_signal.isSet()) {
                 break;
             }
-            if (self.event_q.get()) |node| {
+            if (self.event_q.getTimed(500_000_000)) |node| {
                 defer self.ha7r.destroy(node);
                 try self.handleEvent(node.data);
-            } else {
+            } else |_| {
+                // _ = err;
                 std.Thread.yield() catch @panic("ThreadYieldErr");
             }
         }

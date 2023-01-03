@@ -155,3 +155,145 @@ pub fn fdPath(fd: std.os.fd_t) ![]const u8 {
 // }
 // const Swapalloc = Trait(struct {
 // });
+
+/// Modifies `std.atomic.Queue` to use `std.atomic.Condition` for efficeint
+/// waiting
+pub fn Mpmc(comptime T: type) type {
+    return struct {
+        pub const Self = @This();
+        pub const Node = std.TailQueue(T).Node;
+        const assert = std.debug.assert;
+
+        head: ?*Node = null,
+        tail: ?*Node = null,
+        mutex: std.Thread.Mutex = .{},
+        condition: std.Thread.Condition = .{},
+
+        /// Initializes a new queue. The queue does not provide a `deinit()`
+        /// function, so the user must take care of cleaning up the queue elements.
+        pub fn init() Self {
+            return Self{ };
+        }
+
+        /// Appends `node` to the queue.
+        /// The lifetime of `node` must be longer than lifetime of queue.
+        pub fn put(self: *Self, node: *Node) void {
+            node.next = null;
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            node.prev = self.tail;
+            self.tail = node;
+            if (node.prev) |prev_tail| {
+                prev_tail.next = node;
+            } else {
+                assert(self.head == null);
+                self.head = node;
+            }
+            self.condition.signal();
+        }
+
+        fn getInner(self: *Self) ?*Node {
+            const head = self.head orelse return null;
+            self.head = head.next;
+            if (head.next) |new_head| {
+                new_head.prev = null;
+            } else {
+                self.tail = null;
+            }
+            // This way, a get() and a remove() are thread-safe with each other.
+            head.prev = null;
+            head.next = null;
+            return head;
+        }
+
+        /// Gets a previously inserted node or returns `null` if there is none.
+        /// It is safe to `get()` a node from the queue while another thread tries
+        /// to `remove()` the same node at the same time.
+        pub fn getOrNull(self: *Self) ?*Node {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.getInner();
+        }
+
+        pub fn get(self: *Self) *Node {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            while (self.head == null) {
+                self.condition.wait(&self.mutex);
+            }
+            // FIXME: we get again if getInner returns null
+            // implying that some other consumer got there
+            // before we did. no clue how well this works
+            return self.getInner() orelse self.get();
+        }
+
+        pub fn getTimed(self: *Self, timeout_ns: u64) error{Timeout}!*Node {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            var timeout_ns_rem = timeout_ns;
+            while (self.head == null) {
+                if (timeout_ns_rem == 0) return error.Timeout;
+                const start = std.time.nanoTimestamp();
+                try self.condition.timedWait(&self.mutex, timeout_ns);
+                const end = std.time.nanoTimestamp();
+                timeout_ns_rem = timeout_ns_rem - @intCast(u64, end - start);
+            }
+            return self.getInner() orelse self.getTimed(timeout_ns_rem);
+        }
+
+        /// Prepends `node` to the front of the queue.
+        /// The lifetime of `node` must be longer than the lifetime of the queue.
+        pub fn unget(self: *Self, node: *Node) void {
+            node.prev = null;
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            const opt_head = self.head;
+            self.head = node;
+            if (opt_head) |old_head| {
+                node.next = old_head;
+            } else {
+                assert(self.tail == null);
+                self.tail = node;
+            }
+        }
+
+        /// Removes a node from the queue, returns whether node was actually removed.
+        /// It is safe to `remove()` a node from the queue while another thread tries
+        /// to `get()` the same node at the same time.
+        pub fn remove(self: *Self, node: *Node) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (node.prev == null and node.next == null and self.head != node) {
+                return false;
+            }
+
+            if (node.prev) |prev| {
+                prev.next = node.next;
+            } else {
+                self.head = node.next;
+            }
+            if (node.next) |next| {
+                next.prev = node.prev;
+            } else {
+                self.tail = node.prev;
+            }
+            node.prev = null;
+            node.next = null;
+            return true;
+        }
+
+        /// Returns `true` if the queue is currently empty.
+        /// Note that in a multi-consumer environment a return value of `false`
+        /// does not mean that `get` will yield a non-`null` value!
+        pub fn isEmpty(self: *Self) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.head == null;
+        }
+    };
+}
