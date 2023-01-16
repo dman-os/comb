@@ -5,7 +5,6 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
-    - [x] `std.Thread.ResetEvent` based `Queue`
     - [ ] Database modification operations
       - [ ] Created
       - [ ] Updated
@@ -19,10 +18,12 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
         - [ ] BSTree
     - [x] FANotify notifications & test suite
       - [ ] `tmpfs` alternative for testing
+    - [x] `std.Thread.Condition` based `Queue`
+      - A single CPU is still saturated when it's flooded with events. Investigate what's making this happen
+        - Crossed fingers it won't be the syscalls (can't be!)
 
 - Later
     - [ ] Support less than gram length (3) search strings
-
 ## design doc
 
 ### Features

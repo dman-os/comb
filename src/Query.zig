@@ -57,6 +57,7 @@ pub const Filter = struct {
     pub const Param = union(enum) {
         nameMatch: struct {
             string: []const u8,
+            exact: bool, // FIXME: find a better name and get rid of it
             pub fn deinit(self: *@This(), ha7r: Allocator) void {
                 ha7r.free(self.string);
             }
@@ -149,19 +150,20 @@ pub const Filter = struct {
                 try self.sub_clauses.append(self.ha7r, clause);
             }
 
-            //pub inline fn withNameMatch(self: @This(), string: []const u8) !@This() {
-            //    self.addNameMatch(string);
+            //pub inline fn withNameMatch(self: @This(), string: []const u8, exact: bool) !@This() {
+            //    self.addNameMatch(string, exact);
             //    return self;
             //}
 
-            pub inline fn addNameMatch(self: *@This(), string: []const u8) !void {
+            pub inline fn addNameMatch(self: *@This(), string: []const u8, exact: bool) !void {
                 if (string.len == 0) @panic("NameMatch string can not empty");
                 try self.sub_clauses.append(
                     self.ha7r, 
                     Clause { 
                         .param = Param { 
                             .nameMatch = .{ 
-                                .string = try self.ha7r.dupe(u8, string) 
+                                .string = try self.ha7r.dupe(u8, string) ,
+                                .exact = exact
                             } 
                         } 
                     }

@@ -238,7 +238,7 @@ fn expect_clause(self: *Self, ha7r: Allocator) Error!Filter.Clause {
                 var clause = blk2: {
                     var cb = Query.Filter.Clause.Builder.init(ha7r);
                     defer cb.deinit();
-                    try cb.addNameMatch(str);
+                    try cb.addNameMatch(str, true);
                     break :blk2 try cb.build();
                 };
                 while (path_it.next()) |name| {
@@ -246,14 +246,14 @@ fn expect_clause(self: *Self, ha7r: Allocator) Error!Filter.Clause {
                     defer cb.deinit();
                     cb.setOperator(.@"and");
                     try cb.addChildOf(clause);
-                    try cb.addNameMatch(name);
+                    try cb.addNameMatch(name, path_it.peek() != null);
                     clause = try cb.build();
                 }
                 break :blk clause;
             } else {
                 var cb = Query.Filter.Clause.Builder.init(ha7r);
                 defer cb.deinit();
-                try cb.addNameMatch(str);
+                try cb.addNameMatch(str, false);
                 break :blk try cb.build();
             }
         },
