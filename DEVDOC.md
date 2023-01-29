@@ -146,5 +146,20 @@ safely abstract this away from high level users.
 supernumerous. We'll be needing a scheme to combine them for over a span of
 time if not options for completely disabling them erstwhile we find ourselves
 syscalling and queriying 
-against the index each time we catch one.
+against the index each time we catch 
 
+
+### Test harnesses
+
+I want to automated tests for every peice of this as I imagine, testing this by hand would be painful.
+Especially as features accure. 
+There are a number of moving peices so unit tests are probably the best thing to do but I wonder if a single large e2e testing suite will be workable.
+If I were to write such a thing, I want it to exercise all the interesting boundaries and I want it to have easy knobs that'll allow me exercise these boundaries in any variation I'd want.
+That sounds like an unreasonable requirment at first blush but let's see if we can get something working.
+If it doesn't suffice, I guess it's always good to have an e2e suite anyways.
+
+Concerns include:
+- Query parsing
+- IPC
+- Query execution
+- Fs events

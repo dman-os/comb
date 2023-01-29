@@ -154,15 +154,15 @@ fn swapping () !void {
 test {
     std.testing.refAllDecls(@This());
     // _ = ThreadPool;
-    _ = mod_utils;
-    _ = mod_mmap;
-    _ = mod_gram;
-    _ = mod_plist;
-    _ = mod_index;
-    _ = mod_fanotify;
-    _ = mod_treewalking;
     _ = Database;
+    _ = mod_fanotify;
+    _ = mod_gram;
+    _ = mod_index;
+    _ = mod_mmap;
     _ = Query;
+    _ = mod_plist;
+    _ = mod_treewalking;
+    _ = mod_utils;
 }
 
 // fn BinarySearchTree(

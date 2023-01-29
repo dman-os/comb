@@ -1,12 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub fn dbg(val: anytype) @TypeOf(val){
+pub fn dbg(val: anytype) @TypeOf(val) {
     switch (@typeInfo(@TypeOf(val))) {
         .Pointer => |ptr| {
-            if (ptr.size == .Slice) 
+            if (ptr.size == .Slice)
                 std.debug.print("{s}\n", .{val})
-            else std.debug.print("{any}\n", .{val});
+            else
+                std.debug.print("{any}\n", .{val});
         },
         else => std.debug.print("{any}\n", .{val}),
     }
@@ -22,29 +23,27 @@ pub fn println(comptime fmt: []const u8, args: anytype) void {
     nosuspend _ = stderr.write("\n") catch return;
 }
 
-pub fn Option(comptime T:type) type {
-    return union(enum){
+pub fn Option(comptime T: type) type {
+    return union(enum) {
         const Self = @This();
         some: T,
         none: void,
 
-        pub const None = Self {
-            .none = {}
-        };
+        pub const None = Self{ .none = {} };
 
         pub inline fn toNative(self: Self) ?T {
-            return switch(self) {
+            return switch (self) {
                 .some => |val| val,
                 .none => null,
             };
         }
         pub inline fn fromNative(opt: ?T) Self {
             if (opt) |val| {
-                return Self { .some = val };
+                return Self{ .some = val };
             } else {
                 return Self.None;
             }
-       }
+        }
     };
 }
 
@@ -139,8 +138,12 @@ pub fn fdPath(fd: std.os.fd_t) ![]const u8 {
     // return std.fs.readLinkAbsolute(fd_path, &pathBuf);
 
     var fd_buf = [_]u8{0} ** 128;
-    const fd_path = std.fmt.bufPrint(&fd_buf, "/proc/self/fd/{}", .{ fd }) catch unreachable;
+    const fd_path = std.fmt.bufPrint(&fd_buf, "/proc/self/fd/{}", .{fd}) catch unreachable;
     return std.fs.readLinkAbsolute(fd_path, &pathBuf);
+}
+
+pub fn isElevated() bool {
+    return std.os.linux.geteuid() == 0;
 }
 
 // fn Trait(
@@ -172,7 +175,7 @@ pub fn Mpmc(comptime T: type) type {
         /// Initializes a new queue. The queue does not provide a `deinit()`
         /// function, so the user must take care of cleaning up the queue elements.
         pub fn init() Self {
-            return Self{ };
+            return Self{};
         }
 
         /// Appends `node` to the queue.
@@ -238,7 +241,8 @@ pub fn Mpmc(comptime T: type) type {
                 const start = std.time.nanoTimestamp();
                 try self.condition.timedWait(&self.mutex, timeout_ns);
                 const end = std.time.nanoTimestamp();
-                timeout_ns_rem = timeout_ns_rem - @intCast(u64, end - start);
+                const elapsed = @intCast(u64, end - start);
+                timeout_ns_rem = if (timeout_ns_rem > elapsed) timeout_ns_rem - elapsed else 0;
             }
             return self.getInner() orelse self.getTimed(timeout_ns_rem);
         }

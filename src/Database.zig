@@ -500,7 +500,7 @@ test "Database.usage" {
     try std.testing.expectEqualSlices(u8, entry.name, dbName);
 }
 
-fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
+pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
     var prng = std.crypto.random;
     const name = if (std.mem.eql(u8, path, "/")) "/" else std.fs.path.basename(path);
     return FsEntry([]const u8, []const u8) {
@@ -520,7 +520,82 @@ fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
     };
 }
 
-const e2e = struct {
+/// Add the files to the db while making sure any implied parent dir in path
+/// string is also present. 
+/// Assumes db is empty. 
+/// Returns a heap allocated array of `Id`s assigned to the `entries` in the
+/// respective indices.
+pub fn fileList2Tree2Db(
+    ha7r: Allocator,
+    entries: []const FsEntry([]const u8, []const u8),
+    db: *Database
+) ![]Id {
+    var declared_map = try ha7r.alloc(Id, entries.len);
+
+    var path_id_map = std.StringHashMap(Id).init(ha7r);
+    defer {
+        var it = path_id_map.keyIterator();
+        while(it.next()) |key| {
+            ha7r.free(key.*);
+        }
+        path_id_map.deinit();
+    }
+
+    var stack = std.ArrayList(FsEntry([] const u8, [] const u8)).init(ha7r);
+    defer stack.deinit();
+
+    for (entries) |entry, ii| {
+        defer stack.clearRetainingCapacity();
+        try stack.append(entry);
+        while (true) {
+            // println(
+            //     "name: {s}, parent: {s}",
+            //     .{
+            //         stack.items[stack.items.len - 1].name,
+            //         stack.items[stack.items.len - 1].parent,
+            //      }
+            // );
+            if (
+                path_id_map.contains(stack.items[stack.items.len - 1].parent)
+                or
+                std.mem.eql(u8, stack.items[stack.items.len - 1].name, "/")
+            ) break;
+            try stack.append(genRandFile(stack.items[stack.items.len - 1].parent));
+        }
+        var id: Id = undefined;
+        while (stack.popOrNull()) |s_entry| {
+            var is_root = std.mem.eql(u8, s_entry.name, "/");
+
+            const parent = path_id_map.get(s_entry.parent) 
+                orelse if (is_root)
+                    Id { .id = 0, .gen = 0 }
+                else { 
+                    println("name: {s}, parent: {s}", .{ s_entry.name, s_entry.parent });
+                    unreachable;
+                };
+
+            id = try db.fileCreated(
+                &s_entry.conv(Id, []const u8, parent, s_entry.name)
+            );
+            //println(
+            //    "inserted entry: {s}/{s} at id {}", 
+            //    .{ s_entry.parent, s_entry.name, id }
+            //);
+            try path_id_map.put(
+                try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
+                // if (is_root)
+                //     try ha7r.dupe(u8, "/")
+                // else 
+                //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
+                id
+            );
+        }
+        declared_map[ii] = id;
+    }
+    return declared_map;
+}
+
+const TestDb = struct {
     const Case = struct {
         name: []const u8,
         query: []const u8,
@@ -556,81 +631,16 @@ const e2e = struct {
             var querier = Quexecutor.init(&db);
             defer querier.deinit();
 
-            var declared_map = try ha7r.alloc(Id, case.entries.len);
+            var declared_map = try fileList2Tree2Db(ha7r, case.entries, &db);
             defer ha7r.free(declared_map);
+
+            if (case.preQueryAction) |action| {
+                try action(&db, declared_map);
+            }
 
             var parser = Query.Parser{};
             defer parser.deinit(ha7r);
 
-            // add the files while making sure any implied parent dir 
-            // in path string is also present
-            {
-                var path_id_map = std.StringHashMap(Id).init(ha7r);
-                defer {
-                    var it = path_id_map.keyIterator();
-                    while(it.next()) |key| {
-                        ha7r.free(key.*);
-                    }
-                    path_id_map.deinit();
-                }
-
-                var stack = std.ArrayList(FsEntry([] const u8, [] const u8)).init(ha7r);
-                defer stack.deinit();
-
-                for (case.entries) |entry, ii| {
-                    defer stack.clearRetainingCapacity();
-                    try stack.append(entry);
-                    while (true) {
-                        // println(
-                        //     "name: {s}, parent: {s}",
-                        //     .{
-                        //         stack.items[stack.items.len - 1].name,
-                        //         stack.items[stack.items.len - 1].parent,
-                        //      }
-                        // );
-                        if (
-                            path_id_map.contains(stack.items[stack.items.len - 1].parent)
-                            or
-                            std.mem.eql(u8, stack.items[stack.items.len - 1].name, "/")
-                        ) break;
-                        try stack.append(genRandFile(stack.items[stack.items.len - 1].parent));
-                    }
-                    var id: Id = undefined;
-                    while (stack.popOrNull()) |s_entry| {
-                        var is_root = std.mem.eql(u8, s_entry.name, "/");
-
-                        const parent = path_id_map.get(s_entry.parent) 
-                            orelse if (is_root)
-                                Id { .id = 0, .gen = 0 }
-                            else { 
-                                println("name: {s}, parent: {s}", .{ s_entry.name, s_entry.parent });
-                                unreachable;
-                            };
-
-                        id = try db.fileCreated(
-                            &s_entry.conv(Id, []const u8, parent, s_entry.name)
-                        );
-                        //println(
-                        //    "inserted entry: {s}/{s} at id {}", 
-                        //    .{ s_entry.parent, s_entry.name, id }
-                        //);
-                        try path_id_map.put(
-                            try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
-                            // if (is_root)
-                            //     try ha7r.dupe(u8, "/")
-                            // else 
-                            //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
-                            id
-                        );
-                    }
-                    declared_map[ii] = id;
-                }
-            }
-            {
-                if (case.preQueryAction) |action| {
-                    try action(&db, declared_map);
-                }
-            }
             // var parsed_query = try Query.parse(ha7r, case.query);
             var parsed_query = try parser.parse(ha7r, case.query);
             defer parsed_query.deinit(ha7r);
@@ -654,7 +664,7 @@ const e2e = struct {
 
 // fn randFile(name: []const u8) FsEntry()
 test "Db.e2e" {
-    var table = [_]e2e.Case {
+    var table = [_]TestDb.Case {
         .{
             .name = "supports_empty_query",
             .entries = &.{
@@ -693,7 +703,7 @@ test "Db.e2e" {
             .expected = &.{ 1, 3 },
         },
     };
-    try e2e.run(table[0..]);
+    try TestDb.run(table[0..]);
 }
 
 // pub const ColumnarDatabase = struct {
