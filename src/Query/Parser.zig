@@ -160,10 +160,9 @@ pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
                 clause.deinit(ha7r);
             }
         }
-        while (true) {
-            if (self.cur() == null) {
-                break;
-            }         
+        while (
+            self.cur() != null
+        ) {
             switch (try self.expect_param(ha7r)) {
                 .limit => |limit| {
                     builder.setPagination(limit, builder.query.offset);

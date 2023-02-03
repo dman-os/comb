@@ -257,9 +257,10 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     if (false) {
         var id_self = id;
         var parent = entry.parent;
-        while (true) {
+        while (
             // FIXME: a better way of detecting root
-            if (id_self.id == parent.id) break;
+            id_self.id != parent.id
+        ) {
             var kv = try self.descendantOfIndex.getOrPut(self.ha7r, parent);
             if (!kv.found_existing) {
                 // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
@@ -522,10 +523,11 @@ pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
 
 /// Add the files to the db while making sure any implied parent dir in path
 /// string is also present. 
+/// The metadata for parents is randomly generated.
 /// Assumes db is empty. 
 /// Returns a heap allocated array of `Id`s assigned to the `entries` in the
 /// respective indices.
-pub fn fileList2Tree2Db(
+pub fn fileList2PlasticTree2Db(
     ha7r: Allocator,
     entries: []const FsEntry([]const u8, []const u8),
     db: *Database
@@ -544,7 +546,14 @@ pub fn fileList2Tree2Db(
     var stack = std.ArrayList(FsEntry([] const u8, [] const u8)).init(ha7r);
     defer stack.deinit();
 
+    // for (declared_map) |*item| {
+    //     item.* = Id { .id = 0, .gen = 0 };
+    // }
+    // if (true) return declared_map;
+
     for (entries) |entry, ii| {
+        // println("entry.name={s} entry.parent={s}", .{ entry.name, entry.parent });
+
         defer stack.clearRetainingCapacity();
         try stack.append(entry);
         while (true) {
@@ -562,7 +571,7 @@ pub fn fileList2Tree2Db(
             ) break;
             try stack.append(genRandFile(stack.items[stack.items.len - 1].parent));
         }
-        var id: Id = undefined;
+        var id: ?Id = null;
         while (stack.popOrNull()) |s_entry| {
             var is_root = std.mem.eql(u8, s_entry.name, "/");
 
@@ -574,23 +583,24 @@ pub fn fileList2Tree2Db(
                     unreachable;
                 };
 
-            id = try db.fileCreated(
+            var entry_id = try db.fileCreated(
                 &s_entry.conv(Id, []const u8, parent, s_entry.name)
             );
-            //println(
+            // println(
             //    "inserted entry: {s}/{s} at id {}", 
-            //    .{ s_entry.parent, s_entry.name, id }
-            //);
+            //    .{ s_entry.parent, s_entry.name, entry_id }
+            // );
             try path_id_map.put(
                 try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
                 // if (is_root)
                 //     try ha7r.dupe(u8, "/")
                 // else 
                 //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
-                id
+                entry_id
             );
+            id = entry_id;
         }
-        declared_map[ii] = id;
+        declared_map[ii] = id orelse @panic("id not set");
     }
     return declared_map;
 }
@@ -631,7 +641,7 @@ const TestDb = struct {
             var querier = Quexecutor.init(&db);
             defer querier.deinit();
 
-            var declared_map = try fileList2Tree2Db(ha7r, case.entries, &db);
+            var declared_map = try fileList2PlasticTree2Db(ha7r, case.entries, &db);
             defer ha7r.free(declared_map);
 
             if (case.preQueryAction) |action| {

@@ -111,7 +111,7 @@ fn swapping () !void {
     // std.debug.print("index meta bytes: {} KiB\n", .{ (index.meta.pages.items.len * @sizeOf(Db.RowMeta)) / 1024});
 
     var fan_worker = try mod_fanotify.FanotifyWorker.init(a7r, &db, .{});
-    defer fan_worker.deinit();
+    defer fan_worker.join();
     try fan_worker.start();
 
     var stdin = std.io.getStdIn();

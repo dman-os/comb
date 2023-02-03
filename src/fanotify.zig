@@ -131,6 +131,7 @@ pub const event_info_error = extern struct {
     error_count: c_uint,
 };
 
+/// FIXME: what's this? It doesn't seem to be in use.
 pub const response = extern struct {
     fd: c_int,
     response: c_uint,
@@ -431,7 +432,11 @@ pub const Config = struct {
         .delete = true,
         .moved_to = true,
         .ondir = true,
+        .rename = true
     },
+    /// milliseconds for which `poll` on the `fanotify`
+    /// handle will wait before timing out. Set to `-1` to wait forever.
+    poll_timeout: i32 = -1,
 };
 
 pub fn listener(
@@ -447,12 +452,14 @@ pub fn listener(
                 .report_fid = true,
                 .report_dir_fid = true,
                 .report_name = true,
+                .report_target_fid = true,
             },
             std.os.O.RDONLY | std.os.O.CLOEXEC,
         );
         try mark(
             fd, 
             FAN.MARK.MOD.ADD, 
+            // FIXME: consider monitoring specific mounts instead of the fs
             FAN.MARK.FILESYSTEM, 
             config.mark_event_mask,
             std.os.AT.FDCWD, 
@@ -461,6 +468,13 @@ pub fn listener(
         break :blk fd;
     };
     defer std.os.close(fd);
+    var mount_fd = try std.os.openZ(
+        config.mark_fs_path,
+        // std.os.O.RDONLY | std.os.O.PATH | std.os.O.DIRECTORY,
+        std.os.O.RDONLY | std.os.O.DIRECTORY,
+        0
+    ); 
+    defer std.os.close(mount_fd);
 
     var pollfds = [_]std.os.pollfd{std.os.pollfd{
         .fd = fd,
@@ -468,11 +482,11 @@ pub fn listener(
         .revents = 0,
     }};
     std.log.info("entering fanotify poll loop", .{});
-    var buf = [_]u8{0} ** 256;
+    var buf = [_]u8{0} ** 4096;
 
     while (true) {
         if (die_signal.isSet()) break;
-        const poll_num = try std.os.poll(&pollfds, -1);
+        const poll_num = try std.os.poll(&pollfds, config.poll_timeout);
         if (die_signal.isSet()) break;
 
         if (poll_num < 1) {
@@ -511,7 +525,7 @@ pub fn listener(
 
                 if ((meta.mask & FAN.Q_OVERFLOW) > 0) @panic("queue overflowed");
 
-                if (try parseRawEvent(ha7r, timestamp, meta_ptr)) |event|
+                if (try parseRawEvent(ha7r, timestamp, meta_ptr, mount_fd)) |event|
                     try event_sink.append(event);
 
                 ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
@@ -533,7 +547,8 @@ pub fn listener(
 fn parseRawEvent(
     a7r: Allocator, 
     timestamp: i64, 
-    meta_ptr: *align(1) const event_metadata
+    meta_ptr: *align(1) const event_metadata,
+    mount_fd: std.os.fd_t,
 ) !?FanotifyEvent {
     const meta = meta_ptr.*;
     // if event is this short
@@ -542,122 +557,168 @@ fn parseRawEvent(
         // and we're not interested
         @panic("todo");
     } else {
-        const fid_info = @intToPtr(
-            *event_info_fid, 
-            @ptrToInt(meta_ptr) + @sizeOf(event_metadata)
-        );
         // lifted from the manual fanotify(7)
-        // Note that for the directory entry modification events FAN_CREATE,
-        // FAN_DELETE, and FAN_MOVE, the file_handle identifies the modified
-        // directory and not the created/deleted/moved child object. If the
-        // value of  info_type  field is FAN_EVENT_INFO_TYPE_DFID_NAME, the
-        // file handle is followed by a null terminated string that identifies
-        // the created/deleted/moved  directory entry name.  
+        //
+        // When an fanotify file  de‐ scriptor is created using FAN_REPORT_FID,
+        // a single information record is expected to be attached to the event
+        // with info_type field value of FAN_EVENT_INFO_TYPE_FID.  When an
+        // fanotify  file de‐ scriptor is created using the combination of
+        // FAN_REPORT_FID and FAN_REPORT_DIR_FID, there may be two  information
+        // records attached to  the  event:  one  with   info_type   field
+        // value of FAN_EVENT_INFO_TYPE_DFID,  identifying  a  parent directory
+        // object, and one with info_type field value of
+        // FAN_EVENT_INFO_TYPE_FID, identifying a child object.  Note that for
+        // the directory entry modification  events  FAN_CREATE, FAN_DELETE,
+        // FAN_MOVE,  and FAN_RENAME, an information record identifying the
+        // created/deleted/moved child object is reported only if  an  fanotify
+        // group  was initialized with the flag FAN_REPORT_TARGET_FID.
 
-        // For other events such as FAN_OPEN, FAN_ATTRIB, FAN_DELETE_SELF,  and
-        // FAN_MOVE_SELF, if the value of info_type field is
-        // FAN_EVENT_INFO_TYPE_FID, the file_handle identifies the object
-        // correlated to the event.   If the value of info_type field is
-        // FAN_EVENT_INFO_TYPE_DFID, the file_handle identifies the directory
-        // object correlated to the event or the parent directory of a
-        // non-directory object correlated to the event.  If the value of
-        // info_type field is FAN_EVENT_INFO_TYPE_DFID_NAME, the file_handle
-        // identifies the same directory object that would be reported with
-        // FAN_EVENT_INFO_TYPE_DFID and the file handle is followed by a null
-        // terminated string that identifies the name of a directory entry in
-        // that directory, or '.' to identify the directory object itself.
-        const handle = &fid_info.handle;
 
-        // if just fid
-        if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.FID) {
-            // read the name and dir from the handle and assume that it belongs 
-            // to the file of interest. Simple.
-            if (open_by_handle_at(
-                std.os.AT.FDCWD,
-                handle,
-                std.os.O.PATH,
-            )) |dir_fd| {
-                defer std.os.close(dir_fd);
+        var opt_name = OptionStr.None;
+        var opt_dir = OptionStr.None;
 
-                // read the path into a stack buffer
-                const path = try mod_utils.fdPath(dir_fd);
-                const name = std.fs.path.basename(path);
-                const dir = std.fs.path.dirname(path) orelse "/"[0..];
+        var start_addr = @ptrToInt(meta_ptr) + @sizeOf(event_metadata);
+        while (
+            start_addr < @ptrToInt(meta_ptr) + meta.event_len
+        ) {
+            const info_hdr = @intToPtr(
+                *event_info_header, 
+                start_addr
+            );
+            defer start_addr = start_addr + info_hdr.len;
+            // lifted from the manual fanotify(7)
+            // Note that for the directory entry modification events FAN_CREATE,
+            // FAN_DELETE, and FAN_MOVE, the file_handle identifies the modified
+            // directory and not the created/deleted/moved child object. If the
+            // value of  info_type  field is FAN_EVENT_INFO_TYPE_DFID_NAME, the
+            // file handle is followed by a null terminated string that identifies
+            // the created/deleted/moved  directory entry name.  
 
-                return try FanotifyEvent.init(
-                    a7r, 
-                    OptionStr{ .some = name }, 
-                    OptionStr{ .some = dir }, 
-                    &meta,
-                    timestamp
+            // For other events such as FAN_OPEN, FAN_ATTRIB, FAN_DELETE_SELF,  and
+            // FAN_MOVE_SELF, if the value of info_type field is
+            // FAN_EVENT_INFO_TYPE_FID, the file_handle identifies the object
+            // correlated to the event.   If the value of info_type field is
+            // FAN_EVENT_INFO_TYPE_DFID, the file_handle identifies the directory
+            // object correlated to the event or the parent directory of a
+            // non-directory object correlated to the event.  If the value of
+            // info_type field is FAN_EVENT_INFO_TYPE_DFID_NAME, the file_handle
+            // identifies the same directory object that would be reported with
+            // FAN_EVENT_INFO_TYPE_DFID and the file handle is followed by a null
+            // terminated string that identifies the name of a directory entry in
+            // that directory, or '.' to identify the directory object itself.
+
+            // if just fid
+            if (info_hdr.info_type == FAN.EVENT.INFO_TYPE.FID) {
+                const fid_info = @intToPtr(
+                    *event_info_fid, 
+                    start_addr
                 );
-            } else |err| switch (err) {
-                OpenByHandleErr.StaleFileHandle =>
-                // // FIXME: move filtering to a higher abstraction
-                // // we explicitly filter out the numerous ATTRIB events with no
-                // // `name` or `dir` attached
-                // return if (meta.mask == @as(c_ulonglong, FAN.EVENT.ATTRIB))
-                //     null
-                // else
-                    return try FanotifyEvent.init(a7r, OptionStr.None, OptionStr.None, &meta, timestamp),
-                else => {
-                    std.log.warn("open_by_handle_at failed with {} at {}", .{ err, meta });
-                    @panic("open_by_handle_at failed");
-                    // break :eb try FanotifyEvent.init(
-                    //     alloc8or,
-                    //     OptionStr.None,
-                    //     OptionStr.None,
-                    //     &meta,
-                    //     timestamp
-                    // );
-                },
-            }
-        } else if (fid_info.hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME) {
-            const name = blk: {
-                const name_ptr = handle.file_name();
-                break :blk name_ptr[0..std.mem.len(name_ptr)];
-            };
+                const handle = &fid_info.handle;
+                // defer println(
+                //     "raw event FID: {} dir={?s} name={?s}", 
+                //     .{ .{ meta_ptr, fid_info, }, opt_dir.some, opt_name.some }
+                // );
+                // read the name and dir from the handle and assume that it belongs 
+                // to the file of interest. Simple.
+                if (open_by_handle_at(
+                    mount_fd,
+                    handle,
+                    std.os.O.PATH | std.os.O.NOFOLLOW,
+                )) |dir_fd| {
+                    defer std.os.close(dir_fd);
 
-            // var path_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
-            const opt_path = if (open_by_handle_at(
-                std.os.AT.FDCWD,
-                handle,
-                std.os.O.PATH,
-            )) |dir_fd| blk: {
-                defer std.os.close(dir_fd);
-                break :blk try mod_utils.fdPath(dir_fd);
-            } else |err| blk: {
-                switch (err) {
-                    OpenByHandleErr.StaleFileHandle => {},
-                    else => @panic("open_by_handle_at failed"),
+                    // read the path into a stack buffer
+                    const path = try mod_utils.fdPath(dir_fd);
+                    const name = std.fs.path.basename(path);
+                    const dir = std.fs.path.dirname(path) orelse "/"[0..];
+
+                    opt_name = OptionStr{ .some = name };
+                    opt_dir = OptionStr{ .some = dir };
+                } else |err| switch (err) {
+                    OpenByHandleErr.StaleFileHandle => {
+                        // // FIXME: move filtering to a higher abstraction
+                        // // we explicitly filter out the numerous ATTRIB events with no
+                        // // `name` or `dir` attached
+                        // return if (meta.mask == @as(c_ulonglong, FAN.EVENT.ATTRIB))
+                        //     null
+                        // else
+                        std.log.debug("err: {}", .{ err });
+                    },
+                    else => {
+                        std.log.warn("open_by_handle_at failed with {} at {}", .{ err, meta });
+                        @panic("open_by_handle_at failed");
+                        // break :eb try FanotifyEvent.init(
+                        //     alloc8or,
+                        //     OptionStr.None,
+                        //     OptionStr.None,
+                        //     &meta,
+                        //     timestamp
+                        // );
+                    },
                 }
-                break :blk null;
-            };
+            } else if (info_hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME) {
+                const fid_info = @intToPtr(
+                    *event_info_fid, 
+                    start_addr
+                );
+                // defer println(
+                //     "raw event DFID: {} dir={?s} name={?s}", 
+                //     .{ .{ meta_ptr, fid_info, }, opt_dir.some, opt_name.some }
+                // );
 
-            var opt_name = OptionStr.None;
-            var opt_dir = OptionStr.None;
-            // if it's the dir itself that was "evented" on
-            if (std.mem.eql(u8, name, ".")) {
-                if (opt_path) |path| {
-                    opt_name = OptionStr{ .some = std.fs.path.basename(path) };
-                    opt_dir = OptionStr{ .some = std.fs.path.dirname(path) orelse "/"[0..] };
+                const handle = &fid_info.handle;
+
+                const name = blk: {
+                    const name_ptr = handle.file_name();
+                    break :blk name_ptr[0..std.mem.len(name_ptr)];
+                };
+
+                // var path_buf = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+
+                const opt_path = if (open_by_handle_at(
+                    mount_fd,
+                    handle,
+                    std.os.O.PATH | std.os.O.NOFOLLOW,
+                )) |dir_fd| blk: {
+                    defer std.os.close(dir_fd);
+                    break :blk try mod_utils.fdPath(dir_fd);
+                } else |err| blk: {
+                    switch (err) {
+                        OpenByHandleErr.StaleFileHandle => {
+                            std.log.debug("err: {}", .{ err });
+                        },
+                        else => {
+                            var stuff = try std.os.fcntl(mount_fd, std.os.F.GETFD, 0);
+                            println("stuff={} err={}", .{ stuff, err });
+                            @panic("open_by_handle_at failed");
+                        },
+                    }
+                    break :blk null;
+                };
+
+                // if it's the dir itself that was "evented" on
+                if (std.mem.eql(u8, name, ".")) {
+                    if (opt_path) |path| {
+                        opt_name = OptionStr{ .some = std.fs.path.basename(path) };
+                        opt_dir = OptionStr{ .some = std.fs.path.dirname(path) orelse "/"[0..] };
+                    } else {
+                        // if we don't have a path or a name - probably an attrib event
+                        std.log.warn("this fucking happened", .{});
+                    }
                 } else {
-                    // if we don't have a path or a name - probably an attrib event
-                    println("this fucking happened", .{});
+                    opt_name = OptionStr{ .some = name };
+                    if (opt_path) |dir| {
+                        opt_dir = OptionStr{ .some = dir };
+                    }
                 }
             } else {
-                opt_name = OptionStr{ .some = name };
-                if (opt_path) |dir| {
-                    opt_dir = OptionStr{ .some = dir };
-                }
+                println("raw event UNEXPECTED: {}", .{ .{ meta_ptr, info_hdr } });
+                @panic("unexpected info type");
             }
-            return try FanotifyEvent.init(
-                a7r, opt_name, opt_dir, &meta, timestamp
-            );
-        } 
-        else {
-            @panic("unexpected info type");
         }
+        return try FanotifyEvent.init(
+            a7r, opt_name, opt_dir, &meta, timestamp
+        );
     }
 }
 
@@ -740,6 +801,14 @@ const TestFanotify = struct {
             };
             defer std.os.close(fd);
 
+            var mount_fd = try std.os.openZ(
+                ctx.path,
+                // std.os.O.RDONLY | std.os.O.PATH | std.os.O.DIRECTORY,
+                std.os.O.RDONLY | std.os.O.DIRECTORY,
+                0
+            ); 
+            defer std.os.close(mount_fd);
+
             var pollfds = [_]std.os.pollfd{std.os.pollfd{
                 .fd = fd,
                 .events = std.os.POLL.IN,
@@ -754,8 +823,7 @@ const TestFanotify = struct {
             // catching events they don't want us seeing
             ctx.startListen.wait();
             var breakOnNext = false;
-            while (true) {
-                if (breakOnNext) break;
+            while (!breakOnNext) {
                 if (ctx.doDone.isSet()) {
                     // poll at least one cycle after they're done
                     // in case they give set `startListen` and `finishPoll`
@@ -804,7 +872,9 @@ const TestFanotify = struct {
 
                         if ((meta.mask & FAN.Q_OVERFLOW) > 0) @panic("queue overflowed");
 
-                        if (try parseRawEvent(alloc8or, timestamp, meta_ptr)) |event|
+                        if (
+                            try parseRawEvent(alloc8or, timestamp, meta_ptr, mount_fd)
+                        ) |event|
                             try ctx.events.append(event);
 
                         ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
@@ -922,9 +992,14 @@ const TestFanotify = struct {
         expected_dir: ?[]const u8, 
     ) !void {
         for (self.events.items) |event| {
-            if ((expected_kind.asInt() & event.kind.asInt()) > 0) {
+            var common = expected_kind.asInt() & event.kind.asInt();
+            if (
+                common > 0 
+                // if ondir is all they have in common, not interested
+                and common != (FAN.EVENT { .ondir = true }).asInt()
+            ) {
                 if (expected_name) |name| {
-                    std.testing.expectEqualSlices(
+                    if (!std.mem.eql(
                         u8, 
                         name, 
                         event.name orelse {
@@ -934,18 +1009,16 @@ const TestFanotify = struct {
                             // );
                             continue;
                         }
-                    ) catch {
+                    )) {
                         // println(
                         //     "found event but name slices weren't equal: {s} != {s}", 
                         //     .{ name, event.name orelse unreachable }
                         // );
                         continue;
-                    };
+                    }
                 }
                 if (expected_dir) |dir| {
-                    std.testing.expectEqualSlices(
-                        u8, 
-                        dir, 
+                    const event_dir = std.fs.path.basename(
                         event.dir orelse {
                             // println(
                             //     "found event but dir was null: {s} != null", 
@@ -953,13 +1026,18 @@ const TestFanotify = struct {
                             // );
                             continue;
                         }
-                    ) catch {
+                    );
+                    if (!std.mem.eql(
+                        u8, 
+                        dir, 
+                        event_dir
+                    )) {
                         // println(
                         //     "found event but dir slices weren't equal {s} != {s}", 
                         //     .{ dir, event.dir orelse unreachable }
                         // );
                         continue;
-                    };
+                    }
                 }
                 return;
             }
@@ -1004,7 +1082,7 @@ test "fanotify_create_file_nested" {
     // the other events. My suspicion is that this's a `tmpfs` quirk as I have
     // tested the machinery implemented herewithin manually on an `ext4` file 
     // and "nested" works without a hitch. Find alternatives to tmpfs
-    if (true) return error.SkipZigTest;
+    // if (true) return error.SkipZigTest;
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";

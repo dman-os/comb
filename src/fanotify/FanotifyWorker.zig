@@ -22,7 +22,6 @@ const mod_fanotify = @import("../fanotify.zig");
 const Config = mod_fanotify.Config;
 const FanotifyEvent = mod_fanotify.FanotifyEvent;
 
-
 ha7r: Allocator,
 db: *Db,
 listener: FanotifyEventListener,
@@ -41,16 +40,16 @@ pub fn init(ha7r: Allocator, db: *Db, config: Config) !@This() {
         .db = db,
         .fan_event_q = fan_event_q,
         .fs_event_q = fs_event_q,
-        .listener  = FanotifyEventListener.init(ha7r, config, fan_event_q),
+        .listener = FanotifyEventListener.init(ha7r, config, fan_event_q),
         .mapper = FanotifyEventMapper.init(ha7r, db, fan_event_q, fs_event_q),
         .worker = FsEventWorker.init(ha7r, db, fs_event_q)
     };
 }
 
-pub fn deinit(self: *@This()) void {
-    self.listener.deinit();
-    self.mapper.deinit();
-    self.worker.deinit();
+pub fn join(self: *@This()) void {
+    self.listener.join();
+    self.mapper.join();
+    self.worker.join();
     while (self.fan_event_q.getOrNull()) |node| {
         node.data.deinit(self.ha7r);
         self.ha7r.destroy(node);
@@ -84,10 +83,10 @@ const FanotifyEventListener = struct {
         };
     }
 
-    fn deinit(self: *@This()) void {
+    fn join(self: *@This()) void {
         self.die_signal.set();
         if (self.thread) |thread| {
-            thread.detach();
+            thread.join();
         }
     }
 
@@ -122,10 +121,10 @@ const FanotifyEventListener = struct {
 const FsEvent = union(enum) {
     fileCreated: FileCreated,
     fileDeleted: FileDeleted,
-    dirDeleted,
-    fileMoved,
+    dirDeleted: DirDeleted,
+    fileMoved: FileMoved,
     dirMoved,
-    fileModified,
+    fileModified: FileModified,
 
     pub const FileCreated = struct {
         timestamp: i64,
@@ -147,12 +146,41 @@ const FsEvent = union(enum) {
         }
     };
 
+    pub const DirDeleted = FileDeleted;
+
+    pub const FileMoved = struct {
+        timestamp: i64,
+        id: Db.Id,
+        old_dir: []const u8,
+        old_name: []const u8,
+        new_dir: []const u8,
+        new_name: []const u8,
+
+        fn deinit(self: *@This(), ha7r: Allocator) void {
+            ha7r.free(self.old_dir);
+            ha7r.free(self.old_name);
+            ha7r.free(self.new_dir);
+            ha7r.free(self.new_name);
+        }
+    };
+
+    pub const FileModified = FileCreated;
+
     fn deinit(self: *@This(), ha7r: Allocator) void {
         switch(self.*) {
             .fileCreated => |*event| {
                 event.deinit(ha7r);
             },
             .fileDeleted => |*event| {
+                event.deinit(ha7r);
+            },
+            .dirDeleted => |*event| {
+                event.deinit(ha7r);
+            },
+            .fileMoved => |*event| {
+                event.deinit(ha7r);
+            },
+            .fileModified => |*event| {
                 event.deinit(ha7r);
             },
             else => {}
@@ -194,10 +222,10 @@ const FanotifyEventMapper = struct {
         };
     }
 
-    fn deinit(self: *@This()) void {
+    fn join(self: *@This()) void {
         self.die_signal.set();
         if (self.thread) |thread| {
-            thread.detach();
+            thread.join();
         }
         self.querier.deinit();
         self.reader.deinit(self.db);
@@ -210,14 +238,14 @@ const FanotifyEventMapper = struct {
 
     fn threadFn(self: *@This()) !void {
         var count: usize = 0;
-        while(true) {
-            if (self.die_signal.isSet()) {
-                break;
-            }
+        while(
+            !self.die_signal.isSet()
+        ) {
             if (count > 0 and count % 1_000 == 0) {
                 std.log.info("handled {} events", .{ count });
             }
             if (self.fan_event_q.getTimed(500_000_000)) |node| {
+                if (self.die_signal.isSet()) return;
                 defer self.ha7r.destroy(node);
                 defer node.data.deinit(self.ha7r);
                 try self.handleEvent(node.data);
@@ -233,9 +261,7 @@ const FanotifyEventMapper = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
-        std.log.debug("evt: {any}", .{ event });
-        //const FAN = FAN;
-        // std.debug.todo("append");
+        defer std.log.info(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
         if(self.tryMap(event)) |opt| {
             if (opt) |fs_event| {
                 var node = try self.ha7r.create(Queue(FsEvent).Node);
@@ -281,7 +307,8 @@ const FanotifyEventMapper = struct {
             event.kind.modify
         ) {
             std.log.debug("entry modified event: {}", .{ event });
-            return null;
+            var inner = try self.tryToFileModifiedEvent(event);
+            return FsEvent { .fileModified = inner };
         } else if (
             event.kind.moved_to and event.kind.ondir
         ) {
@@ -313,6 +340,44 @@ const FanotifyEventMapper = struct {
             std.log.err("unreconized event: {any}", .{ event });
             return MapperErr.UnrecognizedEvent;
         }
+    }
+
+    fn tryToFileCreatedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileCreated {
+        const name = event.name orelse return error.NameIsNull;
+        const dir = event.dir orelse return error.DirIsNull;
+        const parent_id = (try self.idAtPath(dir)) orelse return error.ParentNotFound;
+        var full_path = try std.fs.path.join(
+            self.ha7r,
+            &.{dir, name},
+        );
+        defer self.ha7r.free(full_path);
+        const entry = mod_treewalking.entryFromAbsolutePath(full_path)
+            catch |err| return switch(err) {
+                std.os.OpenError.FileNotFound => error.NeutrinoDuringMeta,
+                else => err
+            };
+        return FsEvent.FileCreated {
+            .timestamp = event.timestamp,
+            .entry = entry.conv(
+                Db.Id, []const u8,
+                parent_id, try self.ha7r.dupe(u8, entry.name),
+            )
+        };
+    }
+
+    fn tryToFileDeletedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileDeleted {
+        _ = self;
+        const name = event.name orelse return error.NameIsNull;
+        const dir = event.dir orelse return error.DirIsNull;
+        return FsEvent.FileDeleted {
+            .timestamp = event.timestamp,
+            .name = name,
+            .dir = dir,
+        };
+    }
+
+    fn tryToFileModifiedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileModified {
+        return try self.tryToFileCreatedEvent(event);
     }
 
     fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
@@ -357,45 +422,6 @@ const FanotifyEventMapper = struct {
         _ = self;
         _ = event;
     }
-
-    fn tryToFileCreatedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileCreated {
-        const name = event.name orelse return error.NameIsNull;
-        const dir = event.dir orelse return error.DirIsNull;
-        const parent_id = (try self.idAtPath(dir)) orelse return error.ParentNotFound;
-        std.debug.assert(dir[dir.len - 1] != '/'); // FIXME: remove this
-        var full_path = try std.mem.concatWithSentinel(
-            self.ha7r,
-            u8,
-            &.{dir, "/", name},
-            0
-        );
-        defer self.ha7r.free(full_path);
-        const meta = mod_treewalking.metaNoFollow(0, &(try std.os.toPosixPath(full_path))) 
-            catch |err| return switch(err) {
-                std.os.OpenError.FileNotFound => error.NeutrinoDuringMeta,
-                else => err
-            };
-        return FsEvent.FileCreated {
-            .timestamp = event.timestamp,
-            .entry = FsEntry(Db.Id, []const u8).fromMeta(
-                try self.ha7r.dupe(u8, name),
-                parent_id,
-                std.mem.count(u8, full_path, "/"),
-                meta,
-            )
-        };
-    }
-
-    fn tryToFileDeletedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileDeleted {
-        _ = self;
-        const name = event.name orelse return error.NameIsNull;
-        const dir = event.dir orelse return error.DirIsNull;
-        return FsEvent.FileDeleted {
-            .timestamp = event.timestamp,
-            .name = name,
-            .dir = dir,
-        };
-    }
 };
 
 const FsEventWorker = struct {
@@ -415,10 +441,10 @@ const FsEventWorker = struct {
         };
     }
 
-    fn deinit(self: *@This()) void {
+    fn join(self: *@This()) void {
         self.die_signal.set();
         if (self.thread) |thread| {
-            thread.detach();
+            thread.join();
         }
         self.querier.deinit();
     }
@@ -428,10 +454,9 @@ const FsEventWorker = struct {
     }
 
     fn threadFn(self: *@This()) !void {
-        while(true) {
-            if (self.die_signal.isSet()) {
-                break;
-            }
+        while(
+            !self.die_signal.isSet()
+        ) {
             if (self.event_q.getTimed(500_000_000)) |node| {
                 defer self.ha7r.destroy(node);
                 defer node.data.deinit(self.ha7r);
@@ -447,15 +472,14 @@ const FsEventWorker = struct {
         self: *@This(), 
         fs_event: FsEvent
     ) !void {
+        defer println(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
         switch(fs_event) {
             .fileCreated => |event| {
                 try self.handleFileCreatedEvent(event);
             },
             // .fileDeleted => |*event| {
             // },
-            else => {
-                println("got event: {}",.{ fs_event });
-            }
+            else => {}
         }
     }
 
@@ -532,7 +556,7 @@ const TestFsEventWorker = struct {
         // defer mapper.deinit();
 
         var worker = FsEventWorker.init(ha7r, &db, fs_event_q);
-        defer worker.deinit();
+        defer worker.join();
         var parser = Query.Parser{};
         defer parser.deinit(ha7r);
 
@@ -570,145 +594,558 @@ test "FsEventWorker.fileCreated" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
     const ha7r = std.testing.allocator;
-    const entry_path = "/hot/in/it";
+    const target_path = "/hot/in/it";
+
+    const closures = struct {
+        const Context = TestFsEventWorker.Context;
+        fn events_fn(cx: Context) ![]FsEvent {
+            var ids = try Db.fileList2PlasticTree2Db(
+                cx.ha7r, 
+                blk: { 
+                    var parent = Db.genRandFile(
+                        std.fs.path.dirname(target_path) orelse "/"[0..]
+                    );
+                    parent.kind = .Directory;
+                    break :blk &.{ parent }; 
+                }, 
+                cx.db,
+            );
+            defer cx.ha7r.free(ids);
+
+            const parent_id = ids[0];
+
+            var entry = Db.genRandFile(target_path)
+                .conv(
+                    Db.Id, 
+                    []const u8, 
+                    parent_id, 
+                    try cx.ha7r.dupe(u8, std.fs.path.basename(target_path))
+                );
+
+            var event = FsEvent {
+                .fileCreated = FsEvent.FileCreated {
+                    .timestamp = std.time.timestamp(),
+                    .entry = entry
+                }
+            };
+            return try cx.ha7r.dupe(FsEvent, &.{ event });
+        }
+
+        fn test_fn(cx: Context, events: []const FsEvent) !void {
+            const evt_entry = events[0].fileCreated.entry;
+            var db_entry = try cx.query_one(target_path);
+
+            try std.testing.expectEqual(evt_entry, db_entry.clone(evt_entry.name));
+            const dbName = try cx.sa7r.swapIn(db_entry.name);
+            defer cx.sa7r.swapOut(db_entry.name);
+            try std.testing.expectEqualSlices(u8, evt_entry.name, dbName);
+        }
+    };
+
     try TestFsEventWorker.run(
         ha7r,
-        struct {
-            fn events_fn(cx: TestFsEventWorker.Context) ![]FsEvent {
-                var ids = try Db.fileList2Tree2Db(
-                    cx.ha7r, 
-                    blk: { 
-                        var parent = Db.genRandFile(
-                            std.fs.path.dirname(entry_path) orelse "/"[0..]
-                        );
-                        parent.kind = .Directory;
-                        break :blk &.{ parent }; 
-                    }, 
-                    cx.db,
-                );
-                defer cx.ha7r.free(ids);
-
-                const parent_id = ids[0];
-
-                var entry = Db.genRandFile(entry_path)
-                    .conv(
-                        Db.Id, 
-                        []const u8, 
-                        parent_id, 
-                        try cx.ha7r.dupe(u8, std.fs.path.basename(entry_path))
-                    );
-
-                var event = FsEvent {
-                    .fileCreated = FsEvent.FileCreated {
-                        .timestamp = std.time.timestamp(),
-                        .entry = entry
-                    }
-                };
-                return try cx.ha7r.dupe(FsEvent, &.{ event });
-            }
-        }.events_fn,
-        struct {
-            fn test_fn(
-                cx: TestFsEventWorker.Context, events: []const FsEvent
-            ) !void {
-                const evt_entry = events[0].fileCreated.entry;
-                var db_entry = try cx.query_one(entry_path);
-
-                try std.testing.expectEqual(evt_entry, db_entry.clone(evt_entry.name));
-                const dbName = try cx.sa7r.swapIn(db_entry.name);
-                defer cx.sa7r.swapOut(db_entry.name);
-                try std.testing.expectEqualSlices(u8, evt_entry.name, dbName);
-            }
-        }.test_fn,
+        closures.events_fn,
+        closures.test_fn,
     );
 }
 
-// test "FanotifyWorker.fileCreated" {
-//     if (builtin.single_threaded) return error.SkipZigTest;
-//     if (!isElevated()) return error.SkipZigTest;
-//
-//     const ha7r = std.testing.allocator_instance;
-//
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     errdefer tmp_dir.cleanup();
-//
-//     var tmpfs_path = blk: {
-//         const tmpfs_name = "tmpfs";
-//         try tmp_dir.dir.makeDir(tmpfs_name);
-//         var path = try mod_utils.fdPath(tmp_dir.dir.fd);
-//         break :blk try std.mem.concatWithSentinel(ha7r, u8, &.{path, "/", tmpfs_name}, 0);
-//     };
-//     errdefer ha7r.free(tmpfs_path);
-//
-//     try mod_fanotify.mount("tmpfs", tmpfs_path, "tmpfs", 0, 0);
-//     errdefer {
-//         const resp = std.os.linux.umount(tmpfs_path);
-//         switch (std.os.errno(resp)) {
-//             .SUCCESS => {},
-//             else => |err| {
-//                 println("err: {}", .{err});
-//                 @panic("umount failed");
-//             },
-//         }
-//     }
-//
-//     var tmpfs_dir = try tmp_dir.dir.openDir("tmpfs", .{});
-//     errdefer tmpfs_dir.close();
-//
-//     var db_path = try tmp_dir.dir.realpathAlloc(ha7r, "comb.db");
-//     defer ha7r.free(db_path);
-//     
-//     var mmap_pager = try mod_mmap.MmapPager.init(ha7r, db_path, .{});
-//     defer mmap_pager.deinit();
-//
-//     var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
-//     defer lru.deinit();
-//
-//     var pager = lru.pager();
-//
-//     var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
-//     defer ma7r.deinit();
-//
-//     var sa7r = ma7r.allocator();
-//
-//     var db = Db.init(ha7r, pager, sa7r, .{ .mark_fs_path = tmpfs_path });
-//     defer db.deinit();
-//
-//     var querier = Db.Quexecutor.init(&db);
-//     defer querier.deinit();
-//
-//     var worker = try init(ha7r, &db, .{ .mark_fs_path = tmpfs_path });
-//     defer worker.deinit();
-//
-//     // pre poll
-//     {
-//
-//     }
-//
-//     try worker.start();
-//
-//     defer {
-//         tmpfs_dir.close();
-//         var sleep_time: usize = 0;
-//         while (true) {
-//             const resp = std.os.linux.umount(tmpfs_path);
-//             switch (std.os.errno(resp)) {
-//                 .SUCCESS => break,
-//                 .BUSY => {
-//                     if (sleep_time > 1 * 1_000_000_000) {
-//                         @panic("umount way too busy");
-//                     }
-//                     const ns = 1_000_000_00;
-//                     sleep_time += ns;
-//                     std.time.sleep(ns);
-//                 },
-//                 else => |err| {
-//                     println("err: {}", .{err});
-//                     @panic("umount failed");
-//                 },
-//             }
-//         }
-//         ha7r.free(tmpfs_path);
-//         tmp_dir.cleanup();
-//     }
-// }
+test "FsEventWorker.fileDeleted" {
+    if (true) return error.SkipZigTest;
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ha7r = std.testing.allocator;
+    const target_path = "/hot/in/it";
+    const closures = struct {
+        const Context = TestFsEventWorker.Context;
+
+        fn events_fn(cx: Context) ![]FsEvent {
+            var ids = try Db.fileList2PlasticTree2Db(
+                cx.ha7r, 
+                &.{ Db.genRandFile(target_path) }, 
+                cx.db,
+            );
+            defer cx.ha7r.free(ids);
+
+            const dir = try cx.ha7r.dupe(
+                u8, std.fs.path.dirname(target_path) orelse "/"[0..]
+            );
+            const name = try cx.ha7r.dupe(u8, std.fs.path.basename(target_path)); 
+            var event = FsEvent {
+                .fileDeleted = FsEvent.FileDeleted {
+                    .timestamp = std.time.timestamp(),
+                    .dir = dir,
+                    .name = name
+                }
+            };
+            return try cx.ha7r.dupe(FsEvent, &.{ event });
+        }
+
+        fn test_fn(cx: Context, events: []const FsEvent) !void {
+            _ = events;
+            var ids = try cx.query(target_path);
+            try std.testing.expectEqual(@as(usize, 0), ids.len);
+        }
+    };
+
+    try TestFsEventWorker.run(
+        ha7r,
+        closures.events_fn,
+        closures.test_fn,
+    );
+}
+
+test "FsEventWorker.dirDeleted" {
+    if (true) return error.SkipZigTest;
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ha7r = std.testing.allocator;
+    const target_path = "/just";
+    const closures = struct {
+        const Context = TestFsEventWorker.Context;
+
+        fn events_fn(cx: Context) ![]FsEvent {
+            var ids = try Db.fileList2PlasticTree2Db(
+                cx.ha7r, 
+                &.{ 
+                    Db.genRandFile("/just/relax/"),
+                    Db.genRandFile("/please/relax/"),
+                    Db.genRandFile("/just/go/to/sleep"),
+                }, 
+                cx.db,
+            );
+            defer cx.ha7r.free(ids);
+
+            const dir = try cx.ha7r.dupe(
+                u8, std.fs.path.dirname(target_path) orelse "/"[0..]
+            );
+            const name = try cx.ha7r.dupe(u8, std.fs.path.basename(target_path)); 
+            var event = FsEvent {
+                .dirDeleted = FsEvent.FileDeleted {
+                    .timestamp = std.time.timestamp(),
+                    .dir = dir,
+                    .name = name
+                }
+            };
+            return try cx.ha7r.dupe(FsEvent, &.{ event });
+        }
+
+        fn test_fn(cx: Context, events: []const FsEvent) !void {
+            _ = events;
+            var ids = try cx.query(target_path);
+            try std.testing.expectEqual(@as(usize, 0), ids.len);
+        }
+    };
+
+    try TestFsEventWorker.run(
+        ha7r,
+        closures.events_fn,
+        closures.test_fn,
+    );
+}
+
+test "FsEventWorker.fileMoved" {
+    if (true) return error.SkipZigTest;
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ha7r = std.testing.allocator;
+    const target_path = "/doll/eyes/doll/part";
+    const new_path = "/mine/is/forever";
+    const closures = struct {
+        const Context = TestFsEventWorker.Context;
+
+        fn events_fn(cx: Context) ![]FsEvent {
+            const new_dir = try cx.ha7r.dupe(
+                u8, std.fs.path.dirname(new_path) orelse "/"[0..]
+            );
+            const new_name = try cx.ha7r.dupe(u8, std.fs.path.basename(new_path)); 
+
+            const old_dir = try cx.ha7r.dupe(
+                u8, std.fs.path.dirname(target_path) orelse "/"[0..]
+            );
+            const old_name = try cx.ha7r.dupe(u8, std.fs.path.basename(target_path)); 
+
+            var ids = try Db.fileList2PlasticTree2Db(
+                cx.ha7r, 
+                &.{ 
+                    Db.genRandFile(target_path),
+                    Db.genRandFile(new_path),
+                }, 
+                cx.db,
+            );
+            defer cx.ha7r.free(ids);
+            var event = FsEvent {
+                .fileMoved = FsEvent.FileMoved {
+                    .timestamp = std.time.timestamp(),
+                    .id = ids[0],
+                    .old_dir = old_dir,
+                    .old_name = old_name,
+                    .new_dir = new_dir,
+                    .new_name = new_name,
+                }
+            };
+            return try cx.ha7r.dupe(FsEvent, &.{ event });
+        }
+
+        fn test_fn(cx: Context, events: []const FsEvent) !void {
+            _ = events;
+            _ = cx;
+            // TODO:
+            // var ids = try cx.query(target_path);
+            // try std.testing.expectEqual(@as(usize, 0), ids.len);
+
+            // var ids = try cx.query(new_path);
+            // try std.testing.expectEqual(@as(usize, 1), ids.len);
+        }
+    };
+
+    try TestFsEventWorker.run(
+        ha7r,
+        closures.events_fn,
+        closures.test_fn,
+    );
+}
+
+const TestFanotifyWorker = struct {
+    const Context = struct {
+        ha7r: Allocator,
+        sa7r: mod_mmap.SwapAllocator,
+        db: *Db,
+        parser: *Query.Parser,
+        querier: *Db.Quexecutor,
+        reader: *Db.Reader,
+        payload: ?*anyopaque = null,
+        root_dir: *std.fs.Dir,
+
+        fn query(cx: @This(), query_str: []const u8) ![]const Db.Id {
+            var parsed_query = try cx.parser.parse(cx.ha7r, query_str);
+            defer parsed_query.deinit(cx.ha7r);
+            return try cx.querier.query(&parsed_query);
+        }
+
+        fn query_one(cx: @This(), query_str: []const u8) !*Db.Entry {
+            const ids = try cx.query(query_str);
+            if (ids.len > 1) { 
+                return error.MoreThanOneResults; 
+            }
+            if (ids.len == 0) return error.EmptyResult;
+            return try cx.reader.get(cx.db, ids[0]);
+        }
+    };
+
+    const Listener2MapperFly = struct {
+        ha7r: Allocator,
+        listener_q: *Queue(FanotifyEvent),
+        mapper_q: *Queue(FanotifyEvent),
+        die_signal: std.Thread.ResetEvent = .{},
+        seen_event_count: usize = 0,
+        canary_detected: std.Thread.ResetEvent = .{},
+
+        fn threadFn(self: *@This()) !void {
+            // println("fly 1 online", .{ });
+            while(
+                !self.die_signal.isSet()
+            ) {
+                if (self.listener_q.getTimed(500_000)) |node| {
+                    // println("fly 1 got event: {}", .{ node.data });
+                    // Don't forward any events until the canary's detected
+                    if (!self.canary_detected.isSet()) {
+                        defer self.ha7r.destroy(node);
+                        defer node.data.deinit(self.ha7r);
+                        
+                        // if it's the canary file, set the signal
+                        if (node.data.name) |name| {
+                            if (std.mem.eql(u8, name, canary_file_name)) {
+                                println("setting canary", .{ });
+                                self.canary_detected.set();
+                            }
+                        }
+                    } else {
+                        // if it's the canary file coming through again
+                        if (node.data.name) |name| {
+                            if (std.mem.eql(u8, name, canary_file_name)) {
+                                defer self.ha7r.destroy(node);
+                                defer node.data.deinit(self.ha7r);
+                                continue;
+                            }
+                        }
+                        self.mapper_q.put(node);
+                        _ = @atomicRmw(
+                            usize, &self.seen_event_count, .Add, 1, .SeqCst,
+                        );
+                    }
+                } else |_| {
+                    // _ = err;
+                    std.Thread.yield() catch @panic("ThreadYieldErr");
+                }
+            }
+        }
+    };
+
+    const canary_file_name = "canary";
+    const canary_path = "canary/" ++ canary_file_name;
+
+    const Mapper2WorkerFly = struct {
+        ha7r: Allocator,
+        mapper_q: *Queue(FsEvent),
+        worker_q: *Queue(FsEvent),
+        die_signal: std.Thread.ResetEvent = .{},
+        seen_event_count: usize = 0,
+
+        fn threadFn(self: *@This()) !void {
+            // println("fly 2 online", .{ });
+            while(
+                !self.die_signal.isSet()
+            ) {
+                if (self.mapper_q.getTimed(500_000)) |node| {
+                    // println("fly 2 got event: {}", .{ node.data });
+                    // defer self.ha7r.destroy(node);
+                    // defer node.data.deinit(self.ha7r);
+                    self.worker_q.put(node);
+                    _ = @atomicRmw(
+                        usize, &self.seen_event_count, .Add, 1, .SeqCst,
+                    );
+                } else |_| {
+                    // _ = err;
+                    std.Thread.yield() catch @panic("ThreadYieldErr");
+                }
+            }
+        }
+    };
+
+
+    const PrePollFn = *const fn (cx: *Context) anyerror!void;
+    /// Return the number of expected events
+    const TouchFn = *const fn (cx: *Context) anyerror!usize;
+    const TestFn = *const fn (cx: Context) anyerror!void;
+
+    fn run(
+        ha7r: Allocator,
+        pre_poll_fn: PrePollFn,
+        touch_fn: TouchFn,
+        test_fn: TestFn,
+    ) !void {
+        // init the `TmpDir` and `tmpfs`
+        
+        var tmp_dir = std.testing.tmpDir(.{});
+        defer tmp_dir.cleanup();
+
+        var tmpfs_path = blk: {
+            const tmpfs_name = "tmpfs";
+            try tmp_dir.dir.makeDir(tmpfs_name);
+            var path = try mod_utils.fdPath(tmp_dir.dir.fd);
+            break :blk try std.mem.concatWithSentinel(ha7r, u8, &.{path, "/", tmpfs_name}, 0);
+        };
+        defer ha7r.free(tmpfs_path);
+
+        try mod_fanotify.mount("tmpfs", tmpfs_path, "tmpfs", 0, 0);
+        defer {
+            const resp = std.os.linux.umount(tmpfs_path);
+            switch (std.os.errno(resp)) {
+                .SUCCESS => {},
+                else => |err| {
+                    println("err: {}", .{err});
+                    @panic("umount failed");
+                },
+            }
+        }
+
+        var tmpfs_dir = try tmp_dir.dir.openDir("tmpfs", .{});
+        defer tmpfs_dir.close();
+
+        // init the swap allocator and pager
+        
+        var db_path = try std.fs.path.join(
+            ha7r, &.{ try mod_utils.fdPath(tmp_dir.dir.fd), "comb.db" }
+        );
+        defer ha7r.free(db_path);
+
+        // init the SwapAllocator and Pager
+        
+        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, db_path, .{});
+        defer mmap_pager.deinit();
+        var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
+        defer lru.deinit();
+        var pager = lru.pager();
+
+        var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
+        defer ma7r.deinit();
+        var sa7r = ma7r.allocator();
+
+        // init the db and the associated types
+
+        var db = Db.init(ha7r, pager, sa7r, .{ });
+        defer db.deinit();
+        var parser = Query.Parser{};
+        defer parser.deinit(ha7r);
+        var querier = Db.Quexecutor.init(&db);
+        defer querier.deinit();
+        var reader = db.reader();
+        defer reader.deinit(&db);
+
+        // init the channels
+
+        var fan_event_q_listener = try ha7r.create(Queue(FanotifyEvent));
+        fan_event_q_listener.* = Queue(FanotifyEvent).init();
+        defer ha7r.destroy(fan_event_q_listener);
+
+        var fan_event_q_mapper = try ha7r.create(Queue(FanotifyEvent));
+        fan_event_q_mapper.* = Queue(FanotifyEvent).init();
+        defer ha7r.destroy(fan_event_q_mapper);
+
+        var fs_event_q_mapper = try ha7r.create(Queue(FsEvent));
+        fs_event_q_mapper.* = Queue(FsEvent).init();
+        defer ha7r.destroy(fs_event_q_mapper);
+
+        var fs_event_q_worker = try ha7r.create(Queue(FsEvent));
+        fs_event_q_worker.* = Queue(FsEvent).init();
+        defer ha7r.destroy(fs_event_q_worker);
+
+        // init the workers
+        var listener = FanotifyEventListener.init(
+            ha7r, .{ 
+                // listen on the `tmpfs`
+                .mark_fs_path = tmpfs_path, 
+                // make quit poll leave early so that it gets kill signals asap
+                .poll_timeout = 0 
+            }, 
+            fan_event_q_listener
+        );
+        defer listener.join();
+
+        var fly_1 = Listener2MapperFly {
+            .ha7r = ha7r,
+            .listener_q = fan_event_q_listener,
+            .mapper_q = fan_event_q_mapper,
+        };
+
+        var mapper = FanotifyEventMapper.init(
+            ha7r, &db, fan_event_q_mapper, fs_event_q_mapper
+        );
+        defer mapper.join();
+
+        var fly_2 = Mapper2WorkerFly  {
+            .ha7r = ha7r,
+            .mapper_q = fs_event_q_mapper,
+            .worker_q = fs_event_q_worker,
+        };
+
+        var worker = FsEventWorker.init(ha7r, &db, fs_event_q_worker);
+        defer worker.join();
+
+        var cx = Context {
+            .ha7r = ha7r,
+            .sa7r = sa7r,
+            .db = &db, 
+            .parser = &parser,
+            .querier = &querier,
+            .reader = &reader,
+            .root_dir = &tmpfs_dir
+        };
+
+        try pre_poll_fn(&cx);
+        // _ = pre_poll_fn;
+
+        try worker.start();
+        var fly_2_thread = try std.Thread.spawn(
+            .{}, 
+            Mapper2WorkerFly.threadFn, 
+            .{ &fly_2 }
+        );
+        defer fly_2_thread.join();
+        defer fly_2.die_signal.set();
+        try mapper.start();
+        var fly_1_thread = try std.Thread.spawn(
+            .{}, 
+            Listener2MapperFly.threadFn, 
+            .{ &fly_1 }
+        );
+        defer fly_1_thread.join();
+        defer fly_1.die_signal.set();
+        try listener.start();
+
+        // wait for canary
+        // if canary is detected, we can be sure that listener is online
+        // and ready for our touches
+        var timer = try std.time.Timer.start();
+        while(true) {
+            try tmpfs_dir.writeFile(canary_file_name, "MAGIC NUMBER");
+            if (timer.read() > 3 * 1_000_000_000) {
+                @panic("timeout waiting for canary");
+            }
+            fly_1.canary_detected.timedWait(500_000) catch continue;
+            break;
+        }
+
+        var expected_events_count = try touch_fn(&cx);
+        // _ = touch_fn;
+        // var expected_events_count: usize = 1;
+
+        timer.reset();
+        while (
+            @atomicLoad(usize, &fly_2.seen_event_count, .SeqCst)
+            < 
+            expected_events_count
+        ) {
+            std.Thread.yield() catch @panic("ThreadYieldErr");
+            if (timer.read() > 3 * 1_000_000_000) {
+                println("got {} events at timeout", .{fly_2.seen_event_count});
+                @panic("timeout waiting for events");
+            }
+        }
+
+        // _ = test_fn;
+        try test_fn(cx);
+    }
+};
+
+test "FanotifyWorker.fileCreated" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (!isElevated()) return error.SkipZigTest;
+
+    const ha7r = std.testing.allocator;
+
+
+    const parent_dir = "takethemoney";
+    const file_name = "you_fool";
+    const target_path = parent_dir ++ "/" ++ file_name;
+    // const file_name = "money";
+    // const target_path = file_name;
+
+    const actions = struct {
+        const Context = TestFanotifyWorker.Context;
+
+        fn pre_poll(cx: *Context) anyerror!void {
+            try cx.root_dir.makeDir(parent_dir);
+            var parent_abs_path = try cx.root_dir.realpathAlloc(cx.ha7r, parent_dir);
+            defer cx.ha7r.free(parent_abs_path);
+            var parent_entry = try mod_treewalking.entryFromAbsolutePath(parent_abs_path);
+            var ids = try Db.fileList2PlasticTree2Db(
+                cx.ha7r, 
+                &.{ parent_entry }, 
+                cx.db
+            );
+            defer cx.ha7r.free(ids);
+        }
+
+        fn touch(cx: *Context) anyerror!usize {
+            var file = try cx.root_dir.createFile(target_path, .{});
+            defer file.close();
+            return 1;
+        }
+
+        fn expect(cx: Context) anyerror!void {
+            var db_entry = try cx.query_one(file_name);
+            // var db_entry = try cx.query_one(target_path);
+            // // try std.testing.expectEqual(evt_entry, db_entry.clone(evt_entry.name));
+            const dbName = try cx.sa7r.swapIn(db_entry.name);
+            defer cx.sa7r.swapOut(db_entry.name);
+            try std.testing.expectEqualSlices(u8, file_name, dbName);
+        }
+    };
+    try TestFanotifyWorker.run(
+        ha7r,
+        actions.pre_poll,
+        actions.touch,
+        actions.expect,
+    );
+}

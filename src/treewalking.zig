@@ -94,6 +94,104 @@ pub fn FsEntry(comptime P: type, comptime N: type) type {
     };
 }
 
+/// Name and parent will be basename and dirname slices of the path.
+/// Use [`conv`] with conjuction [`Allocator.dupe`] to make make them owned.
+pub fn entryFromAbsolutePath(path: []const u8) !FsEntry([]const u8, []const u8) {
+    const name = std.fs.path.basename(path);
+    const parent = std.fs.path.dirname(path) orelse name;
+
+    const posix_path = try std.os.toPosixPath(path);
+    var meta = try metaNoFollow(std.os.AT.FDCWD, &posix_path);
+    var statx = meta.statx;
+
+    return FsEntry([]const u8, []const u8) {
+        .name = name,
+        .kind = kindFromMode(statx.mode),
+        .depth = std.mem.count(u8, path, "/"),
+        .parent = parent,
+        .size = statx.size,
+        .inode = statx.ino,
+        .dev = makedev(statx),
+        .mode = statx.mode,
+        .uid = statx.uid,
+        .gid = statx.gid,
+        .ctime = statx.ctime.tv_sec,
+        .atime = statx.atime.tv_sec,
+        .mtime = statx.mtime.tv_sec,
+    };
+}
+
+const ReadMetaError = error {
+    UnsupportedSyscall
+};
+
+/// Name has to be sentinel terminated, I think.
+/// Modified from zig std lib
+/// `dir_handle` will be ignored if `path_name` is an absolute path
+pub fn metaNoFollow(dir_handle: std.os.fd_t, path_name: [*]const u8) !std.fs.File.MetadataLinux {
+    const os = std.os;
+    var stx = std.mem.zeroes(os.linux.Statx);
+    const rcx = os.linux.statx(
+        dir_handle, 
+        path_name,
+        os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, 
+        os.linux.STATX_BASIC_STATS | 
+        os.linux.STATX_BTIME, 
+        &stx
+    );
+
+    switch (os.errno(rcx)) {
+        .SUCCESS => {},
+        .ACCES => return os.OpenError.AccessDenied,
+        .BADF => unreachable,
+        .FAULT => unreachable,
+        .INVAL => unreachable,
+        .LOOP => unreachable,
+        .NOENT => return os.OpenError.FileNotFound,
+        .NAMETOOLONG => return os.OpenError.NameTooLong,
+        .NOTDIR => return os.OpenError.NotDir,
+        // NOSYS happens when `statx` is unsupported, which is the case on kernel versions before 4.11
+        // Here, we call `fstat` and fill `stx` with the data we need
+        .NOSYS => {
+            @panic("statx not spported in kernel");
+            // return ReadMetaError.UnsupportedSyscall;
+        },
+        .NOMEM => return os.OpenError.SystemResources,
+        else => |err| return os.unexpectedErrno(err),
+    }
+    return std.fs.File.MetadataLinux {
+        .statx = stx,
+    };
+}
+
+/// Lifted this from rust libc binidings
+pub fn makedev(statx: std.os.linux.Statx) u64 {
+    // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
+    const major = @as(u64, statx.dev_major);
+    const minor = @as(u64, statx.dev_minor);
+    var dev: u64 = 0;
+    dev |= (major & 0x00000fff) << 8;
+    dev |= (major & 0xfffff000) << 32;
+    dev |= (minor & 0x000000ff) << 0;
+    dev |= (minor & 0xffffff00) << 12;
+    return dev;
+}
+
+fn kindFromMode(mode: std.os.mode_t) std.fs.File.Kind {
+    const S = std.os.linux.S;
+    const Kind = std.fs.File.Kind;
+    return switch (mode & S.IFMT) {
+        S.IFREG => Kind.File,
+        S.IFDIR => Kind.Directory,
+        S.IFLNK => Kind.SymLink,
+        S.IFSOCK => Kind.UnixDomainSocket,
+        S.IFCHR => Kind.CharacterDevice,
+        S.IFBLK => Kind.BlockDevice,
+        S.IFIFO => Kind.NamedPipe,
+        else => Kind.Unknown
+    };
+}
+
 /// As a convention, the root of the tree's at index 0 and has itself set as
 /// a parent.
 pub const Tree = struct {
@@ -343,77 +441,6 @@ pub const Tree = struct {
         try std.testing.expectEqual(size, tree.list.items.len);
     }
 };
-
-const ReadMetaError = error {
-    UnsupportedSyscall
-};
-
-/// Name has to be sentinel terminated, I think.
-/// Modified from zig std lib
-/// `dir_handle` will be ignored if `path_name` is an absolute path
-pub fn metaNoFollow(dir_handle: std.os.fd_t, path_name: [*]const u8) !std.fs.File.MetadataLinux {
-    const os = std.os;
-    var stx = std.mem.zeroes(os.linux.Statx);
-    const rcx = os.linux.statx(
-        dir_handle, 
-        path_name,
-        os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, 
-        os.linux.STATX_BASIC_STATS | 
-        os.linux.STATX_BTIME, 
-        &stx
-    );
-
-    switch (os.errno(rcx)) {
-        .SUCCESS => {},
-        .ACCES => return os.OpenError.AccessDenied,
-        .BADF => unreachable,
-        .FAULT => unreachable,
-        .INVAL => unreachable,
-        .LOOP => unreachable,
-        .NOENT => return os.OpenError.FileNotFound,
-        .NAMETOOLONG => return os.OpenError.NameTooLong,
-        .NOTDIR => return os.OpenError.NotDir,
-        // NOSYS happens when `statx` is unsupported, which is the case on kernel versions before 4.11
-        // Here, we call `fstat` and fill `stx` with the data we need
-        .NOSYS => {
-            @panic("statx not spported in kernel");
-            // return ReadMetaError.UnsupportedSyscall;
-        },
-        .NOMEM => return os.OpenError.SystemResources,
-        else => |err| return os.unexpectedErrno(err),
-    }
-    return std.fs.File.MetadataLinux {
-        .statx = stx,
-    };
-}
-
-/// Lifted this from rust libc binidings
-pub fn makedev(statx: std.os.linux.Statx) u64 {
-    // return (@as(u64, statx.dev_major) << 32 ) & @as(u64, statx.dev_minor);
-    const major = @as(u64, statx.dev_major);
-    const minor = @as(u64, statx.dev_minor);
-    var dev: u64 = 0;
-    dev |= (major & 0x00000fff) << 8;
-    dev |= (major & 0xfffff000) << 32;
-    dev |= (minor & 0x000000ff) << 0;
-    dev |= (minor & 0xffffff00) << 12;
-    return dev;
-}
-
-fn kindFromMode(mode: std.os.mode_t) std.fs.File.Kind {
-    const S = std.os.linux.S;
-    const Kind = std.fs.File.Kind;
-    return switch (mode & S.IFMT) {
-        S.IFREG => Kind.File,
-        S.IFDIR => Kind.Directory,
-        S.IFLNK => Kind.SymLink,
-        S.IFSOCK => Kind.UnixDomainSocket,
-        S.IFCHR => Kind.CharacterDevice,
-        S.IFBLK => Kind.BlockDevice,
-        S.IFIFO => Kind.NamedPipe,
-        else => Kind.Unknown
-    };
-}
 
 pub const PlasticTree = struct {
     const Self = @This();

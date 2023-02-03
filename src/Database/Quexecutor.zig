@@ -342,6 +342,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
 }
 
 pub fn query(self: *@This(), input: *const Query) ![]const Id {
+    // println("querying: query={}", .{ input });
     if (input.filter) |filter| {
         defer self.plan.clear();
         try self.plan.build(self.db.ha7r, &filter.root);

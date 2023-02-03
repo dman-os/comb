@@ -163,3 +163,122 @@ Concerns include:
 - IPC
 - Query execution
 - Fs events
+
+#### `tmpfs`
+
+After a bit of tinkering, I've written an e2e suite for the fanotify pipeline. 
+Making modifications to the filesystem on one end and querying the database on the other to see if the expected changes are reflected.
+In order to make it managable, the suite and all previous fanotify tests make use of `tmpfs` mounts.
+Unfortunately, the fanotify implementation seems to be lacking for `tmpfs` when using `REPORT_FID` and it doesn't give me the containing directory name making nested events in the mount...unparsable...umm... rubber fucking duck! (FIXME: next time, write the rubber duck relization when you have one.)
+
+---
+
+After spending hours trying to make sense of the contents of kernel `bugzilla` and `lore` and finding no reported issues on `tmpfs`, I decided to go read `fanotify` manual pages again.
+It turns out, I'm parsing things wrong. 
+To be more specific, it's possible that multiple `fanotify_event_info_fid` might be attached to a single fanotify event but my code just reads one.
+Could be that's where we'll find the missing information...let's investigate.
+
+---
+
+There are indeed multiple fid records being sent. 
+Two in the problematic cases which lines up with what the docs read. 
+Unfortunately, the record I was ignoring only carries a stale file handle.
+Which is not useful, not usefall at all.
+
+---
+
+Hold up for a fucking minute?
+The MAN pages are new! 
+I started to notice a bunch of information that I know for a fact wasn't in here before and looking at the change date, it's indeed from December of 2022.
+This is good news. I wonder if the notice about multiple records was in the previous verision.
+
+---
+
+OMG, I think I found the bug.
+The `open_by_handle_at` command takes the file descriptor of the mount we're accessing as the first paramter.
+I've been giving it the handle to current working directory which resolves to the mount the current directory is on which is not the same damn mount as the `tmpfs` mounts.
+Let's see if giving it the appropriate handle helps.
+
+Edit: This was revealed through close rescrutiny of the example given in the man page.
+
+---
+
+It indeed did help. 
+Took a while though.
+`open_by_handle_at` kept throwing `EBADF`(`BadFileDescriptor`) when I used the fd I used from a `Dir` open on the mount using `std.os.fs.cwd().openDir`.
+I had to use `std.os.open` directly with the `O.RDONLY` permission for it to work.
+
+---
+
+Spent the whole fucking night trying to hunt down a seg fault...incase want to know. (still to find it). You know what, this warrants a devlog entry.
+
+
+### Thread  Cleanup
+
+Within the codebase exists many instances of such code that serve as entry points for threads:
+
+```ziglang
+fn threadFn(self: *@This()) !void {
+    while (true) {
+        // wait for events on a channel. Not all such thread constructs use channels but most do 
+        // these cases are relevant to demonstrate the...problem.
+        var event = self.channel.get();
+        // ... do something with event (hopefully cleanup)
+        try self.handleEvent(event);
+    }
+}
+ ```
+
+We don't want to the thread to go on forever so we usually add a way to signal it to finish. 
+In Rust, one could use the closing on the channel to signal this but our implementation isn't so sophisticated.
+This means that we'll have to add timeouts to the `get` to make sure we don't wait in there forever and miss the death signal.
+
+```ziglang
+fn threadFn(self: *@This()) !void {
+    // wait for signal to finish. Usually makes use of `Thread.ResetEvent` to atomically coordinate 
+    // signal which uses futexes within.
+    while(
+        !self.die_signal.isSet()
+    ) {
+        if (self.event_q.getTimed(500_000_000)) |event| {
+            if (self.die_signal.isSet()) return;
+            try self.handleEvent(event);
+        }
+    }
+}
+ ```
+
+The channel isn't sophisticated enough to signal when there are no more possible senders 
+
+```ziglang
+fn threadFn(self: *@This()) !void {
+    while(
+        !self.die_signal.isSet()
+    ) {
+        var event = self.channel.get();
+        try self.handleEvent(event);
+    }
+}
+ ```
+
+```ziglang
+fn threadFn(self: *@This()) !void {
+    defer self.ha7r.destroy(self);
+    // wait for signal to finish. Usually makes use of `Thread.ResetEvent` to atomically coordinate 
+    // signal which uses futexes within.
+    while(
+        !self.die_signal.isSet()
+    ) {
+        // wait for events on a channel. Not all such thread constructs use channels but most do 
+        // these cases are relevant to demonstrate the...problem.
+        if (self.event_q.getTimed(500_000_000)) |event| {
+            if (self.die_signal.isSet()) return;
+            // ... do something with event (hopefully cleanup)
+            try self.handleEvent(event);
+        } else |_| {
+            // if we don't have an
+            std.Thread.yield() catch @panic("ThreadYieldErr");
+        }
+    }
+}
+ ```
