@@ -724,6 +724,9 @@ test "MmapPager.usage" {
         {
             const slice = try pager.swapInBlock(block_id);
             defer pager.swapOutBlock(block_id);
+            // FIXME: this failed on my machine with the following:
+            //    slices differ. first difference occurs at index 36968 (0x9068)
+            // though I was unable to recreate it. Cosmic rays?
             try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&nums), slice);
         }
     }

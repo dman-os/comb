@@ -110,6 +110,7 @@ const FanotifyEventListener = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
+        defer std.log.debug(@typeName(FanotifyEventListener) ++ " detected event: {any}", .{ event });
         var node = try self.ha7r.create(Queue(FanotifyEvent).Node);
         node.* = Queue(FanotifyEvent).Node {
             .data = event,
@@ -261,7 +262,7 @@ const FanotifyEventMapper = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
-        defer std.log.info(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
+        defer std.log.debug(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
         if(self.tryMap(event)) |opt| {
             if (opt) |fs_event| {
                 var node = try self.ha7r.create(Queue(FsEvent).Node);
@@ -472,7 +473,7 @@ const FsEventWorker = struct {
         self: *@This(), 
         fs_event: FsEvent
     ) !void {
-        defer println(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
+        defer std.log.debug(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
         switch(fs_event) {
             .fileCreated => |event| {
                 try self.handleFileCreatedEvent(event);
@@ -855,7 +856,6 @@ const TestFanotifyWorker = struct {
                         // if it's the canary file, set the signal
                         if (node.data.name) |name| {
                             if (std.mem.eql(u8, name, canary_file_name)) {
-                                println("setting canary", .{ });
                                 self.canary_detected.set();
                             }
                         }
@@ -883,34 +883,6 @@ const TestFanotifyWorker = struct {
 
     const canary_file_name = "canary";
     const canary_path = "canary/" ++ canary_file_name;
-
-    const Mapper2WorkerFly = struct {
-        ha7r: Allocator,
-        mapper_q: *Queue(FsEvent),
-        worker_q: *Queue(FsEvent),
-        die_signal: std.Thread.ResetEvent = .{},
-        seen_event_count: usize = 0,
-
-        fn threadFn(self: *@This()) !void {
-            // println("fly 2 online", .{ });
-            while(
-                !self.die_signal.isSet()
-            ) {
-                if (self.mapper_q.getTimed(500_000)) |node| {
-                    // println("fly 2 got event: {}", .{ node.data });
-                    // defer self.ha7r.destroy(node);
-                    // defer node.data.deinit(self.ha7r);
-                    self.worker_q.put(node);
-                    _ = @atomicRmw(
-                        usize, &self.seen_event_count, .Add, 1, .SeqCst,
-                    );
-                } else |_| {
-                    // _ = err;
-                    std.Thread.yield() catch @panic("ThreadYieldErr");
-                }
-            }
-        }
-    };
 
 
     const PrePollFn = *const fn (cx: *Context) anyerror!void;
@@ -987,18 +959,38 @@ const TestFanotifyWorker = struct {
         var fan_event_q_listener = try ha7r.create(Queue(FanotifyEvent));
         fan_event_q_listener.* = Queue(FanotifyEvent).init();
         defer ha7r.destroy(fan_event_q_listener);
+        defer while (fan_event_q_listener.getOrNull()) |node| {
+            node.data.deinit(ha7r);
+            ha7r.destroy(node);
+            println("found FanotifyEvent in fan_event_q_listener at defer", .{});
+        };
 
         var fan_event_q_mapper = try ha7r.create(Queue(FanotifyEvent));
         fan_event_q_mapper.* = Queue(FanotifyEvent).init();
         defer ha7r.destroy(fan_event_q_mapper);
+        defer while (fan_event_q_mapper.getOrNull()) |node| {
+            node.data.deinit(ha7r);
+            ha7r.destroy(node);
+            println("found FanotifyEvent in fan_event_q_mapper at defer", .{});
+        };
 
         var fs_event_q_mapper = try ha7r.create(Queue(FsEvent));
         fs_event_q_mapper.* = Queue(FsEvent).init();
         defer ha7r.destroy(fs_event_q_mapper);
+        defer while (fs_event_q_mapper.getOrNull()) |node| {
+            node.data.deinit(ha7r);
+            ha7r.destroy(node);
+            println("found FsEvent in fs_event_q_mapper at defer", .{});
+        };
 
         var fs_event_q_worker = try ha7r.create(Queue(FsEvent));
         fs_event_q_worker.* = Queue(FsEvent).init();
         defer ha7r.destroy(fs_event_q_worker);
+        defer while (fs_event_q_worker.getOrNull()) |node| {
+            node.data.deinit(ha7r);
+            ha7r.destroy(node);
+            println("found FsEvent in fs_event_q_worker at defer", .{});
+        };
 
         // init the workers
         var listener = FanotifyEventListener.init(
@@ -1012,6 +1004,10 @@ const TestFanotifyWorker = struct {
         );
         defer listener.join();
 
+        // fly_1 is responsible for:
+        // - detecting the canary event signifying the fanotify listener is up
+        //   and polling before continuing with the `touch_fn`
+        // - filtering out canary events so that they don't reach the mapper
         var fly_1 = Listener2MapperFly {
             .ha7r = ha7r,
             .listener_q = fan_event_q_listener,
@@ -1023,14 +1019,9 @@ const TestFanotifyWorker = struct {
         );
         defer mapper.join();
 
-        var fly_2 = Mapper2WorkerFly  {
-            .ha7r = ha7r,
-            .mapper_q = fs_event_q_mapper,
-            .worker_q = fs_event_q_worker,
-        };
-
         var worker = FsEventWorker.init(ha7r, &db, fs_event_q_worker);
-        defer worker.join();
+        // we manually join the worker later so only `errdefer` required
+        errdefer worker.join();
 
         var cx = Context {
             .ha7r = ha7r,
@@ -1046,13 +1037,6 @@ const TestFanotifyWorker = struct {
         // _ = pre_poll_fn;
 
         try worker.start();
-        var fly_2_thread = try std.Thread.spawn(
-            .{}, 
-            Mapper2WorkerFly.threadFn, 
-            .{ &fly_2 }
-        );
-        defer fly_2_thread.join();
-        defer fly_2.die_signal.set();
         try mapper.start();
         var fly_1_thread = try std.Thread.spawn(
             .{}, 
@@ -1063,15 +1047,16 @@ const TestFanotifyWorker = struct {
         defer fly_1.die_signal.set();
         try listener.start();
 
-        // wait for canary
-        // if canary is detected, we can be sure that listener is online
-        // and ready for our touches
         var timer = try std.time.Timer.start();
+
+        // wait for canary
         while(true) {
             try tmpfs_dir.writeFile(canary_file_name, "MAGIC NUMBER");
             if (timer.read() > 3 * 1_000_000_000) {
                 @panic("timeout waiting for canary");
             }
+            // if canary is detected, we can be sure that the fanotify
+            // listener is online and ready for our touches
             fly_1.canary_detected.timedWait(500_000) catch continue;
             break;
         }
@@ -1080,18 +1065,36 @@ const TestFanotifyWorker = struct {
         // _ = touch_fn;
         // var expected_events_count: usize = 1;
 
+        // This is fly_2. It runs on the current thread though that wasn't the
+        // case at first. 
+        // It is responsible for 2 things:
+        //    - hand over events from the mapper to the worker
+        //    - count the events and only continue to the `test_fn` after the 
+        //      expected number of events have been detected
+        var seen_event_count: usize = 0;
         timer.reset();
-        while (
-            @atomicLoad(usize, &fly_2.seen_event_count, .SeqCst)
-            < 
-            expected_events_count
+        while(
+            seen_event_count < expected_events_count
         ) {
-            std.Thread.yield() catch @panic("ThreadYieldErr");
             if (timer.read() > 3 * 1_000_000_000) {
-                println("got {} events at timeout", .{fly_2.seen_event_count});
+                println("got {} events at timeout", .{ seen_event_count });
                 @panic("timeout waiting for events");
             }
+            if (fs_event_q_mapper.getTimed(500_000)) |node| {
+                // println("fly 2 got event: {}", .{ node.data });
+                // defer self.ha7r.destroy(node);
+                // defer node.data.deinit(self.ha7r);
+                fs_event_q_worker.put(node);
+                seen_event_count += 1;
+            } else |_| {
+                // _ = err;
+                std.Thread.yield() catch @panic("ThreadYieldErr");
+            }
         }
+
+        // important: wait for worker to bo done handling the events before we
+        // test
+        worker.join();
 
         // _ = test_fn;
         try test_fn(cx);
