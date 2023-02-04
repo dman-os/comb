@@ -129,9 +129,10 @@ const FsEvent = union(enum) {
 
     pub const FileCreated = struct {
         timestamp: i64,
-        entry: FsEntry(Db.Id, []const u8),
+        entry: FsEntry([]const u8, []const u8),
 
         fn deinit(self: *@This(), ha7r: Allocator) void {
+            ha7r.free(self.entry.parent);
             ha7r.free(self.entry.name);
         }
     };
@@ -199,14 +200,12 @@ const FanotifyEventMapper = struct {
     };
 
     ha7r: Allocator,
-    thread: ?std.Thread = null,
     db: *Db,
     querier: Db.Quexecutor,
-    reader: Db.Reader = .{},
-    weaver: Db.FullPathWeaver = .{},
     fan_event_q: *Queue(FanotifyEvent),
     fs_event_q: *Queue(FsEvent),
     die_signal: std.Thread.ResetEvent = .{},
+    thread: ?std.Thread = null,
 
     fn init(
         ha7r: Allocator, 
@@ -229,8 +228,6 @@ const FanotifyEventMapper = struct {
             thread.join();
         }
         self.querier.deinit();
-        self.reader.deinit(self.db);
-        self.weaver.deinit(self.ha7r);
     }
 
     fn start(self: *@This()) !void {
@@ -346,77 +343,32 @@ const FanotifyEventMapper = struct {
     fn tryToFileCreatedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileCreated {
         const name = event.name orelse return error.NameIsNull;
         const dir = event.dir orelse return error.DirIsNull;
-        const parent_id = (try self.idAtPath(dir)) orelse return error.ParentNotFound;
-        var full_path = try std.fs.path.join(
-            self.ha7r,
-            &.{dir, name},
-        );
-        defer self.ha7r.free(full_path);
-        const entry = mod_treewalking.entryFromAbsolutePath(full_path)
-            catch |err| return switch(err) {
+        const entry = 
+            mod_treewalking.entryFromAbsolutePath2(
+                try self.ha7r.dupe(u8, dir), 
+                try self.ha7r.dupe(u8, name)
+            ) catch |err| return switch(err) {
                 std.os.OpenError.FileNotFound => error.NeutrinoDuringMeta,
                 else => err
             };
         return FsEvent.FileCreated {
             .timestamp = event.timestamp,
-            .entry = entry.conv(
-                Db.Id, []const u8,
-                parent_id, try self.ha7r.dupe(u8, entry.name),
-            )
+            .entry = entry
         };
     }
 
     fn tryToFileDeletedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileDeleted {
-        _ = self;
         const name = event.name orelse return error.NameIsNull;
         const dir = event.dir orelse return error.DirIsNull;
         return FsEvent.FileDeleted {
             .timestamp = event.timestamp,
-            .name = name,
-            .dir = dir,
+            .name = try self.ha7r.dupe(u8, name),
+            .dir = try self.ha7r.dupe(u8, dir),
         };
     }
 
     fn tryToFileModifiedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileModified {
         return try self.tryToFileCreatedEvent(event);
-    }
-
-    fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
-        var parser = Query.Parser{};
-        defer parser.deinit(self.ha7r);
-        var query = parser.parse(self.ha7r, path) catch @panic("error parsing path to query");
-        defer query.deinit(self.ha7r);
-        // var parents = try self.querier.query(&query);
-        var timer = std.time.Timer.start() catch @panic("timer unsupported");
-        const candidates = self.querier.query(&query) catch |err| {
-            println("error querying: {}", .{ err });
-            @panic("error querying");
-        };
-        if (candidates.len == 0) {
-            return null;
-        }
-        var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
-        if (candidates.len > 1) {
-            var arena = std.heap.ArenaAllocator.init(self.ha7r);
-            defer arena.deinit();
-            var ha7r = arena.allocator();
-            var paths = std.ArrayList([]const u8).init(ha7r);
-            for (candidates) |id| {
-                const cand_path = try self.weaver.pathOf(self.db, id, '/');
-                try paths.append(try ha7r.dupe(u8, cand_path));
-            }
-            std.log.warn(
-                \\ -- found {} possilbe candidates in {} secs 
-                \\ --    path: {s}
-                \\ --    candidates: {s}
-                ,.{ candidates.len, elapsed, path, paths.items }
-            );
-        } 
-        std.log.debug(
-            " -- found {} possilbe candidates in {} secs", 
-            .{ candidates.len, elapsed }
-        );
-        return candidates[0];
     }
 
     fn assertNeutrino(self: *@This(), event: FanotifyEvent) void {
@@ -428,9 +380,11 @@ const FanotifyEventMapper = struct {
 const FsEventWorker = struct {
     ha7r: Allocator,
     db: *Db,
-    thread: ?std.Thread = null,
     querier: Db.Quexecutor,
+    reader: Db.Reader = .{},
+    weaver: Db.FullPathWeaver = .{},
     event_q: *Queue(FsEvent),
+    thread: ?std.Thread = null,
     die_signal: std.Thread.ResetEvent = .{},
 
     fn init(ha7r: Allocator, db: *Db, que: *Queue(FsEvent)) @This() {
@@ -448,6 +402,8 @@ const FsEventWorker = struct {
             thread.join();
         }
         self.querier.deinit();
+        self.reader.deinit(self.db);
+        self.weaver.deinit(self.ha7r);
     }
 
     fn start(self: *@This()) !void {
@@ -488,323 +444,53 @@ const FsEventWorker = struct {
         self: *@This(), 
         event: FsEvent.FileCreated
     ) !void {
-        _ = try self.db.fileCreated(&event.entry);
-    }
-};
-
-const TestFsEventWorker = struct {
-    const Context = struct {
-        ha7r: Allocator,
-        sa7r: mod_mmap.SwapAllocator,
-        db: *Db,
-        parser: *Query.Parser,
-        querier: *Db.Quexecutor,
-        reader: *Db.Reader,
-        payload: ?*anyopaque = null,
-
-        fn query(cx: @This(), query_str: []const u8) ![]const Db.Id {
-            var parsed_query = try cx.parser.parse(cx.ha7r, query_str);
-            defer parsed_query.deinit(cx.ha7r);
-            return try cx.querier.query(&parsed_query);
-        }
-
-        fn query_one(cx: @This(), query_str: []const u8) !*Db.Entry {
-            const ids = try cx.query(query_str);
-            try std.testing.expectEqual(@as(usize, 1), ids.len);
-
-            return try cx.reader.get(cx.db, ids[0]);
-        }
-    };
-
-    fn run(
-        ha7r: Allocator,
-        events_fn: *const fn (cx: Context) anyerror![]FsEvent,
-        test_fn: *const fn (cx: Context, events: []const FsEvent) anyerror!void
-    ) anyerror!void {
-        var tmp_dir = std.testing.tmpDir(.{});
-        defer tmp_dir.cleanup();
-
-        // var db_path = try tmp_dir.dir.realpathAlloc(ha7r, "comb.db");
-        var db_path = try std.fs.path.join(
-            ha7r, &.{ try mod_utils.fdPath(tmp_dir.dir.fd), "comb.db" }
+        const parent_id = (try self.idAtPath(event.entry.parent)) 
+            orelse return error.ParentNotFound;
+        const entry = event.entry.conv(
+            Db.Id, []const u8,
+            parent_id, event.entry.name,
         );
-        defer ha7r.free(db_path);
-        
-        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, db_path, .{});
-        defer mmap_pager.deinit();
+        _ = try self.db.fileCreated(&entry);
+    }
 
-        var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
-        defer lru.deinit();
-
-        var pager = lru.pager();
-
-        var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
-        defer ma7r.deinit();
-
-        var sa7r = ma7r.allocator();
-
-        var db = Db.init(ha7r, pager, sa7r, .{ });
-        defer db.deinit();
-
-        // var fan_event_q = try ha7r.create(Queue(FanotifyEvent));
-        // fan_event_q.* = Queue(FanotifyEvent).init();
-        // defer ha7r.destroy(fan_event_q);
-        var fs_event_q = try ha7r.create(Queue(FsEvent));
-        fs_event_q.* = Queue(FsEvent).init();
-        defer ha7r.destroy(fs_event_q);
-
-        // var mapper = FanotifyEventMapper.init(ha7r, db, fan_event_q, fs_event_q);
-        // defer mapper.deinit();
-
-        var worker = FsEventWorker.init(ha7r, &db, fs_event_q);
-        defer worker.join();
+    fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
         var parser = Query.Parser{};
-        defer parser.deinit(ha7r);
-
-        var querier = Db.Quexecutor.init(&db);
-        defer querier.deinit();
-
-        var reader = db.reader();
-        defer reader.deinit(&db);
-
-        const cx = Context { 
-            .ha7r = ha7r,
-            .sa7r = sa7r,
-            .db = &db, 
-            .parser = &parser,
-            .querier = &querier,
-            .reader = &reader,
+        defer parser.deinit(self.ha7r);
+        var query = parser.parse(self.ha7r, path) catch @panic("error parsing path to query");
+        defer query.deinit(self.ha7r);
+        // var parents = try self.querier.query(&query);
+        var timer = std.time.Timer.start() catch @panic("timer unsupported");
+        const candidates = self.querier.query(&query) catch |err| {
+            println("error querying: {}", .{ err });
+            @panic("error querying");
         };
-        var events = try events_fn(cx);
-        defer {
-            for (events) |*event| {
-                event.deinit(ha7r);
+        if (candidates.len == 0) {
+            return null;
+        }
+        var elapsed = @intToFloat(f64,timer.read()) / @intToFloat(f64, std.time.ns_per_s);
+        if (candidates.len > 1) {
+            var arena = std.heap.ArenaAllocator.init(self.ha7r);
+            defer arena.deinit();
+            var ha7r = arena.allocator();
+            var paths = std.ArrayList([]const u8).init(ha7r);
+            for (candidates) |id| {
+                const cand_path = try self.weaver.pathOf(self.db, id, '/');
+                try paths.append(try ha7r.dupe(u8, cand_path));
             }
-            ha7r.free(events);
-        }
-
-        for (events) |event| {
-            try worker.handleEvent(event);
-        }
-
-        try test_fn(cx, events);
+            std.log.warn(
+                \\ -- found {} possilbe candidates in {} secs 
+                \\ --    path: {s}
+                \\ --    candidates: {s}
+                ,.{ candidates.len, elapsed, path, paths.items }
+            );
+        } 
+        std.log.debug(
+            " -- found {} possilbe candidates in {} secs", 
+            .{ candidates.len, elapsed }
+        );
+        return candidates[0];
     }
 };
-
-test "FsEventWorker.fileCreated" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    const ha7r = std.testing.allocator;
-    const target_path = "/hot/in/it";
-
-    const closures = struct {
-        const Context = TestFsEventWorker.Context;
-        fn events_fn(cx: Context) ![]FsEvent {
-            var ids = try Db.fileList2PlasticTree2Db(
-                cx.ha7r, 
-                blk: { 
-                    var parent = Db.genRandFile(
-                        std.fs.path.dirname(target_path) orelse "/"[0..]
-                    );
-                    parent.kind = .Directory;
-                    break :blk &.{ parent }; 
-                }, 
-                cx.db,
-            );
-            defer cx.ha7r.free(ids);
-
-            const parent_id = ids[0];
-
-            var entry = Db.genRandFile(target_path)
-                .conv(
-                    Db.Id, 
-                    []const u8, 
-                    parent_id, 
-                    try cx.ha7r.dupe(u8, std.fs.path.basename(target_path))
-                );
-
-            var event = FsEvent {
-                .fileCreated = FsEvent.FileCreated {
-                    .timestamp = std.time.timestamp(),
-                    .entry = entry
-                }
-            };
-            return try cx.ha7r.dupe(FsEvent, &.{ event });
-        }
-
-        fn test_fn(cx: Context, events: []const FsEvent) !void {
-            const evt_entry = events[0].fileCreated.entry;
-            var db_entry = try cx.query_one(target_path);
-
-            try std.testing.expectEqual(evt_entry, db_entry.clone(evt_entry.name));
-            const dbName = try cx.sa7r.swapIn(db_entry.name);
-            defer cx.sa7r.swapOut(db_entry.name);
-            try std.testing.expectEqualSlices(u8, evt_entry.name, dbName);
-        }
-    };
-
-    try TestFsEventWorker.run(
-        ha7r,
-        closures.events_fn,
-        closures.test_fn,
-    );
-}
-
-test "FsEventWorker.fileDeleted" {
-    if (true) return error.SkipZigTest;
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    const ha7r = std.testing.allocator;
-    const target_path = "/hot/in/it";
-    const closures = struct {
-        const Context = TestFsEventWorker.Context;
-
-        fn events_fn(cx: Context) ![]FsEvent {
-            var ids = try Db.fileList2PlasticTree2Db(
-                cx.ha7r, 
-                &.{ Db.genRandFile(target_path) }, 
-                cx.db,
-            );
-            defer cx.ha7r.free(ids);
-
-            const dir = try cx.ha7r.dupe(
-                u8, std.fs.path.dirname(target_path) orelse "/"[0..]
-            );
-            const name = try cx.ha7r.dupe(u8, std.fs.path.basename(target_path)); 
-            var event = FsEvent {
-                .fileDeleted = FsEvent.FileDeleted {
-                    .timestamp = std.time.timestamp(),
-                    .dir = dir,
-                    .name = name
-                }
-            };
-            return try cx.ha7r.dupe(FsEvent, &.{ event });
-        }
-
-        fn test_fn(cx: Context, events: []const FsEvent) !void {
-            _ = events;
-            var ids = try cx.query(target_path);
-            try std.testing.expectEqual(@as(usize, 0), ids.len);
-        }
-    };
-
-    try TestFsEventWorker.run(
-        ha7r,
-        closures.events_fn,
-        closures.test_fn,
-    );
-}
-
-test "FsEventWorker.dirDeleted" {
-    if (true) return error.SkipZigTest;
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    const ha7r = std.testing.allocator;
-    const target_path = "/just";
-    const closures = struct {
-        const Context = TestFsEventWorker.Context;
-
-        fn events_fn(cx: Context) ![]FsEvent {
-            var ids = try Db.fileList2PlasticTree2Db(
-                cx.ha7r, 
-                &.{ 
-                    Db.genRandFile("/just/relax/"),
-                    Db.genRandFile("/please/relax/"),
-                    Db.genRandFile("/just/go/to/sleep"),
-                }, 
-                cx.db,
-            );
-            defer cx.ha7r.free(ids);
-
-            const dir = try cx.ha7r.dupe(
-                u8, std.fs.path.dirname(target_path) orelse "/"[0..]
-            );
-            const name = try cx.ha7r.dupe(u8, std.fs.path.basename(target_path)); 
-            var event = FsEvent {
-                .dirDeleted = FsEvent.FileDeleted {
-                    .timestamp = std.time.timestamp(),
-                    .dir = dir,
-                    .name = name
-                }
-            };
-            return try cx.ha7r.dupe(FsEvent, &.{ event });
-        }
-
-        fn test_fn(cx: Context, events: []const FsEvent) !void {
-            _ = events;
-            var ids = try cx.query(target_path);
-            try std.testing.expectEqual(@as(usize, 0), ids.len);
-        }
-    };
-
-    try TestFsEventWorker.run(
-        ha7r,
-        closures.events_fn,
-        closures.test_fn,
-    );
-}
-
-test "FsEventWorker.fileMoved" {
-    if (true) return error.SkipZigTest;
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    const ha7r = std.testing.allocator;
-    const target_path = "/doll/eyes/doll/part";
-    const new_path = "/mine/is/forever";
-    const closures = struct {
-        const Context = TestFsEventWorker.Context;
-
-        fn events_fn(cx: Context) ![]FsEvent {
-            const new_dir = try cx.ha7r.dupe(
-                u8, std.fs.path.dirname(new_path) orelse "/"[0..]
-            );
-            const new_name = try cx.ha7r.dupe(u8, std.fs.path.basename(new_path)); 
-
-            const old_dir = try cx.ha7r.dupe(
-                u8, std.fs.path.dirname(target_path) orelse "/"[0..]
-            );
-            const old_name = try cx.ha7r.dupe(u8, std.fs.path.basename(target_path)); 
-
-            var ids = try Db.fileList2PlasticTree2Db(
-                cx.ha7r, 
-                &.{ 
-                    Db.genRandFile(target_path),
-                    Db.genRandFile(new_path),
-                }, 
-                cx.db,
-            );
-            defer cx.ha7r.free(ids);
-            var event = FsEvent {
-                .fileMoved = FsEvent.FileMoved {
-                    .timestamp = std.time.timestamp(),
-                    .id = ids[0],
-                    .old_dir = old_dir,
-                    .old_name = old_name,
-                    .new_dir = new_dir,
-                    .new_name = new_name,
-                }
-            };
-            return try cx.ha7r.dupe(FsEvent, &.{ event });
-        }
-
-        fn test_fn(cx: Context, events: []const FsEvent) !void {
-            _ = events;
-            _ = cx;
-            // TODO:
-            // var ids = try cx.query(target_path);
-            // try std.testing.expectEqual(@as(usize, 0), ids.len);
-
-            // var ids = try cx.query(new_path);
-            // try std.testing.expectEqual(@as(usize, 1), ids.len);
-        }
-    };
-
-    try TestFsEventWorker.run(
-        ha7r,
-        closures.events_fn,
-        closures.test_fn,
-    );
-}
 
 const TestFanotifyWorker = struct {
     const Context = struct {
@@ -1020,8 +706,9 @@ const TestFanotifyWorker = struct {
         defer mapper.join();
 
         var worker = FsEventWorker.init(ha7r, &db, fs_event_q_worker);
+        var cleanup_worker_on_err = true;
         // we manually join the worker later so only `errdefer` required
-        errdefer worker.join();
+        errdefer if (cleanup_worker_on_err) worker.join();
 
         var cx = Context {
             .ha7r = ha7r,
@@ -1095,6 +782,7 @@ const TestFanotifyWorker = struct {
         // important: wait for worker to bo done handling the events before we
         // test
         worker.join();
+        cleanup_worker_on_err = false;
 
         // _ = test_fn;
         try test_fn(cx);
@@ -1143,6 +831,55 @@ test "FanotifyWorker.fileCreated" {
             const dbName = try cx.sa7r.swapIn(db_entry.name);
             defer cx.sa7r.swapOut(db_entry.name);
             try std.testing.expectEqualSlices(u8, file_name, dbName);
+        }
+    };
+    try TestFanotifyWorker.run(
+        ha7r,
+        actions.pre_poll,
+        actions.touch,
+        actions.expect,
+    );
+}
+
+test "FanotifyWorker.fileDeleted" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (!isElevated()) return error.SkipZigTest;
+
+    const ha7r = std.testing.allocator;
+
+
+    const parent_dir = "takethemoney";
+    const file_name = "you_fool";
+    const target_path = parent_dir ++ "/" ++ file_name;
+    // const file_name = "money";
+    // const target_path = file_name;
+
+    const actions = struct {
+        const Context = TestFanotifyWorker.Context;
+
+        fn pre_poll(cx: *Context) anyerror!void {
+            try cx.root_dir.makeDir(parent_dir);
+            var file = try cx.root_dir.createFile(target_path, .{});
+            defer file.close();
+            var abs_path = try cx.root_dir.realpathAlloc(cx.ha7r, target_path);
+            defer cx.ha7r.free(abs_path);
+            var entry = try mod_treewalking.entryFromAbsolutePath(abs_path);
+            var ids = try Db.fileList2PlasticTree2Db(
+                cx.ha7r, 
+                &.{ entry }, 
+                cx.db
+            );
+            defer cx.ha7r.free(ids);
+        }
+
+        fn touch(cx: *Context) anyerror!usize {
+            try cx.root_dir.deleteFile(target_path);
+            return 1;
+        }
+
+        fn expect(cx: Context) anyerror!void {
+            var ids = try cx.query(file_name);
+            try std.testing.expectEqual(@as(usize,0), ids.len);
         }
     };
     try TestFanotifyWorker.run(

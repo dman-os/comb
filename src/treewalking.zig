@@ -121,6 +121,35 @@ pub fn entryFromAbsolutePath(path: []const u8) !FsEntry([]const u8, []const u8) 
     };
 }
 
+threadlocal var pathBuf: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+
+/// `dir` is expected to be an absolute path
+pub fn entryFromAbsolutePath2(
+    dir: []const u8, 
+    name: []const u8
+) !FsEntry([]const u8, []const u8) {
+    const path = std.fmt.bufPrint(&pathBuf, "{s}/{s}", .{ dir, name }) catch unreachable;
+    const posix_path = try std.os.toPosixPath(path);
+    var meta = try metaNoFollow(std.os.AT.FDCWD, &posix_path);
+    var statx = meta.statx;
+
+    return FsEntry([]const u8, []const u8) {
+        .name = name,
+        .kind = kindFromMode(statx.mode),
+        .depth = std.mem.count(u8, path, "/"),
+        .parent = dir,
+        .size = statx.size,
+        .inode = statx.ino,
+        .dev = makedev(statx),
+        .mode = statx.mode,
+        .uid = statx.uid,
+        .gid = statx.gid,
+        .ctime = statx.ctime.tv_sec,
+        .atime = statx.atime.tv_sec,
+        .mtime = statx.mtime.tv_sec,
+    };
+}
+
 const ReadMetaError = error {
     UnsupportedSyscall
 };

@@ -1078,11 +1078,6 @@ test "fanotify_create_file" {
 }
 
 test "fanotify_create_file_nested" {
-    // FIXME: nested create is not being detected and I reckon it's the same for
-    // the other events. My suspicion is that this's a `tmpfs` quirk as I have
-    // tested the machinery implemented herewithin manually on an `ext4` file 
-    // and "nested" works without a hitch. Find alternatives to tmpfs
-    // if (true) return error.SkipZigTest;
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
     const file_name = "wheredidyouparkthecar";
@@ -1143,6 +1138,10 @@ test "fanotify_create_dir" {
     };
 }
 
+test "fanotify_create_dir_nested" {
+    if (true) return error.SkipZigTest;
+}
+
 test "fanotify_delete_file" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1172,6 +1171,10 @@ test "fanotify_delete_file" {
     };
 }
 
+test "fanotify_create_dir_nested" {
+    if (true) return error.SkipZigTest;
+}
+
 test "fanotify_delete_dir" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1198,6 +1201,10 @@ test "fanotify_delete_dir" {
         println("{any}", .{ res.events.items });
         return err;
     };
+}
+
+test "fanotify_delete_dir_nested" {
+    if (true) return error.SkipZigTest;
 }
 
 test "fanotify_move_file" {
@@ -1230,6 +1237,10 @@ test "fanotify_move_file" {
     };
 }
 
+test "fanotify_move_file_nested" {
+    if (true) return error.SkipZigTest;
+}
+
 test "fanotify_move_dir" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1259,6 +1270,10 @@ test "fanotify_move_dir" {
     };
 }
 
+test "fanotify_move_dir_nested" {
+    if (true) return error.SkipZigTest;
+}
+
 test "fanotify_mod_file" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1286,6 +1301,10 @@ test "fanotify_mod_file" {
         println("{any}", .{ res.events.items });
         return err;
     };
+}
+
+test "fanotify_mod_file_nested" {
+    if (true) return error.SkipZigTest;
 }
 
 test "fanotify_attrib_file" {
@@ -1321,6 +1340,10 @@ test "fanotify_attrib_file" {
     };
 }
 
+test "fanotify_attrib_nested" {
+    if (true) return error.SkipZigTest;
+}
+
 test "fanotify_attrib_dir" {
     // FIXME: attrib changes on dir an unrealiable
     if (true) return error.SkipZigTest;
@@ -1353,5 +1376,9 @@ test "fanotify_attrib_dir" {
         println("{any}", .{ res.events.items });
         return err;
     };
+}
+
+test "fanotify_attrib_dir_nested" {
+    if (true) return error.SkipZigTest;
 }
 
