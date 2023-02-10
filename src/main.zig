@@ -30,9 +30,8 @@ pub const mod_fanotify = @import("fanotify.zig");
 pub const Query = @import("Query.zig");
 
 pub fn main() !void {
-    try swapping();
-    // try fanotify_demo();
-    // try mod_fanotify.demo();
+    // try swapping();
+    try mod_fanotify.demo();
 }
 
 fn swapping () !void {

@@ -110,7 +110,7 @@ const FanotifyEventListener = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
-        defer std.log.debug(@typeName(FanotifyEventListener) ++ " detected event: {any}", .{ event });
+        defer std.log.info(@typeName(FanotifyEventListener) ++ " detected event: {any}", .{ event });
         var node = try self.ha7r.create(Queue(FanotifyEvent).Node);
         node.* = Queue(FanotifyEvent).Node {
             .data = event,

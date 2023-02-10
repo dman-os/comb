@@ -5,6 +5,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
+    - [ ] Dedicated `Db.Writer` type
     - [ ] Database modification operations
       - [ ] Created
       - [ ] Updated
