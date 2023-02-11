@@ -17,6 +17,10 @@ const mod_plist = @import("plist.zig");
 
 pub const Parser = @import("Query/Parser.zig");
 
+test {
+    _ = Parser;
+}
+
 const Self = @This();
 
 limit: u64 = 25,

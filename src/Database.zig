@@ -23,6 +23,10 @@ const mod_plist = @import("plist.zig");
 
 pub const Quexecutor = @import("Database/Quexecutor.zig");
 
+test {
+    _ = Quexecutor;
+}
+
 const Self = @This();
 const Database = Self;
 
@@ -254,6 +258,7 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         }
         try kv.value_ptr.put(self.ha7r, id, {});
     }
+    // skip populating the desc of index
     if (false) {
         var id_self = id;
         var parent = entry.parent;
@@ -302,10 +307,19 @@ fn idAt(self: *Self, idx: usize) !Id {
     };
 }
 
+pub fn writer(self: *Self) Writer {
+    _ = self;
+    return Writer{};
+}
+
 pub fn reader(self: *Self) Reader {
     _ = self;
     return Reader{};
 }
+
+pub const Writer = struct {
+
+};
 
 /// Get items from the db.
 pub const Reader = struct {
@@ -537,8 +551,10 @@ pub fn fileList2PlasticTree2Db(
     var path_id_map = std.StringHashMap(Id).init(ha7r);
     defer {
         var it = path_id_map.keyIterator();
-        while(it.next()) |key| {
+        var count: usize = 0;
+        while (it.next()) |key| {
             ha7r.free(key.*);
+            count += 1;
         }
         path_id_map.deinit();
     }
@@ -590,7 +606,7 @@ pub fn fileList2PlasticTree2Db(
             //    "inserted entry: {s}/{s} at id {}", 
             //    .{ s_entry.parent, s_entry.name, entry_id }
             // );
-            try path_id_map.put(
+            try path_id_map.putNoClobber(
                 try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
                 // if (is_root)
                 //     try ha7r.dupe(u8, "/")

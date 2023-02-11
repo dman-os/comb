@@ -21,6 +21,12 @@ const mod_mmap = @import("mmap.zig");
 pub const FanotifyWorker = @import("fanotify/FanotifyWorker.zig");
 pub const FAN = @import("fanotify/FAN.zig");
 
+
+test {
+    _ = FanotifyWorker;
+    _ = FAN;
+}
+
 pub const FanotifyEvent = struct {
     const Self = @This();
     dir: ?[]u8,
@@ -945,6 +951,12 @@ const TestFanotify = struct {
         errdefer tmpfs_dir.close();
 
         var out = std.ArrayList(FanotifyEvent).init(a7r);
+        errdefer {
+            for(out.items) |*evt| {
+                evt.deinit(a7r);
+            }
+            out.deinit();
+        }
         var ctx = Context{
             .dir = tmpfs_dir,
             .path = tmpfs_path,
@@ -1006,19 +1018,17 @@ const TestFanotify = struct {
                     }
                 }
                 if (expected_dir) |dir| {
-                    const event_dir = std.fs.path.basename(
-                        event.dir orelse {
-                            // println(
-                            //     "found event but dir was null: {s} != null", 
-                            //     .{ dir }
-                            // );
-                            continue;
-                        }
-                    );
+                    const event_dir = event.dir orelse {
+                        // println(
+                        //     "found event but dir was null: {s} != null", 
+                        //     .{ dir }
+                        // );
+                        continue;
+                    };
                     if (!std.mem.eql(
                         u8, 
                         dir, 
-                        event_dir
+                        dbg(event_dir[self.tmpfs_path.len..])
                     )) {
                         // println(
                         //     "found event but dir slices weren't equal {s} != {s}", 
@@ -1091,7 +1101,7 @@ test "fanotify_create_file_nested" {
     _ = res.expectEvent(
         FAN.EVENT { .create = true }, 
         file_name, 
-        file_dir,
+        "/"++file_dir,
     ) catch |err| {
         println("{any}", .{ res.events.items });
         return err;
@@ -1126,10 +1136,6 @@ test "fanotify_create_dir" {
     };
 }
 
-test "fanotify_create_dir_nested" {
-    if (true) return error.SkipZigTest;
-}
-
 test "fanotify_delete_file" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1157,10 +1163,6 @@ test "fanotify_delete_file" {
         println("{any}", .{ res.events.items });
         return err;
     };
-}
-
-test "fanotify_create_dir_nested" {
-    if (true) return error.SkipZigTest;
 }
 
 test "fanotify_delete_dir" {
