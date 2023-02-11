@@ -351,8 +351,8 @@ pub fn query(self: *@This(), input: *const Query) ![]const Id {
         // println("plan: {any}", .{ self.plan.nodes.items, });
         var ha7r = arena.allocator();
 
-        self.db.lock.lockShared();
-        defer self.db.lock.unlockShared();
+        self.db.lock.lock();
+        defer self.db.lock.unlock();
 
         var temp_result = try self.execNode(&self.plan.nodes.items[0], ha7r);
         defer ha7r.free(temp_result);

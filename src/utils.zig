@@ -125,7 +125,7 @@ test "Appender.set" {
     }
 }
 
-threadlocal var pathBuf: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+threadlocal var pathBufFdPath: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
 /// Returns the absolute path of the given file handle. Allocate the returned
 /// slice to heap before next usage of this function on the same thread or woe be u.
 pub fn fdPath(fd: std.os.fd_t) ![]const u8 {
@@ -139,7 +139,19 @@ pub fn fdPath(fd: std.os.fd_t) ![]const u8 {
 
     var fd_buf = [_]u8{0} ** 128;
     const fd_path = std.fmt.bufPrint(&fd_buf, "/proc/self/fd/{}", .{fd}) catch unreachable;
-    return std.fs.readLinkAbsolute(fd_path, &pathBuf);
+    return std.fs.readLinkAbsolute(fd_path, &pathBufFdPath);
+}
+
+threadlocal var pathBufPathJoin: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+
+///  Allocate the returned slice to heap before next usage of this function on 
+///  the same thread or woe be u.
+pub fn pathJoin(paths: []const []const u8) []const u8 {
+    var fba7r = std.heap.FixedBufferAllocator.init(&pathBufPathJoin);
+    const full_thing = std.fs.path.join(
+        fba7r.allocator(), paths,
+    ) catch unreachable;
+    return full_thing;
 }
 
 pub fn isElevated() bool {

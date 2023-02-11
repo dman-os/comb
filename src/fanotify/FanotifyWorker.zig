@@ -381,11 +381,11 @@ const FanotifyEventMapper = struct {
     }
 };
 
+
 const FsEventWorker = struct {
     ha7r: Allocator,
     db: *Db,
     querier: Db.Quexecutor,
-    reader: Db.Reader = .{},
     weaver: Db.FullPathWeaver = .{},
     event_q: *Queue(FsEvent),
     thread: ?std.Thread = null,
@@ -406,7 +406,6 @@ const FsEventWorker = struct {
             thread.join();
         }
         self.querier.deinit();
-        self.reader.deinit(self.db);
         self.weaver.deinit(self.ha7r);
     }
 
@@ -457,12 +456,21 @@ const FsEventWorker = struct {
         _ = try self.db.fileCreated(&entry);
     }
 
+    fn handleFileDeletedEvent(
+        self: *@This(), 
+        event: FsEvent.FileDeleted
+    ) !void {
+        const full_path = mod_utils.pathJoin(&.{ event.dir, event.name });
+        const id = (try self.idAtPath(full_path)) 
+            orelse return error.FileNotFound;
+        _ = try self.db.fileDeleted(id);
+    }
+
     fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
         var parser = Query.Parser{};
         defer parser.deinit(self.ha7r);
         var query = parser.parse(self.ha7r, path) catch @panic("error parsing path to query");
         defer query.deinit(self.ha7r);
-        // var parents = try self.querier.query(&query);
         var timer = std.time.Timer.start() catch @panic("timer unsupported");
         const candidates = self.querier.query(&query) catch |err| {
             println("error querying: {}", .{ err });
@@ -503,7 +511,6 @@ const TestFanotifyWorker = struct {
         db: *Db,
         parser: *Query.Parser,
         querier: *Db.Quexecutor,
-        reader: *Db.Reader,
         weaver: *Db.FullPathWeaver,
         payload: ?*anyopaque = null,
         root_dir: *std.fs.Dir,
@@ -522,23 +529,18 @@ const TestFanotifyWorker = struct {
 
         fn queryOne(
             cx: @This(), query_str: []const u8
-        ) !std.meta.Tuple(&[_]type{ Db.Id, *Db.Entry, }) {
+        ) !std.meta.Tuple(&[_]type{ Db.Id, FsEntry(Db.Id, []const u8), }) {
             const ids = try cx.query(query_str);
             if (ids.len > 1) { 
                 return error.MoreThanOneResults; 
             }
             if (ids.len == 0) return error.EmptyResult;
-            const entry = try cx.reader.get(cx.db, ids[0]);
+            const entry = try cx.db.getAtId(ids[0]);
             return .{ ids[0], entry };
         }
-        threadlocal var pathBuf: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
 
         fn actualPath(cx: @This(), test_path: []const u8) []const u8 {
-            var fba7r = std.heap.FixedBufferAllocator.init(&pathBuf);
-            const actual_path = std.fs.path.join(
-                fba7r.allocator(), &.{ cx.tmpfs_path, test_path },
-            ) catch unreachable;
-            return actual_path;
+            return mod_utils.pathJoin(&.{ cx.tmpfs_path, test_path });
         }
 
         fn testPath(cx: @This(), actual_path: []const u8) []const u8 {
@@ -685,8 +687,6 @@ const TestFanotifyWorker = struct {
         defer parser.deinit(ha7r);
         var querier = Db.Quexecutor.init(&db);
         defer querier.deinit();
-        var reader = db.reader();
-        defer reader.deinit(&db);
         var weaver = Db.FullPathWeaver{};
         defer weaver.deinit(ha7r);
 
@@ -767,7 +767,6 @@ const TestFanotifyWorker = struct {
             .db = &db, 
             .parser = &parser,
             .querier = &querier,
-            .reader = &reader,
             .weaver = &weaver,
             .root_dir = &tmpfs_dir,
             .tmpfs_path = tmpfs_path
@@ -816,7 +815,7 @@ const TestFanotifyWorker = struct {
         while(
             seen_event_count < expected_events_count
         ) {
-            if (timer.read() > 3 * 1_000_000_000) {
+            if (timer.read() > 1 * 1_000_000_000) {
                 println("got {} events at timeout", .{ seen_event_count });
                 return error.TimeoutEvents;
             }
@@ -844,8 +843,8 @@ const TestFanotifyWorker = struct {
 
 // TODO: cases to test
 //
-// [ ] file created/delete/move/write/change attrib
-// [ ] dir create/delete/move
+// [x] file created/delete/move/write/change attrib
+// [ ] dir create/delete/move/write/change attrib
 // [ ] hard link create/delete/move
 // [ ] soft link create/delete/move
 

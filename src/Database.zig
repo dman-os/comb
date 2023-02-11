@@ -104,7 +104,7 @@ plist: PList = .{},
 childOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
 descendantOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
 free_slots: FreeSlots,
-lock: std.Thread.RwLock = .{},
+lock: std.Thread.Mutex = .{},
 
 pub fn init(
     ha7r: Allocator, 
@@ -202,7 +202,7 @@ pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: 
 pub inline fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     self.lock.lock();
     defer self.lock.unlock();
-    return try self.fileCreatedUnsafe(entry);
+    return self.fileCreatedUnsafe(entry);
 }
 
 /// Add an entry to the database.
@@ -285,13 +285,102 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     return id;
 }
 
-//pub fn fileDeleted(self: *Self, id: Id) !void {
-//}
+pub fn fileDeleted(self: *Self, id: Id) !bool {
+    self.lock.lock();
+    defer self.lock.unlock();
+    return self.fileDeletedUnsafe(id);
+}
 
+fn fileDeletedUnsafe(self: *Self, id: Id) !bool {
+    _ = self;
+    _ = id;
+    return false;
+    // // clone the entry but store the name on the swap this time
+    // const swapped_entry = entry.clone(
+    //     try self.sa7r.dupeJustPtr(entry.name)
+    // );
+    // const id = if (self.free_slots.removeOrNull()) |id| blk: {
+    //     // mind the `try`s and their order
+    //
+    //     var row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
+    //     defer self.meta.swapOut(self.sa7r, self.pager, id.id);
+    //
+    //     try self.setAtIdx(id.id, swapped_entry);
+    //
+    //     row.gen += 1;
+    //     row.free = false;
+    //     break :blk Id {
+    //         .id = id.id,
+    //         .gen = row.gen,
+    //     };
+    // } else blk: {
+    //     const idx = self.meta.len;
+    //     try self.meta.append(self.ha7r, self.sa7r, self.pager, RowMeta {
+    //         .free = false,
+    //         .gen = 0,
+    //     });
+    //     // TODO: this shit
+    //     errdefer _ = self.meta.pop(self.sa7r, self.pager) catch unreachable;
+    //
+    //     try self.appendEntry(swapped_entry);
+    //
+    //     break :blk Id {
+    //         .id = @intCast(u24, idx),
+    //         .gen = 0,
+    //     };
+    // };
+    // try self.plist.insert(
+    //     self.ha7r, 
+    //     self.sa7r, 
+    //     self.pager, 
+    //     id, 
+    //     entry.name, 
+    //     std.ascii.whitespace[0..]
+    //     // &[_]u8{ self.config.delimiter }
+    // );
+    // {
+    //     var kv = try self.childOfIndex.getOrPut(self.ha7r, entry.parent);
+    //     if (!kv.found_existing) {
+    //         // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
+    //         kv.value_ptr.* = .{};
+    //     }
+    //     try kv.value_ptr.put(self.ha7r, id, {});
+    // }
+    // // skip populating the desc of index
+    // if (false) {
+    //     var id_self = id;
+    //     var parent = entry.parent;
+    //     while (
+    //         // FIXME: a better way of detecting root
+    //         id_self.id != parent.id
+    //     ) {
+    //         var kv = try self.descendantOfIndex.getOrPut(self.ha7r, parent);
+    //         if (!kv.found_existing) {
+    //             // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
+    //             kv.value_ptr.* = .{};
+    //         }
+    //         try kv.value_ptr.put(self.ha7r, id, {});
+    //
+    //         id_self = parent;
+    //
+    //         var old_parent = parent;
+    //         // println(" id: {}, parent: {}, entry: {} ", .{ id, parent, entry });
+    //         var parent_desc = try self.table.swapIn(self.sa7r, self.pager, old_parent.id);
+    //         defer self.table.swapOut(self.sa7r, self.pager, old_parent.id);
+    //         parent = parent_desc.parent;
+    //     }
+    // }
+    // return id;
+}
 
+/// This locks the db.
 pub fn isStale(self: *Self, id: Id) !bool {
-    self.lock.lockShared();
-    defer self.lock.unlockShared();
+    self.lock.lock();
+    defer self.lock.unlock();
+    return self.isStaleUnsafe(id);
+}
+
+fn isStaleUnsafe(self: *Self, id: Id) !bool {
     if (self.meta.len <= id.id) return true;
     const row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
     defer self.meta.swapOut(self.sa7r, self.pager, id.id);
@@ -307,48 +396,24 @@ fn idAt(self: *Self, idx: usize) !Id {
     };
 }
 
-pub fn writer(self: *Self) Writer {
-    _ = self;
-    return Writer{};
-}
-
-pub fn reader(self: *Self) Reader {
-    _ = self;
-    return Reader{};
+threadlocal var pathBufGetAt: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+/// The returned Entry's `name` is invalidated by the next call of this method.
+/// This locks the db.
+pub fn getAtId(db: *Database, id: Id) !FsEntry(Id, []const u8) {
+    db.lock.lock();
+    defer db.lock.unlock();
+    if (try db.isStaleUnsafe(id)) return error.StaleHandle;
+    const entry = try db.table.swapIn(db.sa7r, db.pager, id.id);
+    defer db.table.swapOut(db.sa7r, db.pager, id.id);
+    const name = try db.sa7r.swapIn(entry.name);
+    defer db.sa7r.swapOut(entry.name);
+    std.mem.copy(u8, &pathBufGetAt, name);
+    return entry.conv(
+        Id, []const u8,  entry.parent, pathBufGetAt[0..name.len]
+    );
 }
 
 pub const Writer = struct {
-
-};
-
-/// Get items from the db.
-pub const Reader = struct {
-    /// The index of the last `table` item swapped in
-    swapped_in_idx_table: ?usize = null,
-
-    pub fn deinit(self: *@This(), db: *Database) void {
-        self.swapOutTableCache(db);
-    }
-
-    fn swapOutTableCache(self: *@This(), db: *Database) void {
-        if (self.swapped_in_idx_table) |idx| {
-            db.table.swapOut(db.sa7r, db.pager, idx);
-            self.swapped_in_idx_table = null;
-        }
-    }
-
-    /// The returned slice borrows from `self` and is invalidated by the 
-    /// next call of this method.
-    pub fn get(self: *@This(), db: *Database, id: Id) !*Entry {
-        db.lock.lockShared();
-        defer db.lock.unlockShared();
-
-        if (try db.isStale(id)) return error.StaleHandle;
-        self.swapOutTableCache(db);
-        const item = try db.table.swapIn(db.sa7r, db.pager, id.id);
-        self.swapped_in_idx_table = id.id;
-        return item;
-    }
 };
 
 /// Stitches together the full path of an `Entry` given the `Id`.
@@ -359,6 +424,7 @@ pub const FullPathWeaver = struct {
         self.buf.deinit(a7r);
     }
     /// The returned slice is invalidated not long after.
+    /// This locks the db.
     pub fn pathOf(
         self: *FullPathWeaver, 
         db: *Database, 
@@ -371,11 +437,11 @@ pub const FullPathWeaver = struct {
         // const names = db.table.items(.name);
         // const parents = db.table.items(.parent);
         
-        db.lock.lockShared();
-        defer db.lock.unlockShared();
+        db.lock.lock();
+        defer db.lock.unlock();
 
         while (true) {
-            if (try db.isStale(next_id)) return error.StaleHandle;
+            if (try db.isStaleUnsafe(next_id)) return error.StaleHandle;
 
             const cur_id = next_id.id;
             const entry = try db.table.swapIn(db.sa7r, db.pager, cur_id);
@@ -419,12 +485,13 @@ pub const NaiveNameMatcher = struct {
 
     /// The returned slice borrows from `self` and is invalidated by the 
     /// next call of this method.
+    /// This locks the db.
     pub fn match(
         self: *@This(),
         string: []const u8,
     ) ![]const Id {
-        self.db.lock.lockShared();
-        defer self.db.lock.unlockShared();
+        self.db.lock.lock();
+        defer self.db.lock.unlock();
 
         self.out_vec.clearRetainingCapacity();
         var it = self.db.table.iterator(self.db.sa7r, self.db.pager);
@@ -456,9 +523,10 @@ pub const PlistNameMatcher = struct {
         self.inner.deinit(db.ha7r);
     }
 
+    /// This locks the db.
     pub fn match(self: *@This(), db: *Database, string: []const u8) ![]const Id {
-        db.lock.lockShared();
-        defer db.lock.unlockShared();
+        db.lock.lock();
+        defer db.lock.unlock();
         return try self.inner.strMatch(
             db.ha7r, 
             db.sa7r, 
@@ -487,8 +555,6 @@ test "Database.usage" {
     var sa7r = ma7r.allocator();
     var db = Database.init(a7r, pager, sa7r, .{});
     defer db.deinit();
-    var rdr = db.reader();
-    defer rdr.deinit(&db);
 
     var entry = FsEntry(Id, []const u8) {
         .name = "/",
@@ -507,12 +573,10 @@ test "Database.usage" {
     };
 
     const id = try db.fileCreated(&entry);
-    var ret = try rdr.get(&db, id);
+    var ret = try db.getAtId(id);
 
     try std.testing.expectEqual(entry, ret.clone(entry.name));
-    const dbName = try sa7r.swapIn(ret.name);
-    defer sa7r.swapOut(ret.name);
-    try std.testing.expectEqualSlices(u8, entry.name, dbName);
+    try std.testing.expectEqualSlices(u8, entry.name, ret.name);
 }
 
 pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {

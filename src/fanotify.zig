@@ -1028,7 +1028,7 @@ const TestFanotify = struct {
                     if (!std.mem.eql(
                         u8, 
                         dir, 
-                        dbg(event_dir[self.tmpfs_path.len..])
+                        event_dir[self.tmpfs_path.len..]
                     )) {
                         // println(
                         //     "found event but dir slices weren't equal {s} != {s}", 
@@ -1040,7 +1040,6 @@ const TestFanotify = struct {
                 return event;
             }
         }
-        // @panic("unable to find expected event");
         return error.EventNotFound;
     }
 };

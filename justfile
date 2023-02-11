@@ -16,6 +16,9 @@ alias t := test
 test:
     zig build test
 
+test-f +FILTER:
+    zig test src/main.zig -freference-trace --test-filter {{FILTER}}
+
 bench *ARGS:
     zig test src/benches.zig -O ReleaseFast {{ARGS}}
 
