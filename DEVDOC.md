@@ -5,19 +5,17 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
-    - [ ] Database modification operations
-      - [ ] Created
+    - [ ] Database modification operations (including FANotify <-> Database integration & test suite)
+      - [x] Created
       - [ ] Updated
-      - [ ] Deleted
+      - [x] Deleted
       - [ ] Deleted (Dir)
       - [ ] Moved
       - [ ] Moved (Dir)
+      - [x] ~~`tmpfs` alternative for testing~~ Issues with `tmpfs` now fixed
     - [ ] Queries
-    - [ ] FANotify <-> Database integration
     - [ ] B-Tree implementation for field indices
         - [ ] BSTree
-    - [x] FANotify notifications & test suite
-      - [ ] `tmpfs` alternative for testing
     - [x] `std.Thread.Condition` based `Queue`
       - A single CPU is still saturated when it's flooded with events. Investigate what's making this happen
         - Crossed fingers it won't be the syscalls (can't be!)
@@ -26,6 +24,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 
 - Later
     - [ ] Support less than gram length (3) search strings
+    - [ ] `SwapHashMap`: a possible optimization for `PList.remove`?
 
 ## design doc
 

@@ -57,6 +57,66 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
             self.cache.deinit(ha7r);
         }
 
+        /// FIXME: this is very expensive
+        pub fn remove(
+            self: *Self, 
+            ha7r:Allocator, 
+            sa7r: SwapAllocator, 
+            pager: Pager,
+            id: I, 
+            name: []const u8, 
+            delimiters: []const u8,
+            is_eql: *const fn (lhs: I, rhs: I) bool,
+        ) !void {
+            self.cache.clearRetainingCapacity();
+
+            try mod_gram.grammer(
+                @as(u4, gram_len), 
+                name, true, 
+                delimiters, 
+                Appender(GramPos).new(
+                    &Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, 
+                    Appender(GramPos).Curry.UnmanagedSet.put
+                )
+            );
+
+            var it = self.cache.keyIterator();
+            while (it.next()) |gpos| {
+                if (self.map.getPtr(gpos.gram)) |list| {
+                    var idx_to_remove: ?usize = blk: {
+                        var list_it = list.iterator(sa7r, pager);
+                        defer list_it.close();
+                        var idx: usize = 0;
+                        while (try list_it.next()) |item| {
+                            if (is_eql(item.*, id)) {
+                                break :blk idx;
+                            }
+                            idx += 1;
+                        }
+                        break :blk null;
+                    };
+                    if (idx_to_remove) |idx| {
+                        var last = try list.pop(sa7r, pager);
+                        // if the `last` is the item we actually want to remove
+                        // don't add it back
+                        if (idx != list.len) {
+                            try list.set(sa7r, pager, idx, last);
+                        }
+                    } else {
+                        std.log.warn(
+                            @typeName(Self)++".remove: id not found in list",
+                            .{}
+                        );
+                    }
+                } else {
+                    std.log.warn(
+                        @typeName(Self)++".remove: list not found for gram",
+                        .{}
+                    );
+                }
+            }
+        }
+
         pub fn insert(
             self: *Self, 
             ha7r:Allocator, 
@@ -215,6 +275,90 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
             }
         };
     };
+}
+
+test "SwapPlist.remove" {
+    const TriPList = SwapPostingList(u64, 3);
+    // NOTE: `expected` should be ordered ascendingly
+    comptime var table = .{
+        .{ 
+            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
+            .to_remove = &[_]usize{ 0 },
+            .query = "Bag", 
+            .expected =  &.{ 1, 2 },
+        },
+        .{ 
+            .items = ([_][]const u8{ "Wurlitzer", "Skarlitzer", "Askenlitzer" })[0..], 
+            .to_remove = &[_]usize{ 1 },
+            .query = "litzer", 
+            .expected = &.{0, 2} 
+        },
+    };
+    inline for (table) |case| {
+        var ha7r = std.testing.allocator;
+
+        var mmap_pager = try mod_mmap.MmapPager.init(ha7r, "/tmp/SwapPlist.strMatch", .{});
+        defer mmap_pager.deinit();
+
+        var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
+        defer lru.deinit();
+        var pager = lru.pager();
+
+        var msa7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
+        defer msa7r.deinit();
+        var sa7r = msa7r.allocator();
+
+        var plist = TriPList{};
+        defer plist.deinit(ha7r, sa7r, pager);
+
+        var matcher = TriPList.StrMatcher{};
+        defer matcher.deinit(ha7r);
+
+        for (case.items) |name, id| {
+            try plist.insert(
+               ha7r, sa7r, pager, @as(u64, id), name, std.ascii.whitespace[0..]
+            );
+        }
+        for (case.to_remove) |id| {
+            try plist.remove(
+                ha7r, sa7r, pager, 
+                @as(u64, id), case.items[id], std.ascii.whitespace[0..],
+                struct { fn isEql(lhs: u64, rhs: u64) bool { return lhs == rhs; } }.isEql
+            );
+        }
+
+        const unsortedMatches = try matcher.strMatch(
+            ha7r, sa7r, pager, &plist, case.query, std.ascii.whitespace[0..]
+        );
+        var matches = try ha7r.dupe(u64, unsortedMatches);
+        defer ha7r.free(matches);
+        std.sort.insertionSort(u64, matches, {}, struct {
+            fn lt(cx: void, lhs: u64, rhs: u64) bool {
+                _ = cx;
+                return lhs < rhs;
+            }
+        }.lt);
+        std.testing.expectEqualSlices(u64, case.expected, matches) catch |err| {
+            std.debug.print("{any}\n!=\n{any}\n", .{ case.expected, matches });
+            var it = plist.map.iterator();
+            while (it.next()) |pair| {
+                var gram_items = try ha7r.alloc(usize, pair.value_ptr.len);
+                defer ha7r.free(gram_items);
+                var ii: usize = 0;
+                var it2 = pair.value_ptr.iterator(sa7r, pager);
+                defer it2.close();
+                while (try it2.next()) |id| {
+                    gram_items[ii] = id.*;
+                    ii += 1;
+                }
+                std.debug.print("gram {s} => {any}\n", .{ pair.key_ptr.*, gram_items });
+            }
+            for (matcher.grams.items) |gram| {
+                std.debug.print("search grams: {s}\n", .{ gram.gram });
+            }
+            return err;
+        };
+    }
 }
 
 test "SwapPlist.strMatch" {

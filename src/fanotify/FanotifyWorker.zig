@@ -15,6 +15,7 @@ const Query = @import("../Query.zig");
 
 const mod_treewalking = @import("../treewalking.zig");
 const FsEntry = mod_treewalking.FsEntry;
+const entryFromAbsolutePath = mod_treewalking.entryFromAbsolutePath;
 
 const mod_mmap = @import("../mmap.zig");
 
@@ -146,6 +147,21 @@ const FsEvent = union(enum) {
             ha7r.free(self.dir);
             ha7r.free(self.name);
         }
+
+        pub fn format(
+            self: @This(), 
+            comptime fmt: []const u8, 
+            options: std.fmt.FormatOptions, 
+            writer: anytype
+        ) !void {
+            _ = fmt;
+            _ = options;
+            try std.fmt.format(
+                writer, 
+                @typeName(FileDeleted) ++ "{{  .timestamp = {}, .dir = {?s}, .name = {?s}, }}", 
+                .{ self.timestamp, self.dir, self.name }
+            );
+        }
     };
 
     pub const DirDeleted = FileDeleted;
@@ -163,6 +179,21 @@ const FsEvent = union(enum) {
             ha7r.free(self.old_name);
             ha7r.free(self.new_dir);
             ha7r.free(self.new_name);
+        }
+
+        pub fn format(
+            self: @This(), 
+            comptime fmt: []const u8, 
+            options: std.fmt.FormatOptions, 
+            writer: anytype
+        ) !void {
+            _ = fmt;
+            _ = options;
+            try std.fmt.format(
+                writer, 
+                @typeName(FileMoved) ++ "{{ .timestamp = {}, .old_dir = {?s}, .old_name = {?s}, .new_dir = {?s}, .new_name = {?s} }}", 
+                .{ self.timestamp, self.old_dir, self.old_name, self.new_dir, self.new_name }
+            );
         }
     };
 
@@ -381,7 +412,6 @@ const FanotifyEventMapper = struct {
     }
 };
 
-
 const FsEventWorker = struct {
     ha7r: Allocator,
     db: *Db,
@@ -437,8 +467,9 @@ const FsEventWorker = struct {
             .fileCreated => |event| {
                 try self.handleFileCreatedEvent(event);
             },
-            // .fileDeleted => |*event| {
-            // },
+            .fileDeleted => |event| {
+                try self.handleFileDeletedEvent(event);
+            },
             else => {}
         }
     }
@@ -463,7 +494,9 @@ const FsEventWorker = struct {
         const full_path = mod_utils.pathJoin(&.{ event.dir, event.name });
         const id = (try self.idAtPath(full_path)) 
             orelse return error.FileNotFound;
-        _ = try self.db.fileDeleted(id);
+        if (!try self.db.fileDeleted(id)) {
+            std.log.warn("delete event for unseen file: {}", .{ event });
+        }
     }
 
     fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
@@ -504,7 +537,7 @@ const FsEventWorker = struct {
     }
 };
 
-const TestFanotifyWorker = struct {
+const FanotifyWorkerTest = struct {
     const Context = struct {
         ha7r: Allocator,
         sa7r: mod_mmap.SwapAllocator,
@@ -820,7 +853,7 @@ const TestFanotifyWorker = struct {
                 return error.TimeoutEvents;
             }
             if (fs_event_q_mapper.getTimed(500_000)) |node| {
-                // println("fly 2 got event: {}", .{ node.data });
+                println("fly 2 got event: {}", .{ node.data });
                 // defer self.ha7r.destroy(node);
                 // defer node.data.deinit(self.ha7r);
                 fs_event_q_worker.put(node);
@@ -861,13 +894,13 @@ test "FanotifyWorker.fileCreated" {
     // const target_path = file_name;
 
     const actions = struct {
-        const Context = TestFanotifyWorker.Context;
+        const Context = FanotifyWorkerTest.Context;
 
         fn prePoll(cx: *Context) anyerror!void {
             try cx.root_dir.makeDir(parent_dir);
-            var parent_abs_path = try cx.root_dir.realpathAlloc(cx.ha7r, parent_dir);
-            defer cx.ha7r.free(parent_abs_path);
-            var parent_entry = try mod_treewalking.entryFromAbsolutePath(parent_abs_path);
+            var parent_entry = try entryFromAbsolutePath(
+                cx.actualPath(parent_dir)
+            );
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
                 &.{ parent_entry }, 
@@ -886,8 +919,8 @@ test "FanotifyWorker.fileCreated" {
             var db_entry = try cx.queryOne(file_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
             const actual_path = cx.actualPath(target_path);
-            try std.testing.expectEqualSlices(u8, actual_path, db_path);
-            const actual_entry = try mod_treewalking.entryFromAbsolutePath(actual_path);
+            try std.testing.expectEqualStrings(actual_path, db_path);
+            const actual_entry = try entryFromAbsolutePath(actual_path);
             try std.testing.expectEqual(
                 actual_entry.conv(
                     Db.Id, []const u8,
@@ -897,7 +930,7 @@ test "FanotifyWorker.fileCreated" {
             );
         }
     };
-    try TestFanotifyWorker.run(
+    try FanotifyWorkerTest.run(
         ha7r,
         actions.prePoll,
         actions.touch,
@@ -919,15 +952,15 @@ test "FanotifyWorker.fileDeleted" {
     // const target_path = file_name;
 
     const actions = struct {
-        const Context = TestFanotifyWorker.Context;
+        const Context = FanotifyWorkerTest.Context;
 
         fn prePoll(cx: *Context) anyerror!void {
             try cx.root_dir.makeDir(parent_dir);
             var file = try cx.root_dir.createFile(target_path, .{});
             defer file.close();
-            var abs_path = try cx.root_dir.realpathAlloc(cx.ha7r, target_path);
-            defer cx.ha7r.free(abs_path);
-            var entry = try mod_treewalking.entryFromAbsolutePath(abs_path);
+
+            var entry = try entryFromAbsolutePath(cx.actualPath(target_path));
+
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
                 &.{ entry }, 
@@ -937,7 +970,7 @@ test "FanotifyWorker.fileDeleted" {
 
             var db_entry = try cx.queryOne(file_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(target_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(target_path), db_path);
         }
 
         fn touch(cx: *Context) anyerror!usize {
@@ -949,7 +982,7 @@ test "FanotifyWorker.fileDeleted" {
             try cx.queryNone(file_name);
         }
     };
-    try TestFanotifyWorker.run(
+    try FanotifyWorkerTest.run(
         ha7r,
         actions.prePoll,
         actions.touch,
@@ -975,7 +1008,7 @@ test "FanotifyWorker.dirDeleted" {
     const file2_path = dir2_path++"/"++file2_name;
 
     const actions = struct {
-        const Context = TestFanotifyWorker.Context;
+        const Context = FanotifyWorkerTest.Context;
 
         fn prePoll(cx: *Context) anyerror!void {
             try cx.root_dir.makeDir(root_name);
@@ -985,11 +1018,11 @@ test "FanotifyWorker.dirDeleted" {
             (try cx.root_dir.createFile(file2_path, .{})).close();
             var abs_path1 = try cx.root_dir.realpathAlloc(cx.ha7r, file1_path);
             defer cx.ha7r.free(abs_path1);
-            var entry1 = try mod_treewalking.entryFromAbsolutePath(abs_path1);
+            var entry1 = try entryFromAbsolutePath(abs_path1);
 
             var abs_path2 = try cx.root_dir.realpathAlloc(cx.ha7r, file2_path);
             defer cx.ha7r.free(abs_path2);
-            var entry2 = try mod_treewalking.entryFromAbsolutePath(abs_path2);
+            var entry2 = try entryFromAbsolutePath(abs_path2);
 
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
@@ -1000,10 +1033,10 @@ test "FanotifyWorker.dirDeleted" {
 
             var db_entry = try cx.queryOne(file1_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file1_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file1_path), db_path);
             db_entry = try cx.queryOne(file2_name);
             db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file2_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file2_path), db_path);
         }
 
         fn touch(cx: *Context) anyerror!usize {
@@ -1019,7 +1052,7 @@ test "FanotifyWorker.dirDeleted" {
             try cx.queryNone(dir2_name);
         }
     };
-    try TestFanotifyWorker.run(
+    try FanotifyWorkerTest.run(
         ha7r,
         actions.prePoll,
         actions.touch,
@@ -1045,7 +1078,7 @@ test "FanotifyWorker.fileMoved" {
     const target_path = dir2_path++"/"++target_name;
 
     const actions = struct {
-        const Context = TestFanotifyWorker.Context;
+        const Context = FanotifyWorkerTest.Context;
 
         fn prePoll(cx: *Context) anyerror!void {
             try cx.root_dir.makeDir(root_name);
@@ -1054,7 +1087,7 @@ test "FanotifyWorker.fileMoved" {
             try cx.root_dir.makeDir(dir2_path);
             var abs_path1 = try cx.root_dir.realpathAlloc(cx.ha7r, file1_path);
             defer cx.ha7r.free(abs_path1);
-            var entry1 = try mod_treewalking.entryFromAbsolutePath(abs_path1);
+            var entry1 = try entryFromAbsolutePath(abs_path1);
 
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
@@ -1065,7 +1098,7 @@ test "FanotifyWorker.fileMoved" {
 
             var db_entry = try cx.queryOne(file1_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file1_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file1_path), db_path);
             // var db_entry = try cx.queryOne(target_path);
             // // try std.testing.expectEqual(evt_entry, db_entry.clone(evt_entry.name));
         }
@@ -1081,10 +1114,10 @@ test "FanotifyWorker.fileMoved" {
 
             var db_entry = try cx.queryOne(target_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(target_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(target_path), db_path);
         }
     };
-    try TestFanotifyWorker.run(
+    try FanotifyWorkerTest.run(
         ha7r,
         actions.prePoll,
         actions.touch,
@@ -1114,7 +1147,7 @@ test "FanotifyWorker.dirMoved" {
     const file2_target_path = dir2_target_path++"/"++file2_name;
 
     const actions = struct {
-        const Context = TestFanotifyWorker.Context;
+        const Context = FanotifyWorkerTest.Context;
 
         fn prePoll(cx: *Context) anyerror!void {
             try cx.root_dir.makeDir(root_name);
@@ -1123,11 +1156,11 @@ test "FanotifyWorker.dirMoved" {
             try cx.root_dir.makeDir(dir2_path);
             var abs_path1 = try cx.root_dir.realpathAlloc(cx.ha7r, file1_path);
             defer cx.ha7r.free(abs_path1);
-            var entry1 = try mod_treewalking.entryFromAbsolutePath(abs_path1);
+            var entry1 = try entryFromAbsolutePath(abs_path1);
 
             var abs_path2 = try cx.root_dir.realpathAlloc(cx.ha7r, file2_path);
             defer cx.ha7r.free(abs_path2);
-            var entry2 = try mod_treewalking.entryFromAbsolutePath(abs_path2);
+            var entry2 = try entryFromAbsolutePath(abs_path2);
 
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
@@ -1138,10 +1171,10 @@ test "FanotifyWorker.dirMoved" {
 
             var db_entry = try cx.queryOne(file1_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file1_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file1_path), db_path);
             db_entry = try cx.queryOne(file2_name);
             db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file2_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file2_path), db_path);
         }
 
         fn touch(cx: *Context) anyerror!usize {
@@ -1154,35 +1187,35 @@ test "FanotifyWorker.dirMoved" {
                 try cx.queryNone(root_name);
                 var db_entry = try cx.queryOne(target_name);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-                try std.testing.expectEqualSlices(u8, cx.actualPath(root_name), db_path);
+                try std.testing.expectEqualStrings(cx.actualPath(root_name), db_path);
             }
             {
                 try cx.queryNone(file1_path);
                 var db_entry = try cx.queryOne(file1_target_path);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-                try std.testing.expectEqualSlices(u8, cx.actualPath(file1_target_path), db_path);
+                try std.testing.expectEqualStrings(cx.actualPath(file1_target_path), db_path);
             }
             {
                 try cx.queryNone(dir1_path);
                 var db_entry = try cx.queryOne(dir1_target_path);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-                try std.testing.expectEqualSlices(u8, cx.actualPath(dir1_target_path), db_path);
+                try std.testing.expectEqualStrings(cx.actualPath(dir1_target_path), db_path);
             }
             {
                 try cx.queryNone(dir2_path);
                 var db_entry = try cx.queryOne(dir2_target_path);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-                try std.testing.expectEqualSlices(u8, cx.actualPath(dir2_target_path), db_path);
+                try std.testing.expectEqualStrings(cx.actualPath(dir2_target_path), db_path);
             }
             {
                 try cx.queryNone(file2_path);
                 var db_entry = try cx.queryOne(file2_target_path);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-                try std.testing.expectEqualSlices(u8, cx.actualPath(file2_target_path), db_path);
+                try std.testing.expectEqualStrings(cx.actualPath(file2_target_path), db_path);
             }
         }
     };
-    try TestFanotifyWorker.run(
+    try FanotifyWorkerTest.run(
         ha7r,
         actions.prePoll,
         actions.touch,
@@ -1203,20 +1236,19 @@ test "FanotifyWorker.fileModified" {
     const file2_path = root_name++"/"++file2_name;
 
     const actions = struct {
-        const Context = TestFanotifyWorker.Context;
+        const Context = FanotifyWorkerTest.Context;
 
         fn prePoll(cx: *Context) anyerror!void {
             try cx.root_dir.makeDir(root_name);
             (try cx.root_dir.createFile(file1_path, .{})).close();
             (try cx.root_dir.createFile(file2_path, .{})).close();
 
-            var abs_path1 = try cx.root_dir.realpathAlloc(cx.ha7r, file1_path);
-            defer cx.ha7r.free(abs_path1);
-            var entry1 = try mod_treewalking.entryFromAbsolutePath(abs_path1);
-
-            var abs_path2 = try cx.root_dir.realpathAlloc(cx.ha7r, file2_path);
-            defer cx.ha7r.free(abs_path2);
-            var entry2 = try mod_treewalking.entryFromAbsolutePath(abs_path2);
+            var entry1_ap = try cx.ha7r.dupe(u8, cx.actualPath(file1_path));
+            defer cx.ha7r.free(entry1_ap);
+            var entry1 = try entryFromAbsolutePath(entry1_ap);
+            var entry2_ap = try cx.ha7r.dupe(u8, cx.actualPath(file2_path));
+            defer cx.ha7r.free(entry2_ap);
+            var entry2 = try entryFromAbsolutePath(entry2_ap);
 
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
@@ -1227,10 +1259,10 @@ test "FanotifyWorker.fileModified" {
 
             var db_entry = try cx.queryOne(file1_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file1_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file1_path), db_path);
             db_entry = try cx.queryOne(file2_name);
             db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-            try std.testing.expectEqualSlices(u8, cx.actualPath(file2_path), db_path);
+            try std.testing.expectEqualStrings(cx.actualPath(file2_path), db_path);
         }
 
         fn touch(cx: *Context) anyerror!usize {
@@ -1249,8 +1281,8 @@ test "FanotifyWorker.fileModified" {
                 var db_entry = try cx.queryOne(file1_name);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
                 const actual_path = cx.actualPath(file1_path);
-                try std.testing.expectEqualSlices(u8, actual_path, db_path);
-                const actual_entry = try mod_treewalking.entryFromAbsolutePath(actual_path);
+                try std.testing.expectEqualStrings(actual_path, db_path);
+                const actual_entry = try entryFromAbsolutePath(actual_path);
                 try std.testing.expectEqual(
                     actual_entry.conv(
                         Db.Id, []const u8,
@@ -1263,8 +1295,8 @@ test "FanotifyWorker.fileModified" {
                 var db_entry = try cx.queryOne(file2_name);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
                 const actual_path = cx.actualPath(file2_path);
-                try std.testing.expectEqualSlices(u8, actual_path, db_path);
-                const actual_entry = try mod_treewalking.entryFromAbsolutePath(actual_path);
+                try std.testing.expectEqualStrings(actual_path, db_path);
+                const actual_entry = try entryFromAbsolutePath(actual_path);
                 try std.testing.expectEqual(
                     actual_entry.conv(
                         Db.Id, []const u8,
@@ -1275,7 +1307,7 @@ test "FanotifyWorker.fileModified" {
             }
         }
     };
-    try TestFanotifyWorker.run(
+    try FanotifyWorkerTest.run(
         ha7r,
         actions.prePoll,
         actions.touch,

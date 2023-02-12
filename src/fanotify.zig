@@ -713,7 +713,7 @@ fn parseRawEvent(
     }
 }
 
-const TestFanotify = struct {
+const FanotifyTest = struct {
     const Self = @This();
     pub const TouchFn = *const fn (a7r: Allocator, dir: std.fs.Dir) anyerror!void;
 
@@ -1061,7 +1061,7 @@ test "fanotify_create_file" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1094,7 +1094,7 @@ test "fanotify_create_file_nested" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1122,7 +1122,7 @@ test "fanotify_create_dir" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1151,7 +1151,7 @@ test "fanotify_delete_file" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1179,7 +1179,7 @@ test "fanotify_delete_dir" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1213,7 +1213,7 @@ test "fanotify_move_file" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     const event = res.expectEvent(
@@ -1225,7 +1225,7 @@ test "fanotify_move_file" {
         return err;
     };
     const old_name = event.old_name orelse unreachable;
-    try std.testing.expectEqualSlices(u8, file_name, old_name);
+    try std.testing.expectEqualStrings(file_name, old_name);
     // res.expectEvent(
     //     FAN.EVENT { .moved_from = true, },
     //     file_name, 
@@ -1256,7 +1256,7 @@ test "fanotify_move_dir" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     const event = res.expectEvent(
@@ -1268,7 +1268,7 @@ test "fanotify_move_dir" {
         return err;
     };
     const old_name = event.old_name orelse unreachable;
-    try std.testing.expectEqualSlices(u8, dir_name, old_name);
+    try std.testing.expectEqualStrings(dir_name, old_name);
 }
 
 test "fanotify_move_dir_nested" {
@@ -1291,7 +1291,7 @@ test "fanotify_mod_file" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1328,7 +1328,7 @@ test "fanotify_attrib_file" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
@@ -1366,7 +1366,7 @@ test "fanotify_attrib_dir" {
         }
     };
     var a7r = std.testing.allocator;
-    var res = try TestFanotify.run(a7r, actions.prePoll, actions.touch);
+    var res = try FanotifyTest.run(a7r, actions.prePoll, actions.touch);
     defer res.deinit(a7r);
 
     _ = res.expectEvent(

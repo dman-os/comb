@@ -29,9 +29,20 @@ pub const mod_fanotify = @import("fanotify.zig");
 
 pub const Query = @import("Query.zig");
 
+var die_signal = std.Thread.ResetEvent{};
+
+fn handleStopSig(signal: c_int) void {
+    _ = signal;
+    die_signal.set();
+}
+
 pub fn main() !void {
-    // try swapping();
-    try mod_fanotify.demo();
+    // TODO:
+    // const stop_action = std.os.Sigaction {
+    // };
+    // try std.os.sig(std.os.SIG.STOP, &stop_action, null);
+    try swapping();
+    // try mod_fanotify.demo();
 }
 
 fn swapping () !void {
@@ -121,7 +132,6 @@ fn swapping () !void {
     defer parser.deinit(a7r);
     // var matcher = db.plistNameMatcher();
     // defer matcher.deinit(&db);
-
     while (true) {
         std.debug.print("Ready to search: ", .{});
         try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);

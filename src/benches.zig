@@ -233,7 +233,7 @@ test "rowscan.bench.gen" {
 }
 
 test "Db.NaiveNameMatcher" {
-    const Db = comb.Database;
+    const Db = comb.mod_db.Database;
     const size: usize = 1_000_000;
 
     var a7r = std.testing.allocator;
@@ -407,14 +407,14 @@ test "plist.bench.walk" {
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 a7r.free(deepest_name);
-                const path = try weaver.pathOf(a7r, &tree, id, '/');
+                const path = try weaver.pathOf(a7r, tree, id, '/');
                 deepest_name = try a7r.dupe(u8, path);
             }
             avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
             if (entry.name.len > longest) {
                 longest = entry.name.len;
                 a7r.free(longest_name);
-                const path = try weaver.pathOf(a7r, &tree, id, '/');
+                const path = try weaver.pathOf(a7r, tree, id, '/');
                 longest_name = try a7r.dupe(u8, path);
             }
             var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);
@@ -667,14 +667,14 @@ test "SwapPList.bench.walk" {
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 a7r.free(deepest_name);
-                const path = try weaver.pathOf(a7r, &tree, id, '/');
+                const path = try weaver.pathOf(a7r, tree, id, '/');
                 deepest_name = try a7r.dupe(u8, path);
             }
             avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
             if (entry.name.len > longest) {
                 longest = entry.name.len;
                 a7r.free(longest_name);
-                const path = try weaver.pathOf(a7r, &tree, id, '/');
+                const path = try weaver.pathOf(a7r, tree, id, '/');
                 longest_name = try a7r.dupe(u8, path);
             }
             var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);

@@ -1553,7 +1553,7 @@ test "PagingSwapAllocator.usage" {
         const string = try sa7r.swapIn(ptr);
         defer sa7r.swapOut(ptr);
         // println("{s} != {s}", .{ table[ii], string });
-        try std.testing.expectEqualSlices(u8, table[ii], string);
+        try std.testing.expectEqualStrings(table[ii], string);
     }
 
     const replacement = "i wonder still oh I doo";
@@ -1567,7 +1567,7 @@ test "PagingSwapAllocator.usage" {
     {
         const string = try sa7r.swapIn(ptrs[1]);
         defer sa7r.swapOut(ptrs[1]);
-        try std.testing.expectEqualSlices(u8, replacement, string);
+        try std.testing.expectEqualStrings(replacement, string);
     }
 }
 
@@ -1778,8 +1778,12 @@ pub fn SwapList(comptime T: type) type {
         pub fn pop(self: *Self, sa7r: SwapAllocator, pager: Pager) !T {
             if (self.len == 0) @panic("iss empty");
             const idx = self.len - 1;
-            var item = (try self.swapIn(sa7r, pager, idx)).*;
-            defer self.swapOut(sa7r, pager, idx);
+            const item_ptr = (try self.swapIn(sa7r, pager, idx));
+            // copy to the stack
+            const item = item_ptr.*;
+            // swap out before decreasing the length to avoid fouling up the
+            // bound check
+            self.swapOut(sa7r, pager, idx);
             self.len -= 1;
             return item;
         }

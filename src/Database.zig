@@ -126,11 +126,17 @@ pub fn init(
 
 pub fn deinit(self: *Self) void {
     {
-        var it = self.table.iterator(self.sa7r, self.pager);
-        while (it.next() catch unreachable) |entry|{
-            self.sa7r.free(entry.name);
+        var it = self.meta.iterator(self.sa7r, self.pager);
+        defer it.close();
+        var idx: usize = 0;
+        while (it.next() catch @panic("no no no")) |row| {
+            if (!row.free) {
+                const entry = self.table.swapIn(self.sa7r, self.pager, idx) catch @panic("no no no!");
+                defer self.table.swapOut(self.sa7r, self.pager, idx);
+                self.sa7r.free(entry.name);
+            }
+            idx += 1;
         }
-        it.close();
     }
 
     self.table.deinit(self.ha7r, self.sa7r, self.pager);
@@ -292,85 +298,58 @@ pub fn fileDeleted(self: *Self, id: Id) !bool {
 }
 
 fn fileDeletedUnsafe(self: *Self, id: Id) !bool {
-    _ = self;
-    _ = id;
-    return false;
-    // // clone the entry but store the name on the swap this time
-    // const swapped_entry = entry.clone(
-    //     try self.sa7r.dupeJustPtr(entry.name)
-    // );
-    // const id = if (self.free_slots.removeOrNull()) |id| blk: {
-    //     // mind the `try`s and their order
-    //
-    //     var row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
-    //     defer self.meta.swapOut(self.sa7r, self.pager, id.id);
-    //
-    //     try self.setAtIdx(id.id, swapped_entry);
-    //
-    //     row.gen += 1;
-    //     row.free = false;
-    //     break :blk Id {
-    //         .id = id.id,
-    //         .gen = row.gen,
-    //     };
-    // } else blk: {
-    //     const idx = self.meta.len;
-    //     try self.meta.append(self.ha7r, self.sa7r, self.pager, RowMeta {
-    //         .free = false,
-    //         .gen = 0,
-    //     });
-    //     // TODO: this shit
-    //     errdefer _ = self.meta.pop(self.sa7r, self.pager) catch unreachable;
-    //
-    //     try self.appendEntry(swapped_entry);
-    //
-    //     break :blk Id {
-    //         .id = @intCast(u24, idx),
-    //         .gen = 0,
-    //     };
-    // };
-    // try self.plist.insert(
-    //     self.ha7r, 
-    //     self.sa7r, 
-    //     self.pager, 
-    //     id, 
-    //     entry.name, 
-    //     std.ascii.whitespace[0..]
-    //     // &[_]u8{ self.config.delimiter }
-    // );
-    // {
-    //     var kv = try self.childOfIndex.getOrPut(self.ha7r, entry.parent);
-    //     if (!kv.found_existing) {
-    //         // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
-    //         kv.value_ptr.* = .{};
-    //     }
-    //     try kv.value_ptr.put(self.ha7r, id, {});
-    // }
-    // // skip populating the desc of index
-    // if (false) {
-    //     var id_self = id;
-    //     var parent = entry.parent;
-    //     while (
-    //         // FIXME: a better way of detecting root
-    //         id_self.id != parent.id
-    //     ) {
-    //         var kv = try self.descendantOfIndex.getOrPut(self.ha7r, parent);
-    //         if (!kv.found_existing) {
-    //             // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
-    //             kv.value_ptr.* = .{};
-    //         }
-    //         try kv.value_ptr.put(self.ha7r, id, {});
-    //
-    //         id_self = parent;
-    //
-    //         var old_parent = parent;
-    //         // println(" id: {}, parent: {}, entry: {} ", .{ id, parent, entry });
-    //         var parent_desc = try self.table.swapIn(self.sa7r, self.pager, old_parent.id);
-    //         defer self.table.swapOut(self.sa7r, self.pager, old_parent.id);
-    //         parent = parent_desc.parent;
-    //     }
-    // }
-    // return id;
+    if (try self.isStaleUnsafe(id)) return false;
+    // recursively free any children
+    if (self.childOfIndex.fetchRemove(id)) |kv| {
+        var children = kv.value;
+        var it = children.iterator();
+        while (it.next()) |pair| {
+            var was_deleted = try self.fileDeletedUnsafe(pair.key_ptr.*);
+            if (was_deleted) {
+                @panic("found an actual live child");
+            }
+            @panic("children list is not empty");
+        }
+    }
+
+    // do all faillible things first
+    var row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
+    defer self.meta.swapOut(self.sa7r, self.pager, id.id);
+
+    const entry = try self.table.swapIn(self.sa7r, self.pager, id.id);
+    defer self.table.swapOut(self.sa7r, self.pager, id.id);
+
+    try self.free_slots.add(id);
+
+    row.free = true;
+    // remove entry from indices
+    
+    var name = try self.sa7r.swapIn(entry.name);
+    errdefer self.sa7r.swapOut(entry.name);
+    // remove from plist
+    try self.plist.remove(
+        self.ha7r, 
+        self.sa7r, 
+        self.pager, 
+        id, 
+        name, 
+        std.ascii.whitespace[0..],
+        struct{
+            fn isEql(lhs: Id, rhs: Id) bool {
+                return lhs.toInt() == rhs.toInt();
+            }
+        }.isEql
+    );
+
+    // remove from parent's `childOfIndex`
+    var siblings = self.childOfIndex.get(entry.parent) orelse @panic("no siblings index");
+    std.debug.assert(siblings.remove(id));
+
+    self.sa7r.swapOut(entry.name);
+    self.sa7r.free(entry.name);
+    // TODO: remove from ancestors' `descendantOfIndex`
+
+    return true;
 }
 
 /// This locks the db.
@@ -399,14 +378,18 @@ fn idAt(self: *Self, idx: usize) !Id {
 threadlocal var pathBufGetAt: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
 /// The returned Entry's `name` is invalidated by the next call of this method.
 /// This locks the db.
-pub fn getAtId(db: *Database, id: Id) !FsEntry(Id, []const u8) {
-    db.lock.lock();
-    defer db.lock.unlock();
-    if (try db.isStaleUnsafe(id)) return error.StaleHandle;
-    const entry = try db.table.swapIn(db.sa7r, db.pager, id.id);
-    defer db.table.swapOut(db.sa7r, db.pager, id.id);
-    const name = try db.sa7r.swapIn(entry.name);
-    defer db.sa7r.swapOut(entry.name);
+pub fn getAtId(self: *Database, id: Id) !FsEntry(Id, []const u8) {
+    self.lock.lock();
+    defer self.lock.unlock();
+    return self.getAtIdUnsafe(id);
+}
+
+fn getAtIdUnsafe(self: *Database, id: Id) !FsEntry(Id, []const u8) {
+    if (try self.isStaleUnsafe(id)) return error.StaleHandle;
+    const entry = try self.table.swapIn(self.sa7r, self.pager, id.id);
+    defer self.table.swapOut(self.sa7r, self.pager, id.id);
+    const name = try self.sa7r.swapIn(entry.name);
+    defer self.sa7r.swapOut(entry.name);
     std.mem.copy(u8, &pathBufGetAt, name);
     return entry.conv(
         Id, []const u8,  entry.parent, pathBufGetAt[0..name.len]
@@ -576,7 +559,7 @@ test "Database.usage" {
     var ret = try db.getAtId(id);
 
     try std.testing.expectEqual(entry, ret.clone(entry.name));
-    try std.testing.expectEqualSlices(u8, entry.name, ret.name);
+    try std.testing.expectEqualStrings(entry.name, ret.name);
 }
 
 pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
@@ -685,7 +668,7 @@ pub fn fileList2PlasticTree2Db(
     return declared_map;
 }
 
-const TestDb = struct {
+const DbTest = struct {
     const Case = struct {
         name: []const u8,
         query: []const u8,
@@ -754,7 +737,7 @@ const TestDb = struct {
 
 // fn randFile(name: []const u8) FsEntry()
 test "Db.e2e" {
-    var table = [_]TestDb.Case {
+    var table = [_]DbTest.Case {
         .{
             .name = "supports_empty_query",
             .entries = &.{
@@ -793,7 +776,7 @@ test "Db.e2e" {
             .expected = &.{ 1, 3 },
         },
     };
-    try TestDb.run(table[0..]);
+    try DbTest.run(table[0..]);
 }
 
 // pub const ColumnarDatabase = struct {

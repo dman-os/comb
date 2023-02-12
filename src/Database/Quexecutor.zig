@@ -320,6 +320,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
             return result.toOwnedSlice();
         },
         .descendantOf => |child_idx| {
+            if (true) @panic("descendant of index not in use");
             var ancestors = try self.execNode(
                 &self.plan.nodes.items[child_idx], ha7r
             );
