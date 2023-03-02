@@ -252,11 +252,23 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
 
                 // println("-- {any}", .{ subnode_result });
 
-                for(subnode_result) |item| {
+                for (subnode_result) |item| {
                     if (check.contains(item)) {
                         try result.append(item);
                     }
                 }
+            }
+            // for some reason, we might have dupe items in `result` at this
+            // point so clean those out
+            // FIXME: this can be made more efficient
+            check.clearRetainingCapacity();
+            for (result.items) |item|{
+                try check.put(item, {});
+            }
+            result.clearRetainingCapacity();
+            var it = check.keyIterator();
+            while (it.next()) |value| {
+                try result.append(value.*);
             }
             break :blk result.toOwnedSlice();
         },
@@ -290,7 +302,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
             _ = child;
             @panic("fuck");
         },
-        .gramMatch => |gram| {
+        .gramMatch => |gram| blk: {
             // println("gramMatch: {any}", .{ gram });
             var out = std.ArrayList(Id).init(ha7r);
             defer out.deinit();
@@ -300,9 +312,9 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
                 self.db.pager,
                 mod_utils.Appender(Id).forList(&out)
             );
-            return out.toOwnedSlice();
+            break :blk out.toOwnedSlice();
         },
-        .childOf => |child_idx| {
+        .childOf => |child_idx| blk: {
             var parents = try self.execNode(
                 &self.plan.nodes.items[child_idx], ha7r
             );
@@ -317,9 +329,9 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
                     }
                 }
             }
-            return result.toOwnedSlice();
+            break :blk result.toOwnedSlice();
         },
-        .descendantOf => |child_idx| {
+        .descendantOf => |child_idx| blk: {
             if (true) @panic("descendant of index not in use");
             var ancestors = try self.execNode(
                 &self.plan.nodes.items[child_idx], ha7r
@@ -335,12 +347,13 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
                     }
                 }
             }
-            return result.toOwnedSlice();
+            break :blk result.toOwnedSlice();
         },
     };
     // println("res_set: {any} for node: {}", .{ res_set, node });
     return res_set;
 }
+
 
 pub fn query(self: *@This(), input: *const Query) ![]const Id {
     // println("querying: query={}", .{ input });
@@ -375,3 +388,4 @@ pub fn query(self: *@This(), input: *const Query) ![]const Id {
         return out.items;
     }
 }
+

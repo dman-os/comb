@@ -151,6 +151,7 @@ pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
                 mod_utils.Appender(Token).Curry.UnamanagedList.append
             )
         );
+        // println("parsing query: raw={s} tokenized={any}", .{ raw, self.tokens.items });
 
         // top level clauses
         var top_clauses = std.ArrayList(Filter.Clause).init(ha7r);

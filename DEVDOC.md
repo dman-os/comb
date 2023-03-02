@@ -5,6 +5,9 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
+    - [ ] Parser
+      - [ ] fwd slash escaping
+      - [ ] whitespace in double quote
     - [ ] Database modification operations (including FANotify <-> Database integration & test suite)
       - [x] Created
       - [ ] Updated

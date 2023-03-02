@@ -294,21 +294,22 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
 pub fn fileDeleted(self: *Self, id: Id) !bool {
     self.lock.lock();
     defer self.lock.unlock();
-    return self.fileDeletedUnsafe(id);
+    return self.fileDeletedUnsafe(id, false);
 }
 
-fn fileDeletedUnsafe(self: *Self, id: Id) !bool {
+fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
     if (try self.isStaleUnsafe(id)) return false;
     // recursively free any children
     if (self.childOfIndex.fetchRemove(id)) |kv| {
         var children = kv.value;
+        defer children.deinit(self.ha7r);
         var it = children.iterator();
         while (it.next()) |pair| {
-            var was_deleted = try self.fileDeletedUnsafe(pair.key_ptr.*);
+            var was_deleted = try self.fileDeletedUnsafe(pair.key_ptr.*, true);
             if (was_deleted) {
-                @panic("found an actual live child");
+                // @panic("found an actual live child");
             }
-            @panic("children list is not empty");
+            // @panic("children list is not empty");
         }
     }
 
@@ -341,9 +342,11 @@ fn fileDeletedUnsafe(self: *Self, id: Id) !bool {
         }.isEql
     );
 
-    // remove from parent's `childOfIndex`
-    var siblings = self.childOfIndex.get(entry.parent) orelse @panic("no siblings index");
-    std.debug.assert(siblings.remove(id));
+    if (!recusring) {
+        // remove from parent's `childOfIndex`
+        var siblings = self.childOfIndex.get(entry.parent) orelse @panic("no siblings index");
+        std.debug.assert(siblings.remove(id));
+    }
 
     self.sa7r.swapOut(entry.name);
     self.sa7r.free(entry.name);
@@ -396,8 +399,8 @@ fn getAtIdUnsafe(self: *Database, id: Id) !FsEntry(Id, []const u8) {
     );
 }
 
-pub const Writer = struct {
-};
+// pub const Writer = struct {
+// };
 
 /// Stitches together the full path of an `Entry` given the `Id`.
 pub const FullPathWeaver = struct {
@@ -717,12 +720,21 @@ const DbTest = struct {
             // var parsed_query = try Query.parse(ha7r, case.query);
             var parsed_query = try parser.parse(ha7r, case.query);
             defer parsed_query.deinit(ha7r);
-            var results = try querier.query(&parsed_query);
+            var results = try ha7r.dupe(Id, try querier.query(&parsed_query));
+            defer ha7r.free(results);
             var expected_id_list = try ha7r.alloc(Id, case.expected.len);
             defer ha7r.free(expected_id_list);
             for (case.expected) |ex_idx, ii| {
                 expected_id_list[ii] = declared_map[ex_idx];
             }
+            const lt = struct{
+                fn lt(cx: void, lhs: Id, rhs: Id) bool {
+                    _ = cx;
+                    return lhs.id < rhs.id;
+                }
+            };
+            std.sort.sort(Id, expected_id_list, {}, lt.lt);
+            std.sort.sort(Id, results, {}, lt.lt);
             std.testing.expectEqualSlices(Id, expected_id_list, results) catch |err| {
                 println(
                     "unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}", 
