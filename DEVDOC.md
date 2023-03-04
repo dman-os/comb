@@ -12,9 +12,9 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
       - [x] Created
       - [ ] Updated
       - [x] Deleted
-      - [ ] Deleted (Dir)
-      - [ ] Moved
-      - [ ] Moved (Dir)
+      - [x] Deleted (Dir)
+      - [x] Moved
+      - [x] Moved (Dir)
       - [x] ~~`tmpfs` alternative for testing~~ Issues with `tmpfs` now fixed
     - [ ] Queries
     - [ ] B-Tree implementation for field indices

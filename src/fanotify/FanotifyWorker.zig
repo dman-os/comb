@@ -294,7 +294,7 @@ const FanotifyEventMapper = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
-        defer std.log.debug(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
+        defer std.log.info(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
         if(self.tryMap(event)) |opt| {
             if (opt) |fs_event| {
                 var node = try self.ha7r.create(Queue(FsEvent).Node);
@@ -333,6 +333,12 @@ const FanotifyEventMapper = struct {
         ) {
             std.log.debug("neutrino create event", .{});
             return null;
+        } else if (
+            event.kind.rename
+        ) {
+            std.log.debug("file renamed event: {}", .{ event });
+            var inner = try self.tryToFileMovedEvent(event);
+            return FsEvent { .fileMoved = inner };
         } else if (
             event.kind.moved_to and event.kind.delete
         ) {
@@ -410,6 +416,20 @@ const FanotifyEventMapper = struct {
         };
     }
 
+    fn tryToFileMovedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileMoved {
+        const name = event.name orelse return error.NameIsNull;
+        const dir = event.dir orelse return error.DirIsNull;
+        const old_name = event.old_name orelse @panic("old_name is null: unreachable");
+        const old_dir = event.old_dir orelse @panic("old_dir is null: unreachable");
+        return FsEvent.FileMoved {
+            .timestamp = event.timestamp,
+            .new_name = try self.ha7r.dupe(u8, name),
+            .new_dir = try self.ha7r.dupe(u8, dir),
+            .old_name = try self.ha7r.dupe(u8, old_name),
+            .old_dir = try self.ha7r.dupe(u8, old_dir),
+        };
+    }
+
     fn tryToFileModifiedEvent(self: *@This(), event: FanotifyEvent) !FsEvent.FileModified {
         return try self.tryToFileCreatedEvent(event);
     }
@@ -481,6 +501,9 @@ const FsEventWorker = struct {
             .dirDeleted => |event| {
                 try self.handleDirDeletedEvent(event);
             },
+            .fileMoved => |event| {
+                try self.handleFileMovedEvent(event);
+            },
             else => {}
         }
     }
@@ -520,6 +543,21 @@ const FsEventWorker = struct {
         if (!try self.db.fileDeleted(id)) {
             std.log.warn("delete event for unseen file: {}", .{ event });
         }
+    }
+
+    fn handleFileMovedEvent(
+        self: *@This(), 
+        event: FsEvent.FileMoved
+    ) !void {
+        const new_parent_opt = if (!std.mem.eql(u8, event.new_dir, event.old_dir))
+            (try self.idAtPath(event.new_dir)) 
+                    orelse return error.FileNotFound
+        else null;
+
+        const full_path = mod_utils.pathJoin(&.{ event.old_dir, event.old_name });
+        const id = (try self.idAtPath(full_path)) 
+            orelse return error.FileNotFound;
+        try self.db.fileMoved(id, event.new_name, new_parent_opt);
     }
 
     fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
@@ -1093,7 +1131,6 @@ test "FanotifyWorker.dirDeleted" {
 }
 
 test "FanotifyWorker.fileMoved" {
-    if (true) return error.SkipZigTest;
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
 
@@ -1118,13 +1155,18 @@ test "FanotifyWorker.fileMoved" {
             (try cx.root_dir.createFile(file1_path, .{})).close();
             try cx.root_dir.makeDir(dir1_path);
             try cx.root_dir.makeDir(dir2_path);
+
             var abs_path1 = try cx.root_dir.realpathAlloc(cx.ha7r, file1_path);
             defer cx.ha7r.free(abs_path1);
             var entry1 = try entryFromAbsolutePath(abs_path1);
 
+            var abs_path2 = try cx.root_dir.realpathAlloc(cx.ha7r, dir2_path);
+            defer cx.ha7r.free(abs_path2);
+            var entry2 = try entryFromAbsolutePath(abs_path2);
+
             var ids = try Db.fileList2PlasticTree2Db(
                 cx.ha7r, 
-                &.{ entry1 }, 
+                &.{ entry1, entry2 }, 
                 cx.db
             );
             defer cx.ha7r.free(ids);
@@ -1142,8 +1184,12 @@ test "FanotifyWorker.fileMoved" {
         }
 
         fn expect(cx: Context) anyerror!void {
-            try cx.queryNone(root_name);
             try cx.queryNone(file1_name);
+            // var results = try cx.query(file1_name);
+            // for (results) |id| {
+            //     var db_path = try cx.weaver.pathOf(cx.db, id, '/');
+            //     println("path={s} id={}", .{ db_path, id });
+            // }
 
             var db_entry = try cx.queryOne(target_name);
             var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
@@ -1159,7 +1205,6 @@ test "FanotifyWorker.fileMoved" {
 }
 
 test "FanotifyWorker.dirMoved" {
-    if (true) return error.SkipZigTest;
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
 
@@ -1188,6 +1233,8 @@ test "FanotifyWorker.dirMoved" {
             (try cx.root_dir.createFile(file1_path, .{})).close();
             try cx.root_dir.makeDir(dir1_path);
             try cx.root_dir.makeDir(dir2_path);
+            (try cx.root_dir.createFile(file2_path, .{})).close();
+
             var abs_path1 = try cx.root_dir.realpathAlloc(cx.ha7r, file1_path);
             defer cx.ha7r.free(abs_path1);
             var entry1 = try entryFromAbsolutePath(abs_path1);
@@ -1221,7 +1268,7 @@ test "FanotifyWorker.dirMoved" {
                 try cx.queryNone(root_name);
                 var db_entry = try cx.queryOne(target_name);
                 var db_path = try cx.weaver.pathOf(cx.db, db_entry[0], '/');
-                try std.testing.expectEqualStrings(cx.actualPath(root_name), db_path);
+                try std.testing.expectEqualStrings(cx.actualPath(target_name), db_path);
             }
             {
                 try cx.queryNone(file1_path);

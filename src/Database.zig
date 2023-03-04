@@ -355,6 +355,69 @@ fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
     return true;
 }
 
+// TODO: consider
+pub fn fileMoved(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id) !void {
+    self.lock.lock();
+    defer self.lock.unlock();
+    return self.fileMovedUnsafe(id, new_name,  new_parent_opt);
+}
+
+pub fn fileMovedUnsafe(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id) !void {
+    if (try self.isStaleUnsafe(id)) return error.StaleHandle;
+
+    const entry = try self.table.swapIn(self.sa7r, self.pager, id.id);
+    defer self.table.swapOut(self.sa7r, self.pager, id.id);
+
+    var old_name_swap = entry.name;
+    defer self.sa7r.free(old_name_swap);
+
+    var old_name = try self.sa7r.swapIn(old_name_swap);
+    errdefer self.sa7r.swapOut(old_name_swap);
+
+    try self.plist.insert(
+        self.ha7r, 
+        self.sa7r, 
+        self.pager, 
+        id, 
+        new_name, 
+        std.ascii.whitespace[0..]
+        // &[_]u8{ self.config.delimiter }
+    );
+
+    entry.name = try self.sa7r.dupeJustPtr(new_name);
+    
+    try self.plist.remove(
+        self.ha7r, 
+        self.sa7r, 
+        self.pager, 
+        id, 
+        old_name, 
+        std.ascii.whitespace[0..],
+        struct{
+            fn isEql(lhs: Id, rhs: Id) bool {
+                return lhs.toInt() == rhs.toInt();
+            }
+        }.isEql
+    );
+
+    if (new_parent_opt) |new_parent| {
+        if (entry.parent.toInt() != new_parent.toInt()) {
+            // remove from parent's `childOfIndex`
+            var old_siblings = self.childOfIndex.get(entry.parent) orelse @panic("no siblings index");
+            std.debug.assert(old_siblings.remove(id));
+
+            entry.parent = new_parent;
+
+            var kv = try self.childOfIndex.getOrPut(self.ha7r, new_parent);
+            if (!kv.found_existing) {
+                // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
+                kv.value_ptr.* = .{};
+            }
+            try kv.value_ptr.put(self.ha7r, id, {});
+        }
+    }
+}
+
 /// This locks the db.
 pub fn isStale(self: *Self, id: Id) !bool {
     self.lock.lock();
