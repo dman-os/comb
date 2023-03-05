@@ -355,7 +355,6 @@ fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
     return true;
 }
 
-// TODO: consider
 pub fn fileMoved(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id) !void {
     self.lock.lock();
     defer self.lock.unlock();
@@ -416,6 +415,21 @@ pub fn fileMovedUnsafe(self: *Self, id: Id, new_name: []const u8, new_parent_opt
             try kv.value_ptr.put(self.ha7r, id, {});
         }
     }
+}
+
+pub fn fileModified(self: *Self, id: Id, entry: *const FsEntry(void, void)) !void {
+    self.lock.lock();
+    defer self.lock.unlock();
+    return self.fileModifiedUnsafe(id, entry);
+}
+
+fn fileModifiedUnsafe(self: *Self, id: Id, entry: *const FsEntry(void, void)) !void {
+    if (try self.isStaleUnsafe(id)) return error.StaleHandle;
+
+    const entry_ptr = try self.table.swapIn(self.sa7r, self.pager, id.id);
+    defer self.table.swapOut(self.sa7r, self.pager, id.id);
+
+    entry_ptr.* = entry.conv(Id, Ptr, entry_ptr.parent, entry_ptr.name);
 }
 
 /// This locks the db.

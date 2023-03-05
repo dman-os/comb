@@ -364,7 +364,7 @@ pub fn demo() !void {
                 .modify = true,
                 // .attrib = true,
                 .delete = true,
-                .moved_to = true,
+                // .moved_to = true,
                 // .moved_from = true,
                 .ondir = true,
                 .rename = true
@@ -382,7 +382,7 @@ pub const Config = struct {
         .modify = true,
         .attrib = true,
         .delete = true,
-        .moved_to = true,
+        // .moved_to = true,
         // .moved_from = true,
         .ondir = true,
         .rename = true
@@ -783,7 +783,7 @@ const FanotifyTest = struct {
                         .modify = true,
                         .attrib = true,
                         .delete = true,
-                        .moved_to = true,
+                        // .moved_to = true,
                         // .moved_from = true,
                         .ondir = true,
                         .rename = true,
@@ -1192,10 +1192,6 @@ test "fanotify_delete_dir" {
     };
 }
 
-test "fanotify_delete_dir_nested" {
-    if (true) return error.SkipZigTest;
-}
-
 test "fanotify_move_file" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1236,10 +1232,6 @@ test "fanotify_move_file" {
     // };
 }
 
-test "fanotify_move_file_nested" {
-    if (true) return error.SkipZigTest;
-}
-
 test "fanotify_move_dir" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1271,10 +1263,6 @@ test "fanotify_move_dir" {
     try std.testing.expectEqualStrings(dir_name, old_name);
 }
 
-test "fanotify_move_dir_nested" {
-    if (true) return error.SkipZigTest;
-}
-
 test "fanotify_mod_file" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
@@ -1302,10 +1290,6 @@ test "fanotify_mod_file" {
         println("{any}", .{ res.events.items });
         return err;
     };
-}
-
-test "fanotify_mod_file_nested" {
-    if (true) return error.SkipZigTest;
 }
 
 test "fanotify_attrib_file" {
@@ -1341,10 +1325,6 @@ test "fanotify_attrib_file" {
     };
 }
 
-test "fanotify_attrib_nested" {
-    if (true) return error.SkipZigTest;
-}
-
 test "fanotify_attrib_dir" {
     // FIXME: attrib changes on dir an unrealiable
     if (true) return error.SkipZigTest;
@@ -1378,8 +1358,3 @@ test "fanotify_attrib_dir" {
         return err;
     };
 }
-
-test "fanotify_attrib_dir_nested" {
-    if (true) return error.SkipZigTest;
-}
-

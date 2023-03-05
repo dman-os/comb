@@ -10,7 +10,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
       - [ ] whitespace in double quote
     - [ ] Database modification operations (including FANotify <-> Database integration & test suite)
       - [x] Created
-      - [ ] Updated
+      - [x] Modified
       - [x] Deleted
       - [x] Deleted (Dir)
       - [x] Moved
@@ -24,6 +24,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
         - Crossed fingers it won't be the syscalls (can't be!)
         - My current suspicion is that it's the db query for the parent of the target entry that's spiking the CPU
      - [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
+     - [ ] Make sure `rename` covers all `moved_to` cases
 
 - Later
     - [ ] Support less than gram length (3) search strings

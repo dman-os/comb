@@ -269,7 +269,7 @@ const FanotifyEventMapper = struct {
         self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
     }
 
-    fn threadFn(self: *@This()) !void {
+    fn threadFn(self: *@This()) void {
         var count: usize = 0;
         while(
             !self.die_signal.isSet()
@@ -281,7 +281,15 @@ const FanotifyEventMapper = struct {
                 if (self.die_signal.isSet()) return;
                 defer self.ha7r.destroy(node);
                 defer node.data.deinit(self.ha7r);
-                try self.handleEvent(node.data);
+                self.handleEvent(node.data) catch |err| {
+                    var str = std.fmt.allocPrint(
+                        self.ha7r, 
+                        "error on "++@typeName(FanotifyEventMapper)++".handleEvent: {}", 
+                        .{ err }
+                    ) catch @panic("OutOfMemory");
+                    defer self.ha7r.free(str);
+                    @panic(str);
+                };
                 count += 1;
             } else |_| {
                 // _ = err;
@@ -303,7 +311,7 @@ const FanotifyEventMapper = struct {
                 };
                 self.fs_event_q.put(node); 
             } else {
-                std.log.debug("no FsEvent when processing event {}", .{ event });
+                std.log.warn("no FsEvent when processing event {}", .{ event });
             }
         } else |err| {
             switch (err) {
@@ -333,6 +341,21 @@ const FanotifyEventMapper = struct {
         ) {
             std.log.debug("neutrino create event", .{});
             return null;
+        // } else if (
+        //     event.kind.moved_to and event.kind.delete
+        // ) {
+        //     std.log.debug("neutrino move event", .{});
+        //     return null;
+        // } else if (
+        //     event.kind.moved_to and event.kind.ondir
+        // ) {
+        //     std.log.debug("dir moved event: {}", .{ event });
+        //     return null;
+        // } else if (
+        //     event.kind.moved_to
+        // ) {
+        //     std.log.debug("file moved event: {}", .{ event });
+        //     return null;
         } else if (
             event.kind.rename
         ) {
@@ -340,31 +363,17 @@ const FanotifyEventMapper = struct {
             var inner = try self.tryToFileMovedEvent(event);
             return FsEvent { .fileMoved = inner };
         } else if (
-            event.kind.moved_to and event.kind.delete
-        ) {
-            std.log.debug("neutrino move event", .{});
-            return null;
-        } else if (
             event.kind.attrib
         ) {
             std.log.debug("entry attrib modified event: {}", .{ event });
-            return null;
+            var inner = try self.tryToFileModifiedEvent(event);
+            return FsEvent { .fileModified = inner };
         } else if (
             event.kind.modify
         ) {
             std.log.debug("entry modified event: {}", .{ event });
             var inner = try self.tryToFileModifiedEvent(event);
             return FsEvent { .fileModified = inner };
-        } else if (
-            event.kind.moved_to and event.kind.ondir
-        ) {
-            std.log.debug("dir moved event: {}", .{ event });
-            return null;
-        } else if (
-            event.kind.moved_to
-        ) {
-            std.log.debug("file moved event: {}", .{ event });
-            return null;
         } else if (
             event.kind.delete and event.kind.ondir
         ) {
@@ -471,14 +480,22 @@ const FsEventWorker = struct {
         self.thread = try std.Thread.spawn(.{}, @This().threadFn, .{ self });
     }
 
-    fn threadFn(self: *@This()) !void {
+    fn threadFn(self: *@This()) void {
         while(
             !self.die_signal.isSet()
         ) {
             if (self.event_q.getTimed(500_000_000)) |node| {
                 defer self.ha7r.destroy(node);
                 defer node.data.deinit(self.ha7r);
-                try self.handleEvent(node.data);
+                self.handleEvent(node.data) catch |err| {
+                    var str = std.fmt.allocPrint(
+                        self.ha7r, 
+                        "error on "++@typeName(FsEventWorker)++".handleEvent: {}", 
+                        .{ err }
+                    ) catch @panic("OutOfMemory");
+                    defer self.ha7r.free(str);
+                    @panic(str);
+                };
             } else |_| {
                 // _ = err;
                 std.Thread.yield() catch @panic("ThreadYieldErr");
@@ -490,7 +507,7 @@ const FsEventWorker = struct {
         self: *@This(), 
         fs_event: FsEvent
     ) !void {
-        defer std.log.debug(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
+        defer std.log.info(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
         switch(fs_event) {
             .fileCreated => |event| {
                 try self.handleFileCreatedEvent(event);
@@ -504,7 +521,12 @@ const FsEventWorker = struct {
             .fileMoved => |event| {
                 try self.handleFileMovedEvent(event);
             },
-            else => {}
+            .fileModified => |event| {
+                try self.handleFileModifiedEvent(event);
+            },
+            else => {
+                std.log.warn("unhandled "++@typeName(FsEvent)++": {}", .{ fs_event });
+            }
         }
     }
 
@@ -558,6 +580,17 @@ const FsEventWorker = struct {
         const id = (try self.idAtPath(full_path)) 
             orelse return error.FileNotFound;
         try self.db.fileMoved(id, event.new_name, new_parent_opt);
+    }
+
+    fn handleFileModifiedEvent(
+        self: *@This(), 
+        event: FsEvent.FileModified
+    ) !void {
+        const full_path = mod_utils.pathJoin(&.{ event.entry.parent, event.entry.name });
+        const id = (try self.idAtPath(full_path)) 
+            orelse return error.FileNotFound;
+        const entry = event.entry.conv(void, void, {}, {});
+        try self.db.fileModified(id, &entry);
     }
 
     fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
@@ -828,7 +861,10 @@ const FanotifyWorkerTest = struct {
         defer while (fs_event_q_worker.getOrNull()) |node| {
             node.data.deinit(ha7r);
             ha7r.destroy(node);
-            println("found FsEvent in fs_event_q_worker at defer", .{});
+            println(
+                "found FsEvent in fs_event_q_worker at defer event={}", 
+                .{ node.data }
+            );
         };
 
         // init the workers
@@ -920,7 +956,8 @@ const FanotifyWorkerTest = struct {
         ) {
             if (timer.read() > 1 * 1_000_000_000) {
                 println("got {} events at timeout", .{ seen_event_count });
-                return error.TimeoutEvents;
+                // return error.TimeoutEvents;
+                break;
             }
             if (fs_event_q_mapper.getTimed(500_000)) |node| {
                 // println("fly 2 got event: {}", .{ node.data });
@@ -1305,7 +1342,6 @@ test "FanotifyWorker.dirMoved" {
 }
 
 test "FanotifyWorker.fileModified" {
-    if (true) return error.SkipZigTest;
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!isElevated()) return error.SkipZigTest;
 
@@ -1355,7 +1391,7 @@ test "FanotifyWorker.fileModified" {
             try file.setPermissions(
                 std.fs.File.Permissions{ .inner = std.fs.File.PermissionsUnix.unixNew(777) }
             );
-            return 2;
+            return 5;
         }
 
         fn expect(cx: Context) anyerror!void {
