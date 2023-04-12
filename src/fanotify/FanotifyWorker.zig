@@ -111,7 +111,7 @@ const FanotifyEventListener = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
-        defer std.log.info(@typeName(FanotifyEventListener) ++ " detected event: {any}", .{ event });
+        defer std.log.debug(@typeName(FanotifyEventListener) ++ " detected event: {any}", .{ event });
         var node = try self.ha7r.create(Queue(FanotifyEvent).Node);
         node.* = Queue(FanotifyEvent).Node {
             .data = event,
@@ -302,7 +302,7 @@ const FanotifyEventMapper = struct {
         self: *@This(), 
         event: FanotifyEvent
     ) std.mem.Allocator.Error!void {
-        defer std.log.info(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
+        defer std.log.debug(@typeName(FanotifyEventMapper) ++ " handled event: {any}", .{ event });
         if(self.tryMap(event)) |opt| {
             if (opt) |fs_event| {
                 var node = try self.ha7r.create(Queue(FsEvent).Node);
@@ -340,6 +340,7 @@ const FanotifyEventMapper = struct {
             event.kind.create and event.kind.delete
         ) {
             std.log.debug("neutrino create event", .{});
+            self.assertNeutrino(event);
             return null;
         // } else if (
         //     event.kind.moved_to and event.kind.delete
@@ -445,7 +446,11 @@ const FanotifyEventMapper = struct {
 
     fn assertNeutrino(self: *@This(), event: FanotifyEvent) void {
         _ = self;
-        _ = event;
+        const name = event.name orelse return;
+        const dir = event.dir orelse return;
+        std.debug.assert(
+            mod_treewalking.entryFromAbsolutePath2(dir, name) == std.os.OpenError.FileNotFound
+        );
     }
 };
 
@@ -507,7 +512,7 @@ const FsEventWorker = struct {
         self: *@This(), 
         fs_event: FsEvent
     ) !void {
-        defer std.log.info(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
+        defer std.log.debug(@typeName(FsEventWorker) ++ " handled event: {}", .{ fs_event });
         switch(fs_event) {
             .fileCreated => |event| {
                 try self.handleFileCreatedEvent(event);
@@ -534,7 +539,7 @@ const FsEventWorker = struct {
         self: *@This(), 
         event: FsEvent.FileCreated
     ) !void {
-        const parent_id = (try self.idAtPath(event.entry.parent)) 
+        const parent_id = (try self.idAtPath2(event.entry.parent)) 
             orelse return error.ParentNotFound;
         const entry = event.entry.conv(
             Db.Id, []const u8,
@@ -547,8 +552,7 @@ const FsEventWorker = struct {
         self: *@This(), 
         event: FsEvent.FileDeleted
     ) !void {
-        const full_path = mod_utils.pathJoin(&.{ event.dir, event.name });
-        const id = (try self.idAtPath(full_path)) 
+        const id = (try self.idAtPath(event.dir, event.name)) 
             orelse return error.FileNotFound;
         if (!try self.db.fileDeleted(id)) {
             std.log.warn("delete event for unseen file: {}", .{ event });
@@ -559,8 +563,7 @@ const FsEventWorker = struct {
         self: *@This(), 
         event: FsEvent.DirDeleted
     ) !void {
-        const full_path = mod_utils.pathJoin(&.{ event.dir, event.name });
-        const id = (try self.idAtPath(full_path)) 
+        const id = (try self.idAtPath(event.dir, event.name)) 
             orelse return error.FileNotFound;
         if (!try self.db.fileDeleted(id)) {
             std.log.warn("delete event for unseen file: {}", .{ event });
@@ -572,12 +575,11 @@ const FsEventWorker = struct {
         event: FsEvent.FileMoved
     ) !void {
         const new_parent_opt = if (!std.mem.eql(u8, event.new_dir, event.old_dir))
-            (try self.idAtPath(event.new_dir)) 
+            (try self.idAtPath2(event.new_dir)) 
                     orelse return error.FileNotFound
         else null;
 
-        const full_path = mod_utils.pathJoin(&.{ event.old_dir, event.old_name });
-        const id = (try self.idAtPath(full_path)) 
+        const id = (try self.idAtPath(event.old_dir, event.old_name)) 
             orelse return error.FileNotFound;
         try self.db.fileMoved(id, event.new_name, new_parent_opt);
     }
@@ -586,14 +588,27 @@ const FsEventWorker = struct {
         self: *@This(), 
         event: FsEvent.FileModified
     ) !void {
-        const full_path = mod_utils.pathJoin(&.{ event.entry.parent, event.entry.name });
-        const id = (try self.idAtPath(full_path)) 
+        const id = (try self.idAtPath(event.entry.parent, event.entry.name)) 
             orelse return error.FileNotFound;
         const entry = event.entry.conv(void, void, {}, {});
         try self.db.fileModified(id, &entry);
     }
 
-    fn idAtPath(self: *@This(), path: []const u8) !?Db.Id {
+    fn idAtPath2(self: *@This(), path: []const u8) !?Db.Id {
+        return self.idAtPath(
+            std.fs.path.dirname(path) orelse "/"[0..], 
+            std.fs.path.basename(path), 
+        );
+    }
+
+    threadlocal var pathBuf: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+    fn idAtPath(self: *@This(),  dir: []const u8, name: []const u8) !?Db.Id {
+        const path = if (dir[dir.len - 1] == std.fs.path.sep)
+            // wrap in quotes to escape whitespace
+            try std.fmt.bufPrint(&pathBuf, "\"{s}{s}\"", .{ dir, name })
+        else // wrap in quotes to escape whitespace
+            // std.fmt.bufPrint(&pathBuf, "\"{s}"++std.fs.path.sep++"{s}\"", .{ dir, name });
+            try std.fmt.bufPrint(&pathBuf, "\"{s}/{s}\"", .{ dir, name });
         var parser = Query.Parser{};
         defer parser.deinit(self.ha7r);
         var query = parser.parse(self.ha7r, path) catch {

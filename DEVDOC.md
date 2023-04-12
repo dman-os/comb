@@ -5,10 +5,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
-    - [ ] Parser
-      - [ ] fwd slash escaping
-      - [ ] whitespace in double quote
-    - [ ] Database modification operations (including FANotify <-> Database integration & test suite)
+    - [x] Database modification operations (including FANotify <-> Database integration & test suite)
       - [x] Created
       - [x] Modified
       - [x] Deleted
@@ -23,8 +20,12 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
       - A single CPU is still saturated when it's flooded with events. Investigate what's making this happen
         - Crossed fingers it won't be the syscalls (can't be!)
         - My current suspicion is that it's the db query for the parent of the target entry that's spiking the CPU
-     - [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
-     - [ ] Make sure `rename` covers all `moved_to` cases
+    - [ ] Parser
+      - [ ] fwd slash escaping
+      - [ ] whitespace in double quote
+
+- [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
+- [ ] Make sure `rename` covers all `moved_to` cases
 
 - Later
     - [ ] Support less than gram length (3) search strings
@@ -39,7 +40,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
         - [x] PostingList (for names)
         - [ ] B-Tree (for other values)
 - [ ] Current (TM)
-    - [ ] FANotify integration
+    - [x] FANotify integration
 - [ ] Low resource footprint
     - [x] Disk Swapping
 - [ ] CLI client
@@ -146,7 +147,7 @@ more than sufficent. All I had to do was add a stricter constraint that any
 access to swapped memory has to be explicity swappedIn/out. There's no way to
 safely abstract this away from high level users.
 
-### FAN_EVENT_MODIFY
+### `FAN_EVENT_MODIFY`
 
 ...are emitted anytime a file is written to and as you can imagine are
 supernumerous. We'll be needing a scheme to combine them for over a span of
@@ -251,10 +252,24 @@ fn threadFn(self: *@This()) !void {
  ```
 
 We don't want to the thread to go on forever so we usually add a way to signal
-it to finish.  In Rust, one could use the closing on the channel to signal this
-but our implementation isn't so sophisticated.  This means that we'll have to
-add timeouts to the `get` to make sure we don't wait in there forever and miss
-the death signal.
+it to finish.  The channel impl I'm using isn't sophisticated enough to signal when there are no more possible
+senders 
+
+```ziglang
+fn threadFn(self: *@This()) !void {
+    while(
+        !self.die_signal.isSet()
+    ) {
+        // this might wait forever if there are no more senders
+        var event = self.channel.get();
+        try self.handleEvent(event);
+    }
+}
+ ```
+ 
+In Rust, one could use the closing on the channel to signal this but our implementation 
+isn't so sophisticated. This means that we'll have to add timeouts to the `get` to make 
+sure we don't wait in there forever and miss the death signal.
 
 ```ziglang
 fn threadFn(self: *@This()) !void {
@@ -271,36 +286,6 @@ fn threadFn(self: *@This()) !void {
 }
  ```
 
-The channel isn't sophisticated enough to signal when there are no more possible
-senders 
+---
 
-```ziglang
-fn threadFn(self: *@This()) !void {
-    while(
-        !self.die_signal.isSet()
-    ) {
-        var event = self.channel.get();
-        try self.handleEvent(event);
-    }
-}
- ```
-
-```ziglang
-fn threadFn(self: *@This()) !void {
-    defer self.ha7r.destroy(self);
-    while(
-        !self.die_signal.isSet()
-    ) {
-        // wait for events on a channel. Not all such thread constructs use channels but most do 
-        // these cases are relevant to demonstrate the...problem.
-        if (self.event_q.getTimed(500_000_000)) |event| {
-            if (self.die_signal.isSet()) return;
-            // ... do something with event (hopefully cleanup)
-            try self.handleEvent(event);
-        } else |_| {
-            // if we don't have an
-            std.Thread.yield() catch @panic("ThreadYieldErr");
-        }
-    }
-}
- ```
+Turns out the issue I had was a use-after-free bug and I needn't not solve this right away.

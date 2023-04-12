@@ -23,7 +23,9 @@ const Db = Database;
 
 pub const mod_index = @import("index.zig");
 
-pub const log_level = std.log.Level.info;
+pub const std_options = struct {
+    pub const log_level = std.log.Level.info;
+};
 
 pub const mod_fanotify = @import("fanotify.zig");
 

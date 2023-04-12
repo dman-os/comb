@@ -18,6 +18,8 @@ const Token = union(enum) {
     andOp,
     orOp,
     notOp,
+    // backSlash,
+    doubleQuote,
     param: []const u8,
     value: []const u8,
 };
@@ -52,33 +54,108 @@ fn tokenize(raw: []const u8, appender: mod_utils.Appender(Token)) !void {
         ) {
             try appender.append(Token.notOp);
         } else {
-            var add_r_paren = false;
+            // TODO: consider supporting escape slashes
+            // // handle back slash
+            // // eg. \\\\\(dan | joe)
+            // //     ^
+            // while (true) {
+            //     if (token[0] == '\\') {
+            //         try appender.append(Token.backSlash);
+            //         token = token[1..];
+            //     } else {
+            //         break;
+            //     }
+            // }
+
             // handle lparen without whitespace
             // eg. (dan | joe)
+            //     ^
             if (token[0] == '(') {
                 try appender.append(Token.lparen);
                 token = token[1..];
             }
             // handle not without whitespace seprating it 
             // eg. ^joking
+            //     ^
             if (token[0] == '^') {
                 try appender.append(Token.notOp);
                 token = token[1..];
             }
             // handle rparen without whitespace
             // eg. (dan | joe)
-            if (token[token.len - 1] == ')') {
-                add_r_paren = true;
+            //               ^
+            var add_r_paren = token[token.len - 1] == ')';
+            if (add_r_paren) {
                 token = token[1..(token.len - 1)];
             }
+
+            // handle starting double quotes
+            // eg. "PDA bracelet"
+            //     ^
+            if (token[0] == '"') {
+                try appender.append(Token.doubleQuote);
+                token = token[1..];
+            }
+            // handle closing double quotes
+            // eg. "PDA bracelet"
+            //                  ^
+            var add_closing_quotes = token[token.len - 1] == '"';
+            if (add_closing_quotes) {
+                token = token[1..(token.len - 1)];
+            }
+
+            // handle param pairs
+            // eg. limit:125
+            //         ^
             var it2 = std.mem.split(u8, token, ([_]u8{ param_val_delimiter })[0..]);
             var val = it2.next().?;
             var rest = it2.rest();
-            if (rest.len == 0) {
-                try appender.append(Token{ .value = val });
-            } else {
+            if (rest.len != 0) {
+                // `val` must be the param with `rest` containing the actual value.
                 try appender.append(Token{ .param = val });
-                try appender.append(Token{ .value = rest });
+                val = rest;
+            }
+            // handle starting double quotes
+            // eg. "PDA bracelet"
+            //     ^
+            if (val[0] == '"') {
+                try appender.append(Token.doubleQuote);
+                val = val[1..];
+            }
+            // handle closing double quotes
+            // eg. "PDA bracelet"
+            //                  ^
+            var add_closing_quotes_2 = val[val.len - 1] == '"';
+            if (add_closing_quotes_2) {
+                val = val[1..(val.len - 1)];
+            }
+
+            try appender.append(Token{ .value = val });
+
+            if (add_closing_quotes_2) {
+                try appender.append(Token.doubleQuote);
+            }
+            // // handle double quote exact match support
+            // // eg. "you're a contra" 
+            // if (val[0] == '"') {
+            //     // if the quoted section continues across whitespace 
+            //     if (val[val.len - 1] != '"') {
+            //         // rparen from earlier doesn't count
+            //         // eg. "(hallo) computer"
+            //         //            ^
+            //         add_r_paren = false;
+            //     } else {
+            //         try appender.append(Token{ .value = val });
+            //     }
+            //     while (true) {
+            //         // there's no whitespace in the val
+            //         if (val[val.len - 1] == '"') {
+            //             break;
+            //         }
+            //     }
+            // }
+            if (add_closing_quotes) {
+                try appender.append(Token.doubleQuote);
             }
             if (add_r_paren) {
                 try appender.append(Token.rparen);
@@ -181,6 +258,7 @@ pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
             if (top_clauses.items.len == 1) {
                 builder.setFilter(top_clauses.items[0]);
             } else {
+                // if tere are multiple tlcs, combine them in an `and` close
                 var cb = Filter.Clause.Builder.init(ha7r);
                 defer cb.deinit();
                 cb.setOperator(.@"and");
@@ -196,7 +274,7 @@ pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
 
 fn expect_param(self: *Self, ha7r: Allocator) !Param {
     return switch(self.cur() orelse return error.UnexpectedToken) {
-        Token.lparen, Token.notOp, Token.value => Param { 
+        Token.lparen, Token.notOp, Token.doubleQuote, Token.value => Param { 
             .tlc = try self.expect_clause(ha7r)
         },
         Token.param => |name| if (std.mem.eql(u8, name, "limit")) blk: { 
@@ -205,9 +283,10 @@ fn expect_param(self: *Self, ha7r: Allocator) !Param {
         } else if (std.mem.eql(u8, name, "offset")) blk: { 
             self.advance();
             break :blk Param { .offset = try self.expect_int() };
-        } else Param { 
-            .tlc = try self.expect_clause(ha7r)
-        },
+        } else 
+            Param { 
+                .tlc = try self.expect_clause(ha7r)
+            },
         else => error.UnexpectedToken,
     };
 }
@@ -223,7 +302,7 @@ fn expect_clause(self: *Self, ha7r: Allocator) Error!Filter.Clause {
             try cb.addSubClause(try self.expect_clause(ha7r));
             break :blk try cb.build();
         },
-        Token.value => |value| blk: {
+        Token.value => blk: {
             if (self.peekNext()) |next| {
                 if (
                     next == Token.andOp or
@@ -232,30 +311,10 @@ fn expect_clause(self: *Self, ha7r: Allocator) Error!Filter.Clause {
                     break :blk try self.expect_binary_op_clause(ha7r);
                 }
             }
-            var path_it = std.mem.tokenize(u8, value, std.fs.path.sep_str);
-            var str = path_it.next() orelse unreachable;
-            if (path_it.peek() != null) {
-                var clause = blk2: {
-                    var cb = Query.Filter.Clause.Builder.init(ha7r);
-                    defer cb.deinit();
-                    try cb.addNameMatch(str, true);
-                    break :blk2 try cb.build();
-                };
-                while (path_it.next()) |name| {
-                    var cb = Query.Filter.Clause.Builder.init(ha7r);
-                    defer cb.deinit();
-                    cb.setOperator(.@"and");
-                    try cb.addChildOf(clause);
-                    try cb.addNameMatch(name, path_it.peek() != null);
-                    clause = try cb.build();
-                }
-                break :blk clause;
-            } else {
-                var cb = Query.Filter.Clause.Builder.init(ha7r);
-                defer cb.deinit();
-                try cb.addNameMatch(str, false);
-                break :blk try cb.build();
-            }
+            break :blk try self.expect_name_match(ha7r);
+        },
+        Token.doubleQuote => blk: {
+            break :blk try self.expect_name_match(ha7r);
         },
         Token.lparen => blk: { 
             var sub_clauses = std.ArrayList(Filter.Clause).init(ha7r);
@@ -307,6 +366,42 @@ fn expect_binary_op_clause(self: *Self, ha7r: Allocator) !Filter.Clause {
             try cb.addSubClause(first_clause);
             try cb.addSubClause(second_clause);
             break :blk cb.build();
+        },
+        else => error.UnexpectedToken,
+    };
+}
+
+fn expect_name_match(self: *Self, ha7r: Allocator) !Filter.Clause {
+    return switch (self.cur() orelse return error.UnexpectedToken) {
+        Token.value => |value| blk: {
+            var path_it = std.mem.tokenize(u8, value, std.fs.path.sep_str);
+            var str = path_it.next() orelse unreachable;
+            if (path_it.peek() != null) {
+                var clause = blk2: {
+                    var cb = Query.Filter.Clause.Builder.init(ha7r);
+                    defer cb.deinit();
+                    try cb.addNameMatch(str, true);
+                    break :blk2 try cb.build();
+                };
+                while (path_it.next()) |name| {
+                    var cb = Query.Filter.Clause.Builder.init(ha7r);
+                    defer cb.deinit();
+                    cb.setOperator(.@"and");
+                    try cb.addChildOf(clause);
+                    try cb.addNameMatch(name, path_it.peek() != null);
+                    clause = try cb.build();
+                }
+                break :blk clause;
+            } else {
+                var cb = Query.Filter.Clause.Builder.init(ha7r);
+                defer cb.deinit();
+                try cb.addNameMatch(str, false);
+                break :blk try cb.build();
+            }
+        },
+        Token.doubleQuote => { // blk: {
+            // TODO
+            @panic("todo");
         },
         else => error.UnexpectedToken,
     };

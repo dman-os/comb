@@ -170,12 +170,6 @@ fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
     );
 }
 
-fn appendEntry(self: *Self, entry: Entry) !void {
-    try self.table.append(
-        self.ha7r, self.sa7r, self.pager, entry 
-    );
-}
-
 pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: Id) !void {
     self.lock.lock();
     defer self.lock.unlock();
@@ -240,7 +234,9 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         // TODO: this shit
         errdefer _ = self.meta.pop(self.sa7r, self.pager) catch unreachable;
 
-        try self.appendEntry(swapped_entry);
+        try self.table.append(
+            self.ha7r, self.sa7r, self.pager, swapped_entry 
+        );
 
         break :blk Id {
             .id = @intCast(u24, idx),
@@ -863,6 +859,27 @@ test "Db.e2e" {
                 genRandFile("/bonito/kero/kero"),
             },
             .expected = &.{ 1, 3 },
+        },
+        .{
+            .name = "supports_double_quotes_to_match_whitespace",
+            .query = "\"borgouise bologna\"",
+            .entries = &.{
+                genRandFile("/rodrigo/borgouise"),
+                genRandFile("/rodrigo/borgouise bologna"),
+                genRandFile("/rodrigo/bologna"),
+                genRandFile("/rodrigo/borgia"),
+            },
+            .expected = &.{ 1 },
+        },
+        .{
+            .name = "supports_double_quotes_to_match_whitespace_in_path",
+            .query = "\"rodrigo/borgouise bologna/sandwitch\"",
+            .entries = &.{
+                genRandFile("/borgouise bologna/sandwitch"),
+                genRandFile("/rodrigo/borgouise bologna/sandwitch"),
+                genRandFile("/antonio/borgouise bologna/sandwitch"),
+            },
+            .expected = &.{ 1 },
         },
     };
     try DbTest.run(table[0..]);
