@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-usingnamespace @import("utils.zig");
+// usingnamespace @import("utils.zig");
 
 test {
     _ = PlasticTree;
@@ -25,13 +25,13 @@ pub fn FsEntry(comptime P: type, comptime N: type) type {
         mtime: i64,
 
         pub fn fromMeta(
-            name: N, 
-            parent: P, 
+            name: N,
+            parent: P,
             depth: usize,
             meta: std.fs.File.MetadataLinux,
         ) FsEntry(P, N) {
             var statx = meta.statx;
-            return @This() {
+            return @This(){
                 .name = name,
                 .kind = kindFromMode(statx.mode),
                 .depth = depth,
@@ -49,7 +49,7 @@ pub fn FsEntry(comptime P: type, comptime N: type) type {
         }
 
         pub fn clone(orig: *const @This(), new_name: anytype) FsEntry(P, @TypeOf(new_name)) {
-            return FsEntry(P, @TypeOf(new_name)) {
+            return FsEntry(P, @TypeOf(new_name)){
                 // .name = try a7r.dupe(u8, orig.name),
                 .name = new_name,
                 .parent = orig.parent,
@@ -69,13 +69,13 @@ pub fn FsEntry(comptime P: type, comptime N: type) type {
 
         /// This clones it fo sure
         pub fn conv(
-            orig: *const @This(), 
-            comptime NP: type, 
-            comptime NN: type, 
+            orig: *const @This(),
+            comptime NP: type,
+            comptime NN: type,
             new_parent: NP,
             new_name: NN,
         ) FsEntry(NP, NN) {
-            return FsEntry(NP, NN) {
+            return FsEntry(NP, NN){
                 .name = new_name,
                 .parent = new_parent,
                 .kind = orig.kind,
@@ -104,7 +104,7 @@ pub fn entryFromAbsolutePath(path: []const u8) !FsEntry([]const u8, []const u8) 
     var meta = try metaNoFollow(std.os.AT.FDCWD, &posix_path);
     var statx = meta.statx;
 
-    return FsEntry([]const u8, []const u8) {
+    return FsEntry([]const u8, []const u8){
         .name = name,
         .kind = kindFromMode(statx.mode),
         .depth = std.mem.count(u8, path, "/"),
@@ -124,16 +124,13 @@ pub fn entryFromAbsolutePath(path: []const u8) !FsEntry([]const u8, []const u8) 
 threadlocal var pathBuf: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
 
 /// `dir` is expected to be an absolute path
-pub fn entryFromAbsolutePath2(
-    dir: []const u8, 
-    name: []const u8
-) !FsEntry([]const u8, []const u8) {
+pub fn entryFromAbsolutePath2(dir: []const u8, name: []const u8) !FsEntry([]const u8, []const u8) {
     const path = std.fmt.bufPrint(&pathBuf, "{s}/{s}", .{ dir, name }) catch unreachable;
     const posix_path = try std.os.toPosixPath(path);
     var meta = try metaNoFollow(std.os.AT.FDCWD, &posix_path);
     var statx = meta.statx;
 
-    return FsEntry([]const u8, []const u8) {
+    return FsEntry([]const u8, []const u8){
         .name = name,
         .kind = kindFromMode(statx.mode),
         .depth = std.mem.count(u8, path, "/"),
@@ -150,9 +147,7 @@ pub fn entryFromAbsolutePath2(
     };
 }
 
-const ReadMetaError = error {
-    UnsupportedSyscall
-};
+const ReadMetaError = error{UnsupportedSyscall};
 
 /// Name has to be sentinel terminated, I think.
 /// Modified from zig std lib
@@ -160,14 +155,8 @@ const ReadMetaError = error {
 pub fn metaNoFollow(dir_handle: std.os.fd_t, path_name: [*]const u8) !std.fs.File.MetadataLinux {
     const os = std.os;
     var stx = std.mem.zeroes(os.linux.Statx);
-    const rcx = os.linux.statx(
-        dir_handle, 
-        path_name,
-        os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, 
-        os.linux.STATX_BASIC_STATS | 
-        os.linux.STATX_BTIME, 
-        &stx
-    );
+    const rcx = os.linux.statx(dir_handle, path_name, os.linux.AT.EMPTY_PATH | os.linux.AT.SYMLINK_NOFOLLOW, os.linux.STATX_BASIC_STATS |
+        os.linux.STATX_BTIME, &stx);
 
     switch (os.errno(rcx)) {
         .SUCCESS => {},
@@ -188,7 +177,7 @@ pub fn metaNoFollow(dir_handle: std.os.fd_t, path_name: [*]const u8) !std.fs.Fil
         .NOMEM => return os.OpenError.SystemResources,
         else => |err| return os.unexpectedErrno(err),
     }
-    return std.fs.File.MetadataLinux {
+    return std.fs.File.MetadataLinux{
         .statx = stx,
     };
 }
@@ -210,14 +199,14 @@ fn kindFromMode(mode: std.os.mode_t) std.fs.File.Kind {
     const S = std.os.linux.S;
     const Kind = std.fs.File.Kind;
     return switch (mode & S.IFMT) {
-        S.IFREG => Kind.File,
-        S.IFDIR => Kind.Directory,
-        S.IFLNK => Kind.SymLink,
-        S.IFSOCK => Kind.UnixDomainSocket,
-        S.IFCHR => Kind.CharacterDevice,
-        S.IFBLK => Kind.BlockDevice,
-        S.IFIFO => Kind.NamedPipe,
-        else => Kind.Unknown
+        S.IFREG => Kind.file,
+        S.IFDIR => Kind.directory,
+        S.IFLNK => Kind.sym_link,
+        S.IFSOCK => Kind.unix_domain_socket,
+        S.IFCHR => Kind.character_device,
+        S.IFBLK => Kind.block_device,
+        S.IFIFO => Kind.named_pipe,
+        else => Kind.unknown,
     };
 }
 
@@ -233,7 +222,13 @@ pub const Tree = struct {
             const meta = try dir.metadata();
             break :blk makedev(meta.inner.statx);
         };
-        try walker.scanDir(path, std.fs.cwd(), 0, 0, dev, );
+        try walker.scanDir(
+            path,
+            std.fs.cwd(),
+            0,
+            0,
+            dev,
+        );
         return walker.toTree();
     }
 
@@ -242,7 +237,7 @@ pub const Tree = struct {
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) Tree {
-        return Tree {
+        return Tree{
             .allocator = allocator,
             .list = std.ArrayList(Entry).init(allocator),
         };
@@ -256,11 +251,11 @@ pub const Tree = struct {
     }
 
     pub const FullPathWeaver = struct {
-        pub const NameOfErr = error { NotFound };
+        pub const NameOfErr = error{NotFound};
         buf: std.ArrayListUnmanaged(u8),
 
         pub fn init() FullPathWeaver {
-            return FullPathWeaver {
+            return FullPathWeaver{
                 .buf = std.ArrayListUnmanaged(u8){},
             };
         }
@@ -278,7 +273,7 @@ pub const Tree = struct {
                 try self.buf.append(allocator, delimiter);
 
                 next_id = entry.parent;
-                if(next_id == 0) {
+                if (next_id == 0) {
                     break;
                 }
             }
@@ -295,15 +290,15 @@ pub const Tree = struct {
 
         log_interval: usize = 10_000,
 
-        pub const Error = 
-            Allocator.Error || 
-            std.fs.File.OpenError || 
-            std.fs.File.MetadataError || 
+        pub const Error =
+            Allocator.Error ||
+            std.fs.File.OpenError ||
+            std.fs.File.MetadataError ||
             std.fs.IterableDir.Iterator.Error ||
             std.os.UnexpectedError;
 
         fn init(allocator: Allocator, limit: usize) @This() {
-            return @This() {
+            return @This(){
                 .remaining = limit,
                 .tree = Tree.init(allocator),
                 // .buf = std.ArrayList(u8).init(allocator),
@@ -311,7 +306,7 @@ pub const Tree = struct {
             };
         }
 
-        fn deinit(self: *@This()) void{
+        fn deinit(self: *@This()) void {
             self.tree.deinit();
             // self.buf.deinit();
             self.weaver.deinit(self.tree.allocator);
@@ -326,41 +321,30 @@ pub const Tree = struct {
             try self.tree.list.append(entry);
             self.remaining -= 1;
             if (self.tree.list.items.len % self.log_interval == 0) {
-                const path = try self.weaver.pathOf(
-                    self.tree.allocator, 
-                    &self.tree,
-                    self.tree.list.items.len - 1, 
-                    '/'
-                );
+                const path = try self.weaver.pathOf(self.tree.allocator, &self.tree, self.tree.list.items.len - 1, '/');
                 // std.debug.print(
-                std.log.info(
-                    "scanned {} items, now on: {s}", 
-                    .{ self.tree.list.items.len, path }
-                );
+                std.log.info("scanned {} items, now on: {s}", .{ self.tree.list.items.len, path });
             }
         }
 
         fn scanDir(
-            self: *@This(), 
-            path: []const u8, 
+            self: *@This(),
+            path: []const u8,
             parent: std.fs.Dir,
-            parent_id: usize, 
-            depth: usize, 
-            // parent_dev: std.meta.Tuple(&.{u32, u32}), 
-            parent_dev: u64, 
+            parent_id: usize,
+            depth: usize,
+            // parent_dev: std.meta.Tuple(&.{u32, u32}),
+            parent_dev: u64,
         ) Error!void {
             // std.debug.print("error happened at path = {s}\n", .{path});
             var iterable_dir = parent.openIterableDir(path, .{ .no_follow = true }) catch |err| {
-                switch(err){
+                switch (err) {
                     std.fs.Dir.OpenError.AccessDenied => {
-                        const parent_path = try self.weaver.pathOf(
-                            self.tree.allocator, 
-                            &self.tree,
-                            parent_id, 
-                            '/'
-                        );
-                        std.log.debug(
-                            "AccessDenied opening dir {s}/{s}", .{ parent_path, path, });
+                        const parent_path = try self.weaver.pathOf(self.tree.allocator, &self.tree, parent_id, '/');
+                        std.log.debug("AccessDenied opening dir {s}/{s}", .{
+                            parent_path,
+                            path,
+                        });
                         return;
                     },
                     else => return err,
@@ -371,23 +355,13 @@ pub const Tree = struct {
 
             const dev = blk: {
                 const meta = try dir.metadata();
-                var entry = Entry.fromMeta(
-                    try self.tree.allocator.dupe(u8, path),
-                    parent_id,
-                    depth,
-                    meta.inner
-                );
+                var entry = Entry.fromMeta(try self.tree.allocator.dupe(u8, path), parent_id, depth, meta.inner);
                 try self.append(entry);
                 // we don't examine other devices
                 if (entry.dev != parent_dev) {
-                    const parent_path = try self.weaver.pathOf(
-                        self.tree.allocator, 
-                        &self.tree,
-                        parent_id, 
-                        '/'
-                    );
+                    const parent_path = try self.weaver.pathOf(self.tree.allocator, &self.tree, parent_id, '/');
                     std.log.debug(
-                        "device ({}) != parent dev ({}), skipping dir at = {s}/{s}", 
+                        "device ({}) != parent dev ({}), skipping dir at = {s}/{s}",
                         .{ entry.dev, parent_dev, parent_path, path },
                     );
                     return;
@@ -402,48 +376,41 @@ pub const Tree = struct {
                 if (it.next()) |next| {
                     // check if there's a file left in the dir
                     const entry = next orelse break;
-                    if (entry.kind == .Directory) {
+                    if (entry.kind == .directory) {
                         try self.scanDir(entry.name, dir, dir_id, depth + 1, dev);
                     } else {
                         const posix_name = try std.os.toPosixPath(entry.name);
                         const meta = metaNoFollow(dir.fd, &posix_name) catch |err| {
-                            const parent_path = try self.weaver.pathOf(
-                                self.tree.allocator, 
-                                &self.tree,
-                                dir_id, 
-                                '/'
-                            );
-                            switch(err){
+                            const parent_path = try self.weaver.pathOf(self.tree.allocator, &self.tree, dir_id, '/');
+                            switch (err) {
                                 std.os.OpenError.AccessDenied => {
-                                    std.log.debug(
-                                        "AccessDenied opening file {s}/{s}", .{ parent_path, entry.name, });
+                                    std.log.debug("AccessDenied opening file {s}/{s}", .{
+                                        parent_path,
+                                        entry.name,
+                                    });
                                     continue;
                                 },
-                                else => { 
+                                else => {
                                     std.debug.print(
                                     // std.log.info(
-                                        "Unexpected err {} at {s}/{s}", .{ err, parent_path, entry.name, });
+                                    "Unexpected err {} at {s}/{s}", .{
+                                        err,
+                                        parent_path,
+                                        entry.name,
+                                    });
                                     return err;
                                 },
                             }
                         };
-                        try self.append(Entry.fromMeta(
-                            try self.tree.allocator.dupe(u8, entry.name),
-                            dir_id,
-                            depth,
-                            meta
-                        ));
+                        try self.append(Entry.fromMeta(try self.tree.allocator.dupe(u8, entry.name), dir_id, depth, meta));
                     }
                 } else |err| switch (err) {
                     std.fs.IterableDir.Iterator.Error.AccessDenied => {
-                        const parent_path = try self.weaver.pathOf(
-                            self.tree.allocator, 
-                            &self.tree,
-                            parent_id, 
-                            '/'
-                        );
-                        std.log.debug(
-                            "AccessDenied on iteration for dir at: {s}/{s}", .{ parent_path, path, });
+                        const parent_path = try self.weaver.pathOf(self.tree.allocator, &self.tree, parent_id, '/');
+                        std.log.debug("AccessDenied on iteration for dir at: {s}/{s}", .{
+                            parent_path,
+                            path,
+                        });
                     },
                     else => return err,
                 }
@@ -460,12 +427,9 @@ pub const Tree = struct {
         defer tree.deinit();
         var weaver = FullPathWeaver.init();
         defer weaver.deinit(allocator);
-        for (tree.list.items) |file, id| {
+        for (tree.list.items, 0..) |file, id| {
             const path = try weaver.pathOf(allocator, tree, id, '/');
-            std.debug.print(
-                "{} | kind = {} | parent = {} | size = {} | path = {s}\n", 
-                .{ id, file.kind, file.parent, file.size, path }
-            );
+            std.debug.print("{} | kind = {} | parent = {} | size = {} | path = {s}\n", .{ id, file.kind, file.parent, file.size, path });
         }
         try std.testing.expectEqual(size, tree.list.items.len);
     }
@@ -494,7 +458,7 @@ pub const PlasticTree = struct {
     pub fn init(config: Config, allocer: Allocator) !Self {
         var arena = std.heap.ArenaAllocator.init(allocer);
         errdefer arena.deinit();
-        return Self {
+        return Self{
             .list = try std.ArrayList(Entry).initCapacity(arena.allocator(), config.size),
             .arena_allocator = arena,
             .config = config,
@@ -511,7 +475,7 @@ pub const PlasticTree = struct {
         //     self.allocator.free(entry.name);
         // }
         // self.list.deinit();
-        
+
         // deinit the arena allocator instead of...
         self.arena_allocator.deinit();
     }
@@ -520,7 +484,7 @@ pub const PlasticTree = struct {
         // the root node
         var name = try self.allocator().alloc(u8, 1);
         name[0] = '/';
-        try self.list.append(Entry { .name = name, .depth = 0, .parent = 0 });
+        try self.list.append(Entry{ .name = name, .depth = 0, .parent = 0 });
 
         // generate the rest
         try self.genDir(0, 1, self.config.size - 1);
@@ -538,7 +502,7 @@ pub const PlasticTree = struct {
             char.* = 32 + rng.uintAtMost(u8, 127 - 32);
             // remove prohibited characters
             // TODO: make this a config option
-            if (char.* == '/'){
+            if (char.* == '/') {
                 char.* = '0';
             }
         }
@@ -549,23 +513,25 @@ pub const PlasticTree = struct {
     fn genDir(self: *Self, dir_id: u64, depth: usize, share: usize) Allocator.Error!void {
         var rng = std.crypto.random;
 
-        const child_count = rng.uintAtMost(usize, std.math.min(share, self.config.max_dir_size));
+        const child_count = rng.uintAtMost(usize, @min(share, self.config.max_dir_size));
 
         var remaining_share = share - child_count;
         var ii: usize = 0;
-        while(ii < child_count): ({ ii += 1; }){
+        while (ii < child_count) : ({
+            ii += 1;
+        }) {
             const name = try self.genName();
-            try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
+            try self.list.append(Entry{ .name = name, .depth = depth, .parent = dir_id });
 
-            if(remaining_share > 0 and rng.float(f64) > self.config.file_v_dir){
-                const sub_dir_share = @floatToInt(usize, rng.float(f64) * @intToFloat(f64, remaining_share));
+            if (remaining_share > 0 and rng.float(f64) > self.config.file_v_dir) {
+                const sub_dir_share = @as(usize, @intFromFloat(rng.float(f64) * @as(f64, @floatFromInt(remaining_share))));
                 remaining_share -= sub_dir_share;
                 try self.genDir(self.list.items.len - 1, depth + 1, sub_dir_share);
             }
         }
-        if (remaining_share > 0){
+        if (remaining_share > 0) {
             const name = try self.genName();
-            try self.list.append(Entry { .name = name, .depth = depth, .parent = dir_id });
+            try self.list.append(Entry{ .name = name, .depth = depth, .parent = dir_id });
             try self.genDir(self.list.items.len - 1, depth + 1, remaining_share - 1);
         }
     }
@@ -576,22 +542,19 @@ pub const PlasticTree = struct {
 
         try list.gen();
         if (false) {
-            for (list.list.items[0..50]) |entry, id|{
-                std.debug.print(
-                    "id: {any} | depth: {any} | parent: {any} | name: {s}\n", 
-                    .{ id, entry.depth, entry.parent, entry.name }
-                );
+            for (list.list.items[0..50], 0..) |entry, id| {
+                std.debug.print("id: {any} | depth: {any} | parent: {any} | name: {s}\n", .{ id, entry.depth, entry.parent, entry.name });
             }
             var size = list.list.items.len * @sizeOf(PlasticTree.Entry);
             var max_depth: usize = 0;
-            for (list.list.items) |entry|{
+            for (list.list.items) |entry| {
                 size += entry.name.len;
-                if (max_depth < entry.depth){
+                if (max_depth < entry.depth) {
                     max_depth = entry.depth;
                 }
             }
-            std.debug.print("max depth = {}\n", .{ max_depth });
-            std.debug.print("total bytes = {}\n", .{ size });
+            std.debug.print("max depth = {}\n", .{max_depth});
+            std.debug.print("total bytes = {}\n", .{size});
         }
     }
 };

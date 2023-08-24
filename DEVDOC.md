@@ -23,9 +23,11 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
     - [ ] Parser
       - [ ] fwd slash escaping
       - [ ] whitespace in double quote
+    - [ ] Lru cache resizing: use large cache during initial index and downsize afterwards
 
 - [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
 - [ ] Make sure `rename` covers all `moved_to` cases
+- [ ] Remove all inline function markers
 
 - Later
     - [ ] Support less than gram length (3) search strings

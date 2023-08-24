@@ -46,9 +46,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
         //     };
         // }
 
-        pub fn deinit(
-            self: *Self, ha7r:Allocator, sa7r: SwapAllocator, pager: Pager
-        ) void {
+        pub fn deinit(self: *Self, ha7r: Allocator, sa7r: SwapAllocator, pager: Pager) void {
             var it = self.map.valueIterator();
             while (it.next()) |list| {
                 list.deinit(ha7r, sa7r, pager);
@@ -59,26 +57,18 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
 
         /// FIXME: this is very expensive
         pub fn remove(
-            self: *Self, 
-            ha7r:Allocator, 
-            sa7r: SwapAllocator, 
+            self: *Self,
+            ha7r: Allocator,
+            sa7r: SwapAllocator,
             pager: Pager,
-            id: I, 
-            name: []const u8, 
+            id: I,
+            name: []const u8,
             delimiters: []const u8,
             is_eql: *const fn (lhs: I, rhs: I) bool,
         ) !void {
             self.cache.clearRetainingCapacity();
 
-            try mod_gram.grammer(
-                @as(u4, gram_len), 
-                name, true, 
-                delimiters, 
-                Appender(GramPos).new(
-                    &Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, 
-                    Appender(GramPos).Curry.UnmanagedSet.put
-                )
-            );
+            try mod_gram.grammer(@as(u4, gram_len), name, true, delimiters, Appender(GramPos).new(&Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, Appender(GramPos).Curry.UnmanagedSet.put));
 
             var it = self.cache.keyIterator();
             while (it.next()) |gpos| {
@@ -103,40 +93,18 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
                             try list.set(sa7r, pager, idx, last);
                         }
                     } else {
-                        std.log.warn(
-                            @typeName(Self)++".remove: id not found in list",
-                            .{}
-                        );
+                        std.log.warn(@typeName(Self) ++ ".remove: id not found in list", .{});
                     }
                 } else {
-                    std.log.warn(
-                        @typeName(Self)++".remove: list not found for gram",
-                        .{}
-                    );
+                    std.log.warn(@typeName(Self) ++ ".remove: list not found for gram", .{});
                 }
             }
         }
 
-        pub fn insert(
-            self: *Self, 
-            ha7r:Allocator, 
-            sa7r: SwapAllocator, 
-            pager: Pager,
-            id: I, 
-            name: []const u8, 
-            delimiters: []const u8
-        ) !void {
+        pub fn insert(self: *Self, ha7r: Allocator, sa7r: SwapAllocator, pager: Pager, id: I, name: []const u8, delimiters: []const u8) !void {
             self.cache.clearRetainingCapacity();
 
-            try mod_gram.grammer(
-                @as(u4, gram_len), 
-                name, true, 
-                delimiters, 
-                Appender(GramPos).new(
-                    &Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, 
-                    Appender(GramPos).Curry.UnmanagedSet.put
-                )
-            );
+            try mod_gram.grammer(@as(u4, gram_len), name, true, delimiters, Appender(GramPos).new(&Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, Appender(GramPos).Curry.UnmanagedSet.put));
 
             var it = self.cache.keyIterator();
             while (it.next()) |gpos| {
@@ -155,13 +123,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
         }
 
         /// Returned slice is only valid until next modification of `self`.
-        pub fn gramItems(
-            self: *const Self,
-            gram: Gram,
-            sa7r: SwapAllocator,
-            pager: Pager,
-            appender: Appender(I)
-        ) !void {
+        pub fn gramItems(self: *const Self, gram: Gram, sa7r: SwapAllocator, pager: Pager, appender: Appender(I)) !void {
             if (self.map.get(gram)) |list| {
                 var it = list.iterator(sa7r, pager);
                 defer it.close();
@@ -179,7 +141,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
             // sa7r: SwapAllocator,
             // pager: Pager,
             // ha7r: Allocator,
-            
+
             // pub fn init(ha7r: Allocator, sa7r: SwapAllocator, pager: Pager) StrMatcher {
             //     return StrMatcher{
             //         // .ha7r = ha7r,
@@ -189,26 +151,27 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
             // }
 
             pub fn deinit(
-                self: *StrMatcher, ha7r: Allocator, // sa7r: SwapAllocator, pager: Pager
+                self: *StrMatcher,
+                ha7r: Allocator, // sa7r: SwapAllocator, pager: Pager
             ) void {
                 self.out_vec.deinit(ha7r);
                 self.check.deinit(ha7r);
                 self.grams.deinit(ha7r);
             }
-            
-            pub const Error = error { TooShort } || 
-                    Allocator.Error || 
-                    mod_mmap.Pager.SwapInError;
+
+            pub const Error = error{TooShort} ||
+                Allocator.Error ||
+                mod_mmap.Pager.SwapInError;
 
             /// Returned slice is invalid by next usage of this func.
             /// FIXME: optimize
             pub fn strMatch(
-                self: *StrMatcher, 
-                ha7r: Allocator, 
-                sa7r: SwapAllocator, 
+                self: *StrMatcher,
+                ha7r: Allocator,
+                sa7r: SwapAllocator,
                 pager: Pager,
                 plist: *const Self,
-                string: []const u8, 
+                string: []const u8,
                 delimiters: []const u8,
             ) Error![]const I {
                 if (string.len < gram_len) return Error.TooShort;
@@ -217,16 +180,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
                 self.out_vec.clearRetainingCapacity();
                 self.grams.clearRetainingCapacity();
 
-                try mod_gram.grammer(
-                    gram_len, 
-                    string, 
-                    false, 
-                    delimiters, 
-                    Appender(GramPos).new(
-                        &Appender(GramPos).Curry.UnamanagedList { .a7r = ha7r, .list = &self.grams }, 
-                        Appender(GramPos).Curry.UnamanagedList.append
-                    )
-                );
+                try mod_gram.grammer(gram_len, string, false, delimiters, Appender(GramPos).new(&Appender(GramPos).Curry.UnamanagedList{ .a7r = ha7r, .list = &self.grams }, Appender(GramPos).Curry.UnamanagedList.append));
 
                 var is_init = false;
                 for (self.grams.items) |gpos| {
@@ -252,7 +206,7 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
                                     try self.out_vec.append(ha7r, id);
                                 }
                             }
-                            if (self.out_vec.items.len == 0 ) {
+                            if (self.out_vec.items.len == 0) {
                                 // no items contain that gram
                                 return &[_]I{};
                             }
@@ -281,18 +235,13 @@ test "SwapPlist.remove" {
     const TriPList = SwapPostingList(u64, 3);
     // NOTE: `expected` should be ordered ascendingly
     comptime var table = .{
-        .{ 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
-            .to_remove = &[_]usize{ 0 },
-            .query = "Bag", 
-            .expected =  &.{ 1, 2 },
+        .{
+            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..],
+            .to_remove = &[_]usize{0},
+            .query = "Bag",
+            .expected = &.{ 1, 2 },
         },
-        .{ 
-            .items = ([_][]const u8{ "Wurlitzer", "Skarlitzer", "Askenlitzer" })[0..], 
-            .to_remove = &[_]usize{ 1 },
-            .query = "litzer", 
-            .expected = &.{0, 2} 
-        },
+        .{ .items = ([_][]const u8{ "Wurlitzer", "Skarlitzer", "Askenlitzer" })[0..], .to_remove = &[_]usize{1}, .query = "litzer", .expected = &.{ 0, 2 } },
     };
     inline for (table) |case| {
         var ha7r = std.testing.allocator;
@@ -314,25 +263,21 @@ test "SwapPlist.remove" {
         var matcher = TriPList.StrMatcher{};
         defer matcher.deinit(ha7r);
 
-        for (case.items) |name, id| {
-            try plist.insert(
-               ha7r, sa7r, pager, @as(u64, id), name, std.ascii.whitespace[0..]
-            );
+        for (case.items, 0..) |name, id| {
+            try plist.insert(ha7r, sa7r, pager, @as(u64, id), name, std.ascii.whitespace[0..]);
         }
         for (case.to_remove) |id| {
-            try plist.remove(
-                ha7r, sa7r, pager, 
-                @as(u64, id), case.items[id], std.ascii.whitespace[0..],
-                struct { fn isEql(lhs: u64, rhs: u64) bool { return lhs == rhs; } }.isEql
-            );
+            try plist.remove(ha7r, sa7r, pager, @as(u64, id), case.items[id], std.ascii.whitespace[0..], struct {
+                fn isEql(lhs: u64, rhs: u64) bool {
+                    return lhs == rhs;
+                }
+            }.isEql);
         }
 
-        const unsortedMatches = try matcher.strMatch(
-            ha7r, sa7r, pager, &plist, case.query, std.ascii.whitespace[0..]
-        );
+        const unsortedMatches = try matcher.strMatch(ha7r, sa7r, pager, &plist, case.query, std.ascii.whitespace[0..]);
         var matches = try ha7r.dupe(u64, unsortedMatches);
         defer ha7r.free(matches);
-        std.sort.insertionSort(u64, matches, {}, struct {
+        std.sort.insertion(u64, matches, {}, struct {
             fn lt(cx: void, lhs: u64, rhs: u64) bool {
                 _ = cx;
                 return lhs < rhs;
@@ -354,7 +299,7 @@ test "SwapPlist.remove" {
                 std.debug.print("gram {s} => {any}\n", .{ pair.key_ptr.*, gram_items });
             }
             for (matcher.grams.items) |gram| {
-                std.debug.print("search grams: {s}\n", .{ gram.gram });
+                std.debug.print("search grams: {s}\n", .{gram.gram});
             }
             return err;
         };
@@ -363,55 +308,35 @@ test "SwapPlist.remove" {
 
 test "SwapPlist.strMatch" {
     const TriPList = SwapPostingList(u64, 3);
-        // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
-    const Expected = union(enum){
+    // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
+    const Expected = union(enum) {
         ok: []const u64,
         err: TriPList.StrMatcher.Error,
     };
     comptime var table = .{
-        .{ 
-            .name = "single_gram", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
-            .query = "Bag", 
-            .expected = Expected { .ok = &.{ 0, 1, 2 } },
+        .{
+            .name = "single_gram",
+            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..],
+            .query = "Bag",
+            .expected = Expected{ .ok = &.{ 0, 1, 2 } },
         },
-        .{ 
-            .name = "single_gram.not_found", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
-            .query = "Gab", 
-            .expected = Expected { .ok = &.{ } }
+        .{ .name = "single_gram.not_found", .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], .query = "Gab", .expected = Expected{ .ok = &.{} } },
+        .{ .name = "multi_gram", .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend" })[0..], .query = "Bagend", .expected = Expected{ .ok = &.{2} } },
+        .{ .name = "multi_gram.not_found", .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Knife Party" })[0..], .query = "Bagend", .expected = Expected{ .ok = &.{} } },
+        .{
+            .name = "boundary_actual.1",
+            .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..],
+            .query = "Ga",
+            // .expected = &.{0, 2}
+            .expected = Expected{ .err = TriPList.StrMatcher.Error.TooShort },
         },
-        .{ 
-            .name = "multi_gram", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend" })[0..], 
-            .query = "Bagend", 
-            .expected = Expected { .ok = &.{2} }
-        },
-        .{ 
-            .name = "multi_gram.not_found", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Knife Party" })[0..], 
-            .query = "Bagend", 
-            .expected = Expected { .ok = &.{ } }
-        },
-        .{ 
-            .name = "boundary_actual.1", 
-            .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
-            .query = "Ga", 
-            // .expected = &.{0, 2} 
-            .expected = Expected { .err = TriPList.StrMatcher.Error.TooShort },
-        },
-        .{ 
-            .name = "boundary_actual.2", 
-            .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
-            .query = "Sau", 
-            .expected = Expected { .ok = &.{1} }
-        },
-        .{ 
-            .name = "boundary_delimter", 
-            .items = ([_][]const u8{ " Gandalf", " Sauron", " Lady\nGalandriel" })[0..], 
-            .query = "Ga", 
-            // .expected = &.{0, 2} 
-            .expected = Expected { .err = TriPList.StrMatcher.Error.TooShort },
+        .{ .name = "boundary_actual.2", .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], .query = "Sau", .expected = Expected{ .ok = &.{1} } },
+        .{
+            .name = "boundary_delimter",
+            .items = ([_][]const u8{ " Gandalf", " Sauron", " Lady\nGalandriel" })[0..],
+            .query = "Ga",
+            // .expected = &.{0, 2}
+            .expected = Expected{ .err = TriPList.StrMatcher.Error.TooShort },
         },
     };
     inline for (table) |case| {
@@ -434,15 +359,13 @@ test "SwapPlist.strMatch" {
         var matcher = TriPList.StrMatcher{};
         defer matcher.deinit(ha7r);
 
-        for (case.items) |name, id| {
-            try plist.insert(
-               ha7r, sa7r, pager, @as(u64, id), name, std.ascii.whitespace[0..]
-            );
+        for (case.items, 0..) |name, id| {
+            try plist.insert(ha7r, sa7r, pager, @as(u64, id), name, std.ascii.whitespace[0..]);
         }
 
         var res = matcher.strMatch(ha7r, sa7r, pager, &plist, case.query, std.ascii.whitespace[0..]);
         switch (case.expected) {
-            .ok => |expected|{
+            .ok => |expected| {
                 var matches = try res;
                 std.testing.expectEqualSlices(u64, expected, matches) catch |err| {
                     std.debug.print("{s}\n{any}\n!=\n{any}\n", .{ case.name, expected, matches });
@@ -460,14 +383,14 @@ test "SwapPlist.strMatch" {
                         std.debug.print("gram {s} => {any}\n", .{ pair.key_ptr.*, gram_items });
                     }
                     for (matcher.grams.items) |gram| {
-                        std.debug.print("search grams: {s}\n", .{ gram.gram });
+                        std.debug.print("search grams: {s}\n", .{gram.gram});
                     }
                     return err;
                 };
             },
             .err => |e_err| {
                 try std.testing.expectError(e_err, res);
-            }
+            },
         }
     }
 }
@@ -507,16 +430,7 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
         pub fn insert(self: *Self, allocator: Allocator, id: I, name: []const u8, delimiters: []const u8) !void {
             self.cache.clearRetainingCapacity();
 
-            try mod_gram.grammer(
-                gram_len, 
-                name, 
-                true, 
-                delimiters, 
-                Appender(GramPos).new(
-                    &Appender(GramPos).Curry.UnmanagedSet { .set = &self.cache, .a7r = allocator}, 
-                    Appender(GramPos).Curry.UnmanagedSet.put
-                )
-            );
+            try mod_gram.grammer(gram_len, name, true, delimiters, Appender(GramPos).new(&Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = allocator }, Appender(GramPos).Curry.UnmanagedSet.put));
 
             var it = self.cache.keyIterator();
             while (it.next()) |gpos| {
@@ -555,7 +469,7 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
             out_vec: std.ArrayList(I),
             check: std.AutoHashMap(I, void),
             grams: std.ArrayList(GramPos),
-            
+
             pub fn init(allocator: Allocator) StrMatcher {
                 return StrMatcher{
                     .check = std.AutoHashMap(I, void).init(allocator),
@@ -582,15 +496,15 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
             //     match: Match,
             //
             // };
-            
-            pub const Error = error { TooShort } || Allocator.Error;
+
+            pub const Error = error{TooShort} || Allocator.Error;
 
             /// Returned slice is invalid by next usage of this func.
             /// FIXME: optimize
             pub fn strMatch(
-                self: *StrMatcher, 
+                self: *StrMatcher,
                 plist: *const Self,
-                string: []const u8, 
+                string: []const u8,
                 delimiters: []const u8,
             ) Error![]const I {
                 if (string.len < gram_len) return Error.TooShort;
@@ -599,13 +513,7 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
                 self.out_vec.clearRetainingCapacity();
                 self.grams.clearRetainingCapacity();
 
-                try mod_gram.grammer(
-                    gram_len, 
-                    string, 
-                    false, 
-                    delimiters, 
-                    Appender(GramPos).new(&self.grams, std.ArrayList(GramPos).append)
-                );
+                try mod_gram.grammer(gram_len, string, false, delimiters, Appender(GramPos).new(&self.grams, std.ArrayList(GramPos).append));
                 var is_init = false;
                 for (self.grams.items) |gpos| {
                     const gram = gpos.gram;
@@ -626,7 +534,7 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
                                     try self.out_vec.append(id);
                                 }
                             }
-                            if (self.out_vec.items.len == 0 ) {
+                            if (self.out_vec.items.len == 0) {
                                 // no items contain that gram
                                 return &[_]I{};
                             }
@@ -650,55 +558,35 @@ pub fn PostingListUnmanaged(comptime I: type, comptime gram_len: u4) type {
 
 test "plist.strMatch" {
     const TriPList = PostingListUnmanaged(u64, 3);
-        // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
-    const Expected = union(enum){
+    // const exp_uni = @as(TriPList.StrMatcher.Error![]const u64, case.expected);
+    const Expected = union(enum) {
         ok: []const u64,
         err: TriPList.StrMatcher.Error,
     };
     comptime var table = .{
-        .{ 
-            .name = "single_gram", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
-            .query = "Bag", 
-            .expected = Expected { .ok = &.{ 0, 1, 2 } },
+        .{
+            .name = "single_gram",
+            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..],
+            .query = "Bag",
+            .expected = Expected{ .ok = &.{ 0, 1, 2 } },
         },
-        .{ 
-            .name = "single_gram.not_found", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], 
-            .query = "Gab", 
-            .expected = Expected { .ok = &.{ } }
+        .{ .name = "single_gram.not_found", .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend", "Thorin Oakenshield" })[0..], .query = "Gab", .expected = Expected{ .ok = &.{} } },
+        .{ .name = "multi_gram", .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend" })[0..], .query = "Bagend", .expected = Expected{ .ok = &.{2} } },
+        .{ .name = "multi_gram.not_found", .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Knife Party" })[0..], .query = "Bagend", .expected = Expected{ .ok = &.{} } },
+        .{
+            .name = "boundary_actual.1",
+            .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..],
+            .query = "Ga",
+            // .expected = &.{0, 2}
+            .expected = Expected{ .err = TriPList.StrMatcher.Error.TooShort },
         },
-        .{ 
-            .name = "multi_gram", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Bagend" })[0..], 
-            .query = "Bagend", 
-            .expected = Expected { .ok = &.{2} }
-        },
-        .{ 
-            .name = "multi_gram.not_found", 
-            .items = ([_][]const u8{ "Bilbo Baggins", "Frodo Baggins", "Knife Party" })[0..], 
-            .query = "Bagend", 
-            .expected = Expected { .ok = &.{ } }
-        },
-        .{ 
-            .name = "boundary_actual.1", 
-            .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
-            .query = "Ga", 
-            // .expected = &.{0, 2} 
-            .expected = Expected { .err = TriPList.StrMatcher.Error.TooShort },
-        },
-        .{ 
-            .name = "boundary_actual.2", 
-            .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], 
-            .query = "Sau", 
-            .expected = Expected { .ok = &.{1} }
-        },
-        .{ 
-            .name = "boundary_delimter", 
-            .items = ([_][]const u8{ " Gandalf", " Sauron", " Lady\nGalandriel" })[0..], 
-            .query = "Ga", 
-            // .expected = &.{0, 2} 
-            .expected = Expected { .err = TriPList.StrMatcher.Error.TooShort },
+        .{ .name = "boundary_actual.2", .items = ([_][]const u8{ "Gandalf", "Sauron", "Galandriel" })[0..], .query = "Sau", .expected = Expected{ .ok = &.{1} } },
+        .{
+            .name = "boundary_delimter",
+            .items = ([_][]const u8{ " Gandalf", " Sauron", " Lady\nGalandriel" })[0..],
+            .query = "Ga",
+            // .expected = &.{0, 2}
+            .expected = Expected{ .err = TriPList.StrMatcher.Error.TooShort },
         },
     };
     var allocator = std.testing.allocator;
@@ -709,13 +597,13 @@ test "plist.strMatch" {
         var matcher = TriPList.strMatcher(allocator);
         defer matcher.deinit();
 
-        for (case.items) |name, id| {
+        for (case.items, 0..) |name, id| {
             try plist.insert(std.testing.allocator, @as(u64, id), name, std.ascii.whitespace[0..]);
         }
 
         var res = matcher.strMatch(&plist, case.query, std.ascii.whitespace[0..]);
         switch (case.expected) {
-            .ok => |expected|{
+            .ok => |expected| {
                 var matches = try res;
                 std.testing.expectEqualSlices(u64, expected, matches) catch |err| {
                     std.debug.print("{s}\n{any}\n!=\n{any}\n", .{ case.name, expected, matches });
@@ -724,14 +612,14 @@ test "plist.strMatch" {
                         std.debug.print("gram {s} => {any}\n", .{ pair.key_ptr.*, pair.value_ptr.items });
                     }
                     for (matcher.grams.items) |gram| {
-                        std.debug.print("search grams: {s}\n", .{ gram.gram });
+                        std.debug.print("search grams: {s}\n", .{gram.gram});
                     }
                     return err;
                 };
             },
             .err => |e_err| {
                 try std.testing.expectError(e_err, res);
-            }
+            },
         }
     }
 }

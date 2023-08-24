@@ -47,7 +47,7 @@ pub fn main() !void {
     // try mod_fanotify.demo();
 }
 
-fn swapping () !void {
+fn swapping() !void {
     // var fixed_a7r = std.heap.FixedBufferAllocator.init(mmap_mem);
     // var a7r = fixed_a7r.threadSafeAllocator();
 
@@ -57,13 +57,11 @@ fn swapping () !void {
     defer _ = gpa.deinit();
 
     var a7r = gpa.allocator();
-    
+
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
     defer mmap_pager.deinit();
 
-    var lru = try mod_mmap.LRUSwapCache.init(
-        a7r, mmap_pager.pager(), (16 * 1024 * 1024) / std.mem.page_size
-    );
+    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (64 * 1024 * 1024) / std.mem.page_size);
     // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
@@ -86,7 +84,7 @@ fn swapping () !void {
 
     var timer = try std.time.Timer.start();
     {
-        std.log.info("Walking tree from /", . {});
+        std.log.info("Walking tree from /", .{});
 
         var arena = std.heap.ArenaAllocator.init(a7r);
         defer arena.deinit();
@@ -95,23 +93,17 @@ fn swapping () !void {
         var tree = try Tree.walk(arena.allocator(), "/", null);
         // defer tree.deinit();
         const walk_elapsed = timer.read();
-        std.log.info(
-            "Done walking tree with {} items in {d} seconds", 
-            .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) }
-        );
+        std.log.info("Done walking tree with {} items in {d} seconds", .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) });
 
         timer.reset();
-        try db.treeCreated(&tree, Db.Id { .id = 0, .gen = 0 });
+        try db.treeCreated(&tree, Db.Id{ .id = 0, .gen = 0 });
         const index_elapsed = timer.read();
-        std.log.info(
-            "Done adding items to index in {d} seconds", 
-            .{ @divFloor(index_elapsed, std.time.ns_per_s) }
-        );
+        std.log.info("Done adding items to index in {d} seconds", .{@divFloor(index_elapsed, std.time.ns_per_s)});
     }
     // var fanotify_th = FanotifyThread.init(a7r, &db);
     // defer fanotify_th.deinit();
     // try fanotify_th.start();
-    
+
     // std.debug.print("file size: {} KiB\n", .{ (pager.pages.items.len * pager.config.page_size) / 1024 });
     // std.debug.print("page count: {} pages\n", .{ pager.pages.items.len });
     // std.debug.print("page meta bytes: {} KiB\n", .{ (pager.pages.items.len * @sizeOf(mod_mmap.MmapPager.Page)) / 1024  });
@@ -147,38 +139,39 @@ fn swapping () !void {
         const elapsed = timer.read();
 
         var last_idx = @min(matches.len, 10);
-        for (matches[0..last_idx]) |id, ii| {
+        for (matches[0..last_idx], 0..) |id, ii| {
             const path = try weaver.pathOf(&db, id, std.fs.path.sep);
             std.debug.print("{}. {s}\n", .{ ii, path });
         }
 
         std.log.info(
-            "{} results in {d} seconds", 
-            .{matches.len, @intToFloat(f64, elapsed) / std.time.ns_per_s},
+            "{} results in {d} seconds",
+            .{ matches.len, @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s },
         );
-        std.log.info(
-            "query: {}", .{ query }
-        );
+        std.log.info("query: {}", .{query});
     }
 }
 
 test {
-    std.testing.refAllDecls(@This());
+    // std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDeclsRecursive(struct {
+        db: @import("Database.zig"),
+        query: @import("Query.zig"),
+        // _ = @import("benches.zig");
+        fan: @import("fanotify.zig"),
+        gram: @import("gram.zig"),
+        index:  @import("index.zig"),
+        mmap:  @import("mmap.zig"),
+        plist: @import("plist.zig"),
+        tw: @import("treewalking.zig"),
+        utils: @import("utils.zig"),
+    });
     // _ = ThreadPool;
-    _ = Database;
-    _ = mod_fanotify;
-    _ = mod_gram;
-    _ = mod_index;
-    _ = mod_mmap;
-    _ = Query;
-    _ = mod_plist;
-    _ = mod_treewalking;
-    _ = mod_utils;
 }
 
 // fn BinarySearchTree(
-//     comptime T: type, 
-//     comptime Ctx: type, 
+//     comptime T: type,
+//     comptime Ctx: type,
 //     comptime compare_fn: fn(context: Ctx, a: T, b: T) std.math.Order,
 //     comptime equal_fn: fn(context: Ctx, a: T, b: T) bool,
 // ) type {
@@ -261,13 +254,13 @@ test {
 //         func: fn (*anyopaque) void,
 //     };
 //     const Queue = std.atomic.Queue(Task);
-// 
+//
 //     ha7r: Allocator,
 //     queue: Queue,
 //     opt_threads: ?[]std.Thread = null,
 //     break_signal: bool = false,
 //     opt_death_signal: ?[]bool = null,
-// 
+//
 //     /// You can use `std.Thread.getCpuCount` to set the count.
 //     fn init(ha7r: Allocator) Self {
 //         return Self {
@@ -275,7 +268,7 @@ test {
 //             .queue = Queue.init(),
 //         };
 //     }
-// 
+//
 //     fn start(self: *Self, size: usize) !void {
 //         if (self.opt_threads != null) return error.ThreadPoolAreadyStarted;
 //         var threads = try self.ha7r.alloc(std.Thread, size);
@@ -293,7 +286,7 @@ test {
 //         self.opt_threads = threads;
 //         self.opt_death_signal = death_signal;
 //     }
-// 
+//
 //     /// Detachs threads after waiting for timeout.
 //     fn deinit(self: *Self, timeout_ns: u64) void {
 //         if (self.opt_threads == null) return;
@@ -311,7 +304,7 @@ test {
 //         self.ha7r.free(threads);
 //         self.ha7r.free(death_signal);
 //     }
-// 
+//
 //     fn threadStart(self: *Self, id: usize) void {
 //         var death_signal = self.opt_death_signal.?;
 //         while (true) {
@@ -328,7 +321,7 @@ test {
 //         }
 //         death_signal[id] = true;
 //     }
-// 
+//
 //     fn do(
 //         self: *Self,
 //         //comptime func: fn (*anyopaque) void,
@@ -342,7 +335,7 @@ test {
 //         };
 //         self.queue.put(node);
 //     }
-// 
+//
 //     test "ThreadPool" {
 //         var ha7r = std.testing.allocator;
 //         var pool = ThreadPool.init(ha7r);

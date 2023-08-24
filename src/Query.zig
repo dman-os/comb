@@ -72,13 +72,13 @@ pub const Filter = struct {
         pub fn deinit(self: *@This(), ha7r: Allocator) void {
             switch (self.*) {
                 .nameMatch => |*load| load.deinit(ha7r),
-                .childOf => |subclause| { 
+                .childOf => |subclause| {
                     subclause.deinit(ha7r);
-                    ha7r.destroy(subclause); 
+                    ha7r.destroy(subclause);
                 },
-                .descendantOf => |subclause| { 
+                .descendantOf => |subclause| {
                     subclause.deinit(ha7r);
-                    ha7r.destroy(subclause); 
+                    ha7r.destroy(subclause);
                 },
             }
         }
@@ -105,9 +105,9 @@ pub const Filter = struct {
                         }
                         ha7r.free(clauses);
                     },
-                    .not => |clause| { 
+                    .not => |clause| {
                         clause.deinit(ha7r);
-                        ha7r.destroy(clause); 
+                        ha7r.destroy(clause);
                     },
                 }
             }
@@ -161,17 +161,7 @@ pub const Filter = struct {
 
             pub inline fn addNameMatch(self: *@This(), string: []const u8, exact: bool) !void {
                 if (string.len == 0) @panic("NameMatch string can not empty");
-                try self.sub_clauses.append(
-                    self.ha7r, 
-                    Clause { 
-                        .param = Param { 
-                            .nameMatch = .{ 
-                                .string = try self.ha7r.dupe(u8, string) ,
-                                .exact = exact
-                            } 
-                        } 
-                    }
-                );
+                try self.sub_clauses.append(self.ha7r, Clause{ .param = Param{ .nameMatch = .{ .string = try self.ha7r.dupe(u8, string), .exact = exact } } });
             }
 
             //pub inline fn withChildOf(self: @This(), parentFilter: Clause) !@This() {
@@ -182,14 +172,7 @@ pub const Filter = struct {
             pub inline fn addChildOf(self: *@This(), parentFilter: Clause) !void {
                 var clause = try self.ha7r.create(Clause);
                 clause.* = parentFilter;
-                try self.sub_clauses.append(
-                    self.ha7r, 
-                    Clause { 
-                        .param = Param { 
-                            .childOf = clause
-                        } 
-                    }
-                );
+                try self.sub_clauses.append(self.ha7r, Clause{ .param = Param{ .childOf = clause } });
             }
 
             //pub inline fn withDescendantOf(self: @This(), ancestorFilter: Clause) !@This() {
@@ -200,49 +183,36 @@ pub const Filter = struct {
             pub inline fn addDescendantOf(self: *@This(), ancestorFilter: Clause) !void {
                 var clause = try self.ha7r.create(Clause);
                 clause.* = ancestorFilter;
-                try self.sub_clauses.append(
-                    self.ha7r, 
-                    Clause { 
-                        .param = Param { 
-                            .descendantOf = clause
-                        } 
-                    }
-                );
+                try self.sub_clauses.append(self.ha7r, Clause{ .param = Param{ .descendantOf = clause } });
             }
 
             pub inline fn build(self: *@This()) !Clause {
-                if (self.sub_clauses.items.len == 0) 
+                if (self.sub_clauses.items.len == 0)
                     @panic(@typeName(@This()) ++ " need at least one sub clauses");
                 if (self.op) |op| {
                     switch (op) {
                         .@"and" => {
                             if (self.sub_clauses.items.len == 1)
                                 @panic(".and operator need more than one sub clause");
-                            return Clause { 
-                                .op = Op { 
-                                    .@"and" = try self.sub_clauses.toOwnedSlice(self.ha7r),
-                                } 
-                            };
+                            return Clause{ .op = Op{
+                                .@"and" = try self.sub_clauses.toOwnedSlice(self.ha7r),
+                            } };
                         },
                         .@"or" => {
                             if (self.sub_clauses.items.len == 1)
                                 @panic(".or operator need more than one sub clause");
-                            return Clause { 
-                                .op = Op { 
-                                    .@"or" = try self.sub_clauses.toOwnedSlice(self.ha7r),
-                                } 
-                            };
+                            return Clause{ .op = Op{
+                                .@"or" = try self.sub_clauses.toOwnedSlice(self.ha7r),
+                            } };
                         },
                         .not => {
                             if (self.sub_clauses.items.len > 1)
                                 @panic(".not operator can only have one sub clause");
                             var ptr = try self.ha7r.create(Clause);
                             ptr.* = self.sub_clauses.items[0];
-                            return Clause { 
-                                .op = Op { 
-                                    .not = ptr ,
-                                } 
-                            };
+                            return Clause{ .op = Op{
+                                .not = ptr,
+                            } };
                         },
                     }
                 } else {
@@ -253,12 +223,7 @@ pub const Filter = struct {
             }
         };
 
-        pub fn format(
-            value: @This(), 
-            comptime fmt: []const u8, 
-            options: std.fmt.FormatOptions, 
-            writer: anytype
-        ) !void {
+        pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
             const T = @This();
             const info = @typeInfo(T).Union;
             if (fmt.len != 0) std.fmt.invalidFmtErr(fmt, value);
@@ -269,14 +234,12 @@ pub const Filter = struct {
                 try writer.writeAll(" = ");
                 inline for (info.fields) |u_field| {
                     if (value == @field(UnionTagType, u_field.name)) {
-                        try std.fmt.formatType(
-                            @field(value, u_field.name), "any", options, writer, std.fmt.default_max_depth
-                        );
+                        try std.fmt.formatType(@field(value, u_field.name), "any", options, writer, std.fmt.default_max_depth);
                     }
                 }
                 try writer.writeAll(" }");
             } else {
-                try std.fmt.format(writer, "@{x}", .{@ptrToInt(&value)});
+                try std.fmt.format(writer, "@{x}", .{@intFromPtr(&value)});
             }
         }
     };

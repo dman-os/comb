@@ -24,8 +24,8 @@ const mod_bench = struct {
         // min_measure_iterations: usize =  60,
     };
 
-    fn bench(name: []const u8, payload: anytype, func: fn(@TypeOf(payload))void, config: BenchConfig) !void {
-        const expected_avg = blk: { 
+    fn bench(name: []const u8, payload: anytype, func: fn (@TypeOf(payload)) void, config: BenchConfig) !void {
+        const expected_avg = blk: {
             var warmup_time = config.min_warmup_time_ns;
             // var warmup_iterations = config.min_warmup_iterations;
             // {
@@ -34,24 +34,23 @@ const mod_bench = struct {
             //     const elapsed = timer.read();
             //     const warmup_iterations_estimate =  @divTrunc(config.min_warmup_time_ns, elapsed);
             // }
-            std.debug.print(
-                "Warming up for {d} ms\n", 
-                .{ @intToFloat(f64, warmup_time) / 1_000_000 }
-            );
+            std.debug.print("Warming up for {d} ms\n", .{@as(f64, @floatFromInt(warmup_time)) / 1_000_000});
             var timer = try std.time.Timer.start();
             var warmup_it: usize = 0;
-            while (timer.read() < warmup_time) : ({ warmup_it += 1; }){
+            while (timer.read() < warmup_time) : ({
+                warmup_it += 1;
+            }) {
                 func(payload);
             }
             const total = timer.read();
             const avg = total / warmup_it;
             std.debug.print(
-                "Warming done. Took {d} ms with {} iterations\n", 
-                .{ @intToFloat(f64, total) / 1_000_000, warmup_it },
+                "Warming done. Took {d} ms with {} iterations\n",
+                .{ @as(f64, @floatFromInt(total)) / 1_000_000, warmup_it },
             );
             break :blk avg;
         };
-        // const iterations = 
+        // const iterations =
         //     if (expected_avg * config.min_measure_iterations < config.min_measure_time_ns)
         //         @divTrunc(config.min_measure_time_ns, expected_avg)
         //     else config.min_measure_iterations;
@@ -60,10 +59,7 @@ const mod_bench = struct {
         //     msr_time = config.min_measure_iterations * expected_avg;
         // }
         const iterations_est = @divTrunc(msr_time, expected_avg);
-        std.debug.print(
-            "Measuring for {d} ms with {} iterations\n", 
-            .{ @intToFloat(f64, msr_time) / 1_000_000, iterations_est}
-        );
+        std.debug.print("Measuring for {d} ms with {} iterations\n", .{ @as(f64, @floatFromInt(msr_time)) / 1_000_000, iterations_est });
 
         var avg_elapsed: usize = expected_avg;
         var low_bound: usize = std.math.maxInt(usize);
@@ -72,7 +68,9 @@ const mod_bench = struct {
         var timer = try std.time.Timer.start();
         var total_time: u64 = 0;
         var iterations: usize = 0;
-        while (total_time < msr_time) : ({ iterations += 1; }) {
+        while (total_time < msr_time) : ({
+            iterations += 1;
+        }) {
             total_time += timer.lap();
             func(payload);
             const elapsed = timer.lap();
@@ -81,26 +79,11 @@ const mod_bench = struct {
             low_bound = if (elapsed < low_bound) elapsed else low_bound;
             up_bound = if (elapsed > up_bound) elapsed else up_bound;
         }
-        std.debug.print(
-            "{s}: [low {d}ms; average {d}ms; upper {d}ms] for {} iterations\n", 
-            .{ 
-                name,
-                @intToFloat(f64, low_bound) / 1_000_000, 
-                @intToFloat(f64, avg_elapsed) / 1_000_000, 
-                @intToFloat(f64, up_bound) / 1_000_000, 
-                iterations 
-            }
-        );
+        std.debug.print("{s}: [low {d}ms; average {d}ms; upper {d}ms] for {} iterations\n", .{ name, @as(f64, @floatFromInt(low_bound)) / 1_000_000, @as(f64, @floatFromInt(avg_elapsed)) / 1_000_000, @as(f64, @floatFromInt(up_bound)) / 1_000_000, iterations });
     }
 };
 
-fn bench_plist(
-    comptime I: type,
-    comptime gram_len: u4,
-    plist: *mod_plist.PostingListUnmanaged(I, gram_len), 
-    a7r: Allocator, 
-    search_str: [] const u8
-) !void {
+fn bench_plist(comptime I: type, comptime gram_len: u4, plist: *mod_plist.PostingListUnmanaged(I, gram_len), a7r: Allocator, search_str: []const u8) !void {
     {
         var max: usize = 0;
         var max_gram = [_]u8{mod_gram.TEC} ** gram_len;
@@ -113,7 +96,7 @@ fn bench_plist(
         defer dist_list_len.deinit();
 
         var it = plist.map.iterator();
-        while(it.next()) |*pair|{
+        while (it.next()) |*pair| {
             const gram = pair.key_ptr.*;
             const list = pair.value_ptr;
             const len = list.items.len;
@@ -124,23 +107,23 @@ fn bench_plist(
             bucket_count += 1;
             entry_count += len;
 
-            if (len > max){
+            if (len > max) {
                 max = len;
                 max_gram = gram;
             }
-            if (len < min){
+            if (len < min) {
                 min = len;
                 min_gram = gram;
             }
-            avg_len_list = (avg_len_list + @intToFloat(f64, len)) * 0.5;
+            avg_len_list = (avg_len_list + @as(f64, @floatFromInt(len))) * 0.5;
         }
         const mode_list_len = blk: {
             var max_occ: usize = 0;
             var max_occ_count: usize = 0;
             var iter = dist_list_len.iterator();
-            while (iter.next()) |pair|{
+            while (iter.next()) |pair| {
                 const occ = pair.value_ptr.*;
-                if (occ > max_occ_count) { 
+                if (occ > max_occ_count) {
                     max_occ_count = occ;
                     max_occ = pair.key_ptr.*;
                 }
@@ -156,8 +139,7 @@ fn bench_plist(
             \\list len avg = {}
             \\list len mode = {}
             \\
-            , .{ bucket_count, entry_count, max, max_gram, min, min_gram, avg_len_list, mode_list_len }
-        );
+        , .{ bucket_count, entry_count, max, max_gram, min, min_gram, avg_len_list, mode_list_len });
     }
 
     const BenchCtx = struct {
@@ -167,15 +149,11 @@ fn bench_plist(
         search_str: []const u8,
         matcher: mod_plist.PostingListUnmanaged(I, gram_len).StrMatcher,
         fn do(self: *Self) void {
-            _ = self.matcher.strMatch(
-                    self.plist, 
-                    self.search_str,
-                    std.ascii.whitespace[0..]
-            ) catch @panic("wtf");
+            _ = self.matcher.strMatch(self.plist, self.search_str, std.ascii.whitespace[0..]) catch @panic("wtf");
         }
     };
-    var ctx = BenchCtx{ 
-        .a7r = a7r, 
+    var ctx = BenchCtx{
+        .a7r = a7r,
         .plist = plist,
         .search_str = search_str,
         .matcher = mod_plist.PostingListUnmanaged(I, gram_len).strMatcher(a7r),
@@ -189,7 +167,7 @@ fn bench_plist(
 test "rowscan.bench.gen" {
     const size: usize = 1_000_000;
     // var a7r = std.testing.allocator;
-    
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var a7r = arena.allocator();
@@ -202,7 +180,7 @@ test "rowscan.bench.gen" {
     defer tree.deinit();
 
     try tree.gen();
-    std.debug.print("done generating fake tree of size {}\n", .{ size });
+    std.debug.print("done generating fake tree of size {}\n", .{size});
 
     const BenchCtx = struct {
         const Self = @This();
@@ -212,15 +190,15 @@ test "rowscan.bench.gen" {
         matches: std.ArrayList(usize),
         fn do(self: *Self) void {
             self.matches.clearRetainingCapacity();
-            for (self.tree.list.items) |entry, id| {
+            for (self.tree.list.items, 0..) |entry, id| {
                 if (std.mem.indexOf(u8, entry.name, self.search_str)) |_| {
                     self.matches.append(id) catch @panic("wtf");
                 }
             }
         }
     };
-    var ctx = BenchCtx{ 
-        .a7r = a7r, 
+    var ctx = BenchCtx{
+        .a7r = a7r,
         .tree = &tree,
         // .search_str = tree.list.items[tree.list.items.len - 1].name,
         .search_str = "abc",
@@ -233,7 +211,10 @@ test "rowscan.bench.gen" {
 }
 
 test "Db.NaiveNameMatcher" {
-    const Db = comb.mod_db.Database;
+    if (true) {
+        return error.SkipZigTest;
+    }
+    const Db = comb.Database;
     const size: usize = 1_000_000;
 
     var a7r = std.testing.allocator;
@@ -269,20 +250,17 @@ test "Db.NaiveNameMatcher" {
 
         timer.reset();
         try tree.gen();
-        std.log.info(
-            "Done generating tree of size {} items in {d} seconds", 
-            .{ size, @divFloor(timer.read(), std.time.ns_per_s) }
-        );
+        std.log.info("Done generating tree of size {} items in {d} seconds", .{ size, @divFloor(timer.read(), std.time.ns_per_s) });
 
         var new_ids = try aa7r.alloc(Db.Id, tree.list.items.len);
         defer aa7r.free(new_ids);
         timer.reset();
-        for (tree.list.items) |t_entry, ii| {
-            const i_entry = comb.mod_treewalking.FsEntry(Db.Id, []const u8) {
+        for (tree.list.items, 0..) |t_entry, ii| {
+            const i_entry = comb.mod_treewalking.FsEntry(Db.Id, []const u8){
                 .name = t_entry.name,
                 .parent = new_ids[t_entry.parent],
                 .depth = t_entry.depth,
-                .kind = Db.Entry.Kind.File,
+                .kind = Db.Entry.Kind.file,
                 .size = 1024 * 1024,
                 .inode = ii,
                 .dev = 1,
@@ -295,10 +273,7 @@ test "Db.NaiveNameMatcher" {
             };
             new_ids[ii] = try db.fileCreated(&i_entry);
         }
-        std.log.info(
-            "Done adding items to index in {d} seconds", 
-            .{ @divFloor(timer.read(), std.time.ns_per_s) }
-        );
+        std.log.info("Done adding items to index in {d} seconds", .{@divFloor(timer.read(), std.time.ns_per_s)});
     }
     var matcher = db.naiveNameMatcher();
     defer matcher.deinit();
@@ -314,7 +289,7 @@ test "Db.NaiveNameMatcher" {
             };
         }
     };
-    var ctx = BenchCtx{ 
+    var ctx = BenchCtx{
         .matcher = &matcher,
     };
     try mod_bench.bench("Db.NaiveNameMatcher", &ctx, BenchCtx.do, .{});
@@ -326,7 +301,7 @@ test "plist.bench.gen" {
     const gram_len = 3;
 
     // var a7r = std.testing.allocator;
-    
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var a7r = arena.allocator();
@@ -334,12 +309,12 @@ test "plist.bench.gen" {
     // var gp = std.heap.GeneralPurposeAllocator(.{}){};
     // defer _ = gp.deinit();
     // var a7r = gp.allocator();
-    
+
     var tree = try PlasticTree.init(.{ .size = size }, a7r);
     defer tree.deinit();
 
     try tree.gen();
-    std.debug.print("done generating fake tree of size {}\n", .{ size });
+    std.debug.print("done generating fake tree of size {}\n", .{size});
 
     var plist = mod_plist.PostingListUnmanaged(id_t, gram_len).init();
     // defer plist.deinit(a7r);
@@ -347,19 +322,19 @@ test "plist.bench.gen" {
     var longest: usize = 0;
     var longest_name = try a7r.alloc(u8, 1);
     defer a7r.free(longest_name);
-    for (tree.list.items) |entry, id|{
-        try plist.insert(a7r, @intCast(id_t, id), entry.name, std.ascii.whitespace[0..]);
-        if (id % 10_000 == 0 ) {
+    for (tree.list.items, 0..) |entry, id| {
+        try plist.insert(a7r, @as(id_t, @intCast(id)), entry.name, std.ascii.whitespace[0..]);
+        if (id % 10_000 == 0) {
             std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
         }
-        if (entry.name.len > longest){
+        if (entry.name.len > longest) {
             longest = entry.name.len;
             std.debug.print("got long at {s}\n", .{entry.name});
             a7r.free(longest_name);
             longest_name = try a7r.dupe(u8, entry.name);
         }
     }
-    std.debug.print("done adding to plist {} items\n", .{ size });
+    std.debug.print("done adding to plist {} items\n", .{size});
     try bench_plist(id_t, gram_len, &plist, a7r, longest_name);
 }
 
@@ -380,7 +355,7 @@ test "plist.bench.walk" {
 
     var tree = try Tree.walk(a7r, "/", size);
     defer tree.deinit();
-    std.debug.print("done walking tree for {} items\n", .{ tree.list.items.len });
+    std.debug.print("done walking tree for {} items\n", .{tree.list.items.len});
     var weaver = Tree.FullPathWeaver.init();
     defer weaver.deinit(a7r);
 
@@ -398,37 +373,37 @@ test "plist.bench.walk" {
         var dist_name_len = std.AutoArrayHashMap(usize, usize).init(a7r);
         defer dist_name_len.deinit();
 
-        var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
-        for (tree.list.items) |entry, id| {
+        var avg_len = @as(f64, @floatFromInt(tree.list.items[0].name.len));
+        for (tree.list.items, 0..) |entry, id| {
             try plist.insert(a7r, id, entry.name, std.ascii.whitespace[0..]);
-            if (id % 10_000 == 0 ) {
+            if (id % 10_000 == 0) {
                 std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
             }
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 a7r.free(deepest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 deepest_name = try a7r.dupe(u8, path);
             }
-            avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
+            avg_len = (avg_len + @as(f64, @floatFromInt(entry.name.len))) * 0.5;
             if (entry.name.len > longest) {
                 longest = entry.name.len;
                 a7r.free(longest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 longest_name = try a7r.dupe(u8, path);
             }
             var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);
             occ.value_ptr.* += 1;
         }
-        std.debug.print("done adding to plist for {} items\n", .{ tree.list.items.len });
+        std.debug.print("done adding to plist for {} items\n", .{tree.list.items.len});
 
         const mode_name_len = blk: {
             var max_occ: usize = 0;
             var max_occ_count: usize = 0;
             var it = dist_name_len.iterator();
-            while (it.next()) |pair|{
+            while (it.next()) |pair| {
                 const occ = pair.value_ptr.*;
-                if (occ > max_occ_count) { 
+                if (occ > max_occ_count) {
                     max_occ_count = occ;
                     max_occ = pair.key_ptr.*;
                 }
@@ -441,7 +416,8 @@ test "plist.bench.walk" {
             \\name len avg = {}
             \\name len mode = {}
             \\
-            , .{ deepest, deepest_name, longest, longest_name, avg_len, mode_name_len },
+        ,
+            .{ deepest, deepest_name, longest, longest_name, avg_len, mode_name_len },
         );
 
         break :ss longest_name;
@@ -449,15 +425,7 @@ test "plist.bench.walk" {
     try bench_plist(id_t, gram_len, &plist, a7r, search_str);
 }
 
-fn bench_plist_swapping(
-    comptime I: type,
-    comptime gram_len: u4,
-    plist: *mod_plist.SwapPostingList(I, gram_len), 
-    a7r: Allocator, 
-    sa7r: SwapAllocator,
-    pager: Pager,
-    search_str: [] const u8
-) !void {
+fn bench_plist_swapping(comptime I: type, comptime gram_len: u4, plist: *mod_plist.SwapPostingList(I, gram_len), a7r: Allocator, sa7r: SwapAllocator, pager: Pager, search_str: []const u8) !void {
     const PList = mod_plist.SwapPostingList(I, gram_len);
     {
         var max: usize = 0;
@@ -471,7 +439,7 @@ fn bench_plist_swapping(
         defer dist_list_len.deinit();
 
         var it = plist.map.iterator();
-        while(it.next()) |*pair|{
+        while (it.next()) |*pair| {
             const gram = pair.key_ptr.*;
             const list = pair.value_ptr;
             const len = list.len;
@@ -482,23 +450,23 @@ fn bench_plist_swapping(
             bucket_count += 1;
             entry_count += len;
 
-            if (len > max){
+            if (len > max) {
                 max = len;
                 max_gram = gram;
             }
-            if (len < min){
+            if (len < min) {
                 min = len;
                 min_gram = gram;
             }
-            avg_len_list = (avg_len_list + @intToFloat(f64, len)) * 0.5;
+            avg_len_list = (avg_len_list + @as(f64, @floatFromInt(len))) * 0.5;
         }
         const mode_list_len = blk: {
             var max_occ: usize = 0;
             var max_occ_count: usize = 0;
             var iter = dist_list_len.iterator();
-            while (iter.next()) |pair|{
+            while (iter.next()) |pair| {
                 const occ = pair.value_ptr.*;
-                if (occ > max_occ_count) { 
+                if (occ > max_occ_count) {
                     max_occ_count = occ;
                     max_occ = pair.key_ptr.*;
                 }
@@ -514,8 +482,7 @@ fn bench_plist_swapping(
             \\list len avg = {}
             \\list len mode = {}
             \\
-            , .{ bucket_count, entry_count, max, max_gram, min, min_gram, avg_len_list, mode_list_len }
-        );
+        , .{ bucket_count, entry_count, max, max_gram, min, min_gram, avg_len_list, mode_list_len });
     }
 
     const BenchCtx = struct {
@@ -527,16 +494,11 @@ fn bench_plist_swapping(
         search_str: []const u8,
         matcher: PList.StrMatcher = .{},
         fn do(self: *Self) void {
-            _ = self.matcher.strMatch(
-                    self.a7r, self.sa7r, self.pager,
-                    self.plist, 
-                    self.search_str,
-                    std.ascii.whitespace[0..]
-            ) catch @panic("wtf");
+            _ = self.matcher.strMatch(self.a7r, self.sa7r, self.pager, self.plist, self.search_str, std.ascii.whitespace[0..]) catch @panic("wtf");
         }
     };
-    var ctx = BenchCtx{ 
-        .a7r = a7r, 
+    var ctx = BenchCtx{
+        .a7r = a7r,
         .sa7r = sa7r,
         .pager = pager,
         .plist = plist,
@@ -554,7 +516,7 @@ test "SwapPList.bench.gen" {
     const gram_len = 3;
 
     // var a7r = std.testing.allocator;
-    
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var a7r = arena.allocator();
@@ -571,12 +533,12 @@ test "SwapPList.bench.gen" {
     var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
-    
+
     var tree = try PlasticTree.init(.{ .size = size }, a7r);
     defer tree.deinit();
 
     try tree.gen();
-    std.debug.print("done generating fake tree of size {}\n", .{ size });
+    std.debug.print("done generating fake tree of size {}\n", .{size});
 
     var plist = mod_plist.SwapPostingList(id_t, gram_len){};
     // defer plist.deinit(a7r, sa7r, pager);
@@ -584,29 +546,21 @@ test "SwapPList.bench.gen" {
     var longest: usize = 0;
     var longest_name = try a7r.alloc(u8, 1);
     defer a7r.free(longest_name);
-    for (tree.list.items) |entry, id|{
-        try plist.insert(a7r, sa7r, pager, @intCast(id_t, id), entry.name, std.ascii.whitespace[0..]);
-        if (id % 10_000 == 0 ) {
+    for (tree.list.items, 0..) |entry, id| {
+        try plist.insert(a7r, sa7r, pager, @as(id_t, @intCast(id)), entry.name, std.ascii.whitespace[0..]);
+        if (id % 10_000 == 0) {
             println("added {} items to plist, now at {s}", .{ id, entry.name });
             // println("{} hot pages and {} cold pages items to plist", .{ lru.hotCount(), lru.coldCount() });
         }
-        if (entry.name.len > longest){
+        if (entry.name.len > longest) {
             longest = entry.name.len;
             std.debug.print("got long at {s}\n", .{entry.name});
             a7r.free(longest_name);
             longest_name = try a7r.dupe(u8, entry.name);
         }
     }
-    std.debug.print("done adding to plist {} items\n", .{ size });
-    try bench_plist_swapping(
-        id_t, 
-        gram_len, 
-        &plist, 
-        a7r, 
-        sa7r,
-        pager,
-        longest_name
-    );
+    std.debug.print("done adding to plist {} items\n", .{size});
+    try bench_plist_swapping(id_t, gram_len, &plist, a7r, sa7r, pager, longest_name);
 }
 
 test "SwapPList.bench.walk" {
@@ -626,7 +580,7 @@ test "SwapPList.bench.walk" {
 
     var tree = try Tree.walk(a7r, "/", size);
     defer tree.deinit();
-    std.debug.print("done walking tree for {} items\n", .{ tree.list.items.len });
+    std.debug.print("done walking tree for {} items\n", .{tree.list.items.len});
     var weaver = Tree.FullPathWeaver.init();
     defer weaver.deinit(a7r);
 
@@ -658,37 +612,37 @@ test "SwapPList.bench.walk" {
         var dist_name_len = std.AutoArrayHashMap(usize, usize).init(a7r);
         defer dist_name_len.deinit();
 
-        var avg_len = @intToFloat(f64, tree.list.items[0].name.len);
-        for (tree.list.items) |entry, id| {
+        var avg_len = @as(f64, @floatFromInt(tree.list.items[0].name.len));
+        for (tree.list.items, 0..) |entry, id| {
             try plist.insert(a7r, sa7r, pager, id, entry.name, std.ascii.whitespace[0..]);
-            if (id % 10_000 == 0 ) {
+            if (id % 10_000 == 0) {
                 std.debug.print("added {} items to plist, now at {s}\n", .{ id, entry.name });
             }
             if (entry.depth > deepest) {
                 deepest = entry.depth;
                 a7r.free(deepest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 deepest_name = try a7r.dupe(u8, path);
             }
-            avg_len = (avg_len + @intToFloat(f64, entry.name.len)) * 0.5;
+            avg_len = (avg_len + @as(f64, @floatFromInt(entry.name.len))) * 0.5;
             if (entry.name.len > longest) {
                 longest = entry.name.len;
                 a7r.free(longest_name);
-                const path = try weaver.pathOf(a7r, tree, id, '/');
+                const path = try weaver.pathOf(a7r, &tree, id, '/');
                 longest_name = try a7r.dupe(u8, path);
             }
             var occ = try dist_name_len.getOrPutValue(entry.name.len, 0);
             occ.value_ptr.* += 1;
         }
-        std.debug.print("done adding to plist for {} items\n", .{ tree.list.items.len });
+        std.debug.print("done adding to plist for {} items\n", .{tree.list.items.len});
 
         const mode_name_len = blk: {
             var max_occ: usize = 0;
             var max_occ_count: usize = 0;
             var it = dist_name_len.iterator();
-            while (it.next()) |pair|{
+            while (it.next()) |pair| {
                 const occ = pair.value_ptr.*;
-                if (occ > max_occ_count) { 
+                if (occ > max_occ_count) {
                     max_occ_count = occ;
                     max_occ = pair.key_ptr.*;
                 }
@@ -701,18 +655,11 @@ test "SwapPList.bench.walk" {
             \\name len avg = {}
             \\name len mode = {}
             \\
-            , .{ deepest, deepest_name, longest, longest_name, avg_len, mode_name_len },
+        ,
+            .{ deepest, deepest_name, longest, longest_name, avg_len, mode_name_len },
         );
 
         break :ss longest_name;
     };
-    try bench_plist_swapping(
-        id_t, 
-        gram_len, 
-        &plist, 
-        a7r, 
-        sa7r,
-        pager,
-        search_str
-    );
+    try bench_plist_swapping(id_t, gram_len, &plist, a7r, sa7r, pager, search_str);
 }

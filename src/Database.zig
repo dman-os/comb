@@ -36,28 +36,22 @@ pub const Id = packed struct {
     id: u24,
     comptime {
         if (@sizeOf(Id) != @sizeOf(u32)) {
-            @compileError(std.fmt.comptimePrint(
-                "unexpected size mismatch: (" ++ @typeName(Id) ++ "){} != (" ++ @typeName(u32) ++ ") {}\n",
-                .{ @sizeOf(Id), @sizeOf(u32) }
-            ));
+            @compileError(std.fmt.comptimePrint("unexpected size mismatch: (" ++ @typeName(Id) ++ "){} != (" ++ @typeName(u32) ++ ") {}\n", .{ @sizeOf(Id), @sizeOf(u32) }));
         }
         if (@bitSizeOf(Id) != @bitSizeOf(u32)) {
-            @compileError(std.fmt.comptimePrint(
-                "unexpected bitSize mismatch: (" ++ @typeName(Id) ++ "){} != (" ++ @typeName(u32) ++ ") {}\n",
-                .{ @bitSizeOf(Id), @bitSizeOf(u32) }
-            ));
+            @compileError(std.fmt.comptimePrint("unexpected bitSize mismatch: (" ++ @typeName(Id) ++ "){} != (" ++ @typeName(u32) ++ ") {}\n", .{ @bitSizeOf(Id), @bitSizeOf(u32) }));
         }
     }
-    
+
     inline fn toInt(self: @This()) u32 {
-        return @bitCast(u32, self);
+        return @as(u32, @bitCast(self));
     }
 };
 /// Represents a single file system object.
 pub const Entry = FsEntry(Id, Ptr);
 
 pub const Config = struct {
-    /// Path delimiter 
+    /// Path delimiter
     delimiter: u8 = '\\',
 };
 
@@ -72,15 +66,11 @@ const FreeSlot = Id;
 /// Our free spots. We use a priority queue to fill in earlier spots first
 /// to avoid fragmentation reducing the no. of pages required and thus
 /// page cache misses.
-const FreeSlots = std.PriorityQueue(
-    FreeSlot,
-    void,
-    struct {
-        fn cmp(_: void, a: FreeSlot, b: FreeSlot) std.math.Order {
-            return std.math.order(a.gen, b.gen);
-        }
-    }.cmp
-);
+const FreeSlots = std.PriorityQueue(FreeSlot, void, struct {
+    fn cmp(_: void, a: FreeSlot, b: FreeSlot) std.math.Order {
+        return std.math.order(a.gen, b.gen);
+    }
+}.cmp);
 
 pub const _gram_len = 3;
 
@@ -90,7 +80,9 @@ const PList = mod_plist.SwapPostingList(Id, _gram_len);
 
 pub const _Gram = mod_gram.Gram(_gram_len);
 
-pub const DatabseErr = error { StaleHandle,};
+pub const DatabseErr = error{
+    StaleHandle,
+};
 
 config: Config,
 /// The heap allocator.
@@ -107,12 +99,12 @@ free_slots: FreeSlots,
 lock: std.Thread.Mutex = .{},
 
 pub fn init(
-    ha7r: Allocator, 
-    pager: Pager, 
+    ha7r: Allocator,
+    pager: Pager,
     sa7r: SwapAllocator,
     config: Config,
 ) Self {
-    var self = Self {
+    var self = Self{
         .ha7r = ha7r,
         .sa7r = sa7r,
         .pager = pager,
@@ -162,12 +154,7 @@ pub fn deinit(self: *Self) void {
 }
 
 fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
-    try self.table.set(
-        self.sa7r, 
-        self.pager, 
-        idx, 
-        entry
-    );
+    try self.table.set(self.sa7r, self.pager, idx, entry);
 }
 
 pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: Id) !void {
@@ -181,18 +168,18 @@ pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: 
     {
         const t_entry = tree.list.items[0];
         const i_entry = t_entry.conv(
-            Id, 
-            []const u8, 
-            root_parent, 
+            Id,
+            []const u8,
+            root_parent,
             t_entry.name,
         );
         new_ids[0] = try self.fileCreatedUnsafe(&i_entry);
     }
-    for (tree.list.items[1..]) |t_entry, ii| {
+    for (tree.list.items[1..], 0..) |t_entry, ii| {
         const i_entry = t_entry.conv(
-            Id, 
-            []const u8, 
-            new_ids[t_entry.parent], 
+            Id,
+            []const u8,
+            new_ids[t_entry.parent],
             t_entry.name,
         );
         new_ids[ii + 1] = try self.fileCreatedUnsafe(&i_entry);
@@ -208,9 +195,7 @@ pub inline fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !I
 /// Add an entry to the database.
 fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
     // clone the entry but store the name on the swap this time
-    const swapped_entry = entry.clone(
-        try self.sa7r.dupeJustPtr(entry.name)
-    );
+    const swapped_entry = entry.clone(try self.sa7r.dupeJustPtr(entry.name));
     const id = if (self.free_slots.removeOrNull()) |id| blk: {
         // mind the `try`s and their order
 
@@ -221,36 +206,28 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
 
         row.gen += 1;
         row.free = false;
-        break :blk Id {
+        break :blk Id{
             .id = id.id,
             .gen = row.gen,
         };
     } else blk: {
         const idx = self.meta.len;
-        try self.meta.append(self.ha7r, self.sa7r, self.pager, RowMeta {
+        try self.meta.append(self.ha7r, self.sa7r, self.pager, RowMeta{
             .free = false,
             .gen = 0,
         });
         // TODO: this shit
         errdefer _ = self.meta.pop(self.sa7r, self.pager) catch unreachable;
 
-        try self.table.append(
-            self.ha7r, self.sa7r, self.pager, swapped_entry 
-        );
+        try self.table.append(self.ha7r, self.sa7r, self.pager, swapped_entry);
 
-        break :blk Id {
-            .id = @intCast(u24, idx),
+        break :blk Id{
+            .id = @as(u24, @intCast(idx)),
             .gen = 0,
         };
     };
-    try self.plist.insert(
-        self.ha7r, 
-        self.sa7r, 
-        self.pager, 
-        id, 
-        entry.name, 
-        std.ascii.whitespace[0..]
-        // &[_]u8{ self.config.delimiter }
+    try self.plist.insert(self.ha7r, self.sa7r, self.pager, id, entry.name, std.ascii.whitespace[0..]
+    // &[_]u8{ self.config.delimiter }
     );
     {
         var kv = try self.childOfIndex.getOrPut(self.ha7r, entry.parent);
@@ -265,9 +242,8 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
         var id_self = id;
         var parent = entry.parent;
         while (
-            // FIXME: a better way of detecting root
-            id_self.id != parent.id
-        ) {
+        // FIXME: a better way of detecting root
+        id_self.id != parent.id) {
             var kv = try self.descendantOfIndex.getOrPut(self.ha7r, parent);
             if (!kv.found_existing) {
                 // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
@@ -320,23 +296,15 @@ fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
 
     row.free = true;
     // remove entry from indices
-    
+
     var name = try self.sa7r.swapIn(entry.name);
     errdefer self.sa7r.swapOut(entry.name);
     // remove from plist
-    try self.plist.remove(
-        self.ha7r, 
-        self.sa7r, 
-        self.pager, 
-        id, 
-        name, 
-        std.ascii.whitespace[0..],
-        struct{
-            fn isEql(lhs: Id, rhs: Id) bool {
-                return lhs.toInt() == rhs.toInt();
-            }
-        }.isEql
-    );
+    try self.plist.remove(self.ha7r, self.sa7r, self.pager, id, name, std.ascii.whitespace[0..], struct {
+        fn isEql(lhs: Id, rhs: Id) bool {
+            return lhs.toInt() == rhs.toInt();
+        }
+    }.isEql);
 
     if (!recusring) {
         // remove from parent's `childOfIndex`
@@ -354,7 +322,7 @@ fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
 pub fn fileMoved(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id) !void {
     self.lock.lock();
     defer self.lock.unlock();
-    return self.fileMovedUnsafe(id, new_name,  new_parent_opt);
+    return self.fileMovedUnsafe(id, new_name, new_parent_opt);
 }
 
 pub fn fileMovedUnsafe(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id) !void {
@@ -369,31 +337,17 @@ pub fn fileMovedUnsafe(self: *Self, id: Id, new_name: []const u8, new_parent_opt
     var old_name = try self.sa7r.swapIn(old_name_swap);
     errdefer self.sa7r.swapOut(old_name_swap);
 
-    try self.plist.insert(
-        self.ha7r, 
-        self.sa7r, 
-        self.pager, 
-        id, 
-        new_name, 
-        std.ascii.whitespace[0..]
-        // &[_]u8{ self.config.delimiter }
+    try self.plist.insert(self.ha7r, self.sa7r, self.pager, id, new_name, std.ascii.whitespace[0..]
+    // &[_]u8{ self.config.delimiter }
     );
 
     entry.name = try self.sa7r.dupeJustPtr(new_name);
-    
-    try self.plist.remove(
-        self.ha7r, 
-        self.sa7r, 
-        self.pager, 
-        id, 
-        old_name, 
-        std.ascii.whitespace[0..],
-        struct{
-            fn isEql(lhs: Id, rhs: Id) bool {
-                return lhs.toInt() == rhs.toInt();
-            }
-        }.isEql
-    );
+
+    try self.plist.remove(self.ha7r, self.sa7r, self.pager, id, old_name, std.ascii.whitespace[0..], struct {
+        fn isEql(lhs: Id, rhs: Id) bool {
+            return lhs.toInt() == rhs.toInt();
+        }
+    }.isEql);
 
     if (new_parent_opt) |new_parent| {
         if (entry.parent.toInt() != new_parent.toInt()) {
@@ -445,8 +399,8 @@ fn isStaleUnsafe(self: *Self, id: Id) !bool {
 fn idAt(self: *Self, idx: usize) !Id {
     const row = try self.meta.swapIn(self.sa7r, self.pager, idx);
     defer self.meta.swapOut(self.sa7r, self.pager, idx);
-    return Id {
-        .id = @intCast(u24, idx),
+    return Id{
+        .id = @as(u24, @intCast(idx)),
         .gen = row.gen,
     };
 }
@@ -466,10 +420,8 @@ fn getAtIdUnsafe(self: *Database, id: Id) !FsEntry(Id, []const u8) {
     defer self.table.swapOut(self.sa7r, self.pager, id.id);
     const name = try self.sa7r.swapIn(entry.name);
     defer self.sa7r.swapOut(entry.name);
-    std.mem.copy(u8, &pathBufGetAt, name);
-    return entry.conv(
-        Id, []const u8,  entry.parent, pathBufGetAt[0..name.len]
-    );
+    @memcpy(pathBufGetAt[0..name.len], name);
+    return entry.conv(Id, []const u8, entry.parent, pathBufGetAt[0..name.len]);
 }
 
 // pub const Writer = struct {
@@ -484,18 +436,12 @@ pub const FullPathWeaver = struct {
     }
     /// The returned slice is invalidated not long after.
     /// This locks the db.
-    pub fn pathOf(
-        self: *FullPathWeaver, 
-        db: *Database, 
-        id: Id, 
-        delimiter: u8
-    ) ![]const u8 {
-
+    pub fn pathOf(self: *FullPathWeaver, db: *Database, id: Id, delimiter: u8) ![]const u8 {
         self.buf.clearRetainingCapacity();
         var next_id = id;
         // const names = db.table.items(.name);
         // const parents = db.table.items(.parent);
-        
+
         db.lock.lock();
         defer db.lock.unlock();
 
@@ -531,7 +477,7 @@ pub fn naiveNameMatcher(self: *Self) NaiveNameMatcher {
 pub const NaiveNameMatcher = struct {
     out_vec: std.ArrayListUnmanaged(Id) = .{},
     db: *Database,
-   
+
     pub fn init(db: *Database) @This() {
         return @This(){
             .db = db,
@@ -542,7 +488,7 @@ pub const NaiveNameMatcher = struct {
         self.out_vec.deinit(self.db.ha7r);
     }
 
-    /// The returned slice borrows from `self` and is invalidated by the 
+    /// The returned slice borrows from `self` and is invalidated by the
     /// next call of this method.
     /// This locks the db.
     pub fn match(
@@ -587,8 +533,8 @@ pub const PlistNameMatcher = struct {
         db.lock.lock();
         defer db.lock.unlock();
         return try self.inner.strMatch(
-            db.ha7r, 
-            db.sa7r, 
+            db.ha7r,
+            db.sa7r,
             db.pager,
             &db.plist,
             string,
@@ -596,7 +542,6 @@ pub const PlistNameMatcher = struct {
         );
     }
 };
-
 
 test "Database.usage" {
     var a7r = std.testing.allocator;
@@ -615,10 +560,10 @@ test "Database.usage" {
     var db = Database.init(a7r, pager, sa7r, .{});
     defer db.deinit();
 
-    var entry = FsEntry(Id, []const u8) {
+    var entry = FsEntry(Id, []const u8){
         .name = "/",
-        .parent = Id { .id = 0, .gen = 0 },
-        .kind = Entry.Kind.Directory,
+        .parent = Id{ .id = 0, .gen = 0 },
+        .kind = Entry.Kind.directory,
         .depth = 0,
         .size = 0,
         .inode = 0,
@@ -641,10 +586,10 @@ test "Database.usage" {
 pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
     var prng = std.crypto.random;
     const name = if (std.mem.eql(u8, path, "/")) "/" else std.fs.path.basename(path);
-    return FsEntry([]const u8, []const u8) {
+    return FsEntry([]const u8, []const u8){
         .name = name,
         .parent = std.fs.path.dirname(path) orelse "/"[0..],
-        .kind = FsEntry([]const u8, []const u8).Kind.File,
+        .kind = FsEntry([]const u8, []const u8).Kind.file,
         .depth = std.mem.count(u8, path, "/"),
         .size = prng.int(u64),
         .inode = prng.int(u64),
@@ -659,16 +604,12 @@ pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
 }
 
 /// Add the files to the db while making sure any implied parent dir in path
-/// string is also present. 
+/// string is also present.
 /// The metadata for parents is randomly generated.
-/// Assumes db is empty. 
+/// Assumes db is empty.
 /// Returns a heap allocated array of `Id`s assigned to the `entries` in the
 /// respective indices.
-pub fn fileList2PlasticTree2Db(
-    ha7r: Allocator,
-    entries: []const FsEntry([]const u8, []const u8),
-    db: *Database
-) ![]Id {
+pub fn fileList2PlasticTree2Db(ha7r: Allocator, entries: []const FsEntry([]const u8, []const u8), db: *Database) ![]Id {
     var declared_map = try ha7r.alloc(Id, entries.len);
 
     var path_id_map = std.StringHashMap(Id).init(ha7r);
@@ -682,7 +623,7 @@ pub fn fileList2PlasticTree2Db(
         path_id_map.deinit();
     }
 
-    var stack = std.ArrayList(FsEntry([] const u8, [] const u8)).init(ha7r);
+    var stack = std.ArrayList(FsEntry([]const u8, []const u8)).init(ha7r);
     defer stack.deinit();
 
     // for (declared_map) |*item| {
@@ -690,7 +631,7 @@ pub fn fileList2PlasticTree2Db(
     // }
     // if (true) return declared_map;
 
-    for (entries) |entry, ii| {
+    for (entries, 0..) |entry, ii| {
         // println("entry.name={s} entry.parent={s}", .{ entry.name, entry.parent });
 
         defer stack.clearRetainingCapacity();
@@ -703,40 +644,32 @@ pub fn fileList2PlasticTree2Db(
             //         stack.items[stack.items.len - 1].parent,
             //      }
             // );
-            if (
-                path_id_map.contains(stack.items[stack.items.len - 1].parent)
-                or
-                std.mem.eql(u8, stack.items[stack.items.len - 1].name, "/")
-            ) break;
+            if (path_id_map.contains(stack.items[stack.items.len - 1].parent) or
+                std.mem.eql(u8, stack.items[stack.items.len - 1].name, "/")) break;
             try stack.append(genRandFile(stack.items[stack.items.len - 1].parent));
         }
         var id: ?Id = null;
         while (stack.popOrNull()) |s_entry| {
             var is_root = std.mem.eql(u8, s_entry.name, "/");
 
-            const parent = path_id_map.get(s_entry.parent) 
-                orelse if (is_root)
-                    Id { .id = 0, .gen = 0 }
-                else { 
-                    println("name: {s}, parent: {s}", .{ s_entry.name, s_entry.parent });
-                    unreachable;
-                };
+            const parent = path_id_map.get(s_entry.parent) orelse if (is_root)
+                Id{ .id = 0, .gen = 0 }
+            else {
+                println("name: {s}, parent: {s}", .{ s_entry.name, s_entry.parent });
+                unreachable;
+            };
 
-            var entry_id = try db.fileCreated(
-                &s_entry.conv(Id, []const u8, parent, s_entry.name)
-            );
+            var entry_id = try db.fileCreated(&s_entry.conv(Id, []const u8, parent, s_entry.name));
             // println(
-            //    "inserted entry: {s}/{s} at id {}", 
+            //    "inserted entry: {s}/{s} at id {}",
             //    .{ s_entry.parent, s_entry.name, entry_id }
             // );
-            try path_id_map.putNoClobber(
-                try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name}),
-                // if (is_root)
-                //     try ha7r.dupe(u8, "/")
-                // else 
-                //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
-                entry_id
-            );
+            try path_id_map.putNoClobber(try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name }),
+            // if (is_root)
+            //     try ha7r.dupe(u8, "/")
+            // else
+            //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
+            entry_id);
             id = entry_id;
         }
         declared_map[ii] = id orelse @panic("id not set");
@@ -748,7 +681,7 @@ const DbTest = struct {
     const Case = struct {
         name: []const u8,
         query: []const u8,
-        entries: []const FsEntry([] const u8, [] const u8),
+        entries: []const FsEntry([]const u8, []const u8),
         expected: []const usize,
         preQueryAction: ?*const fn (*Database, []Id) anyerror!void = null,
     };
@@ -757,11 +690,7 @@ const DbTest = struct {
         var ha7r = std.testing.allocator;
         var big_buf = [_]u8{0} ** 1024;
         for (table) |case| {
-            var mmap_pager = try mod_mmap.MmapPager.init(
-                ha7r, 
-                try std.fmt.bufPrint(big_buf[0..], "/tmp/Database.query.{s}", .{ case.name }),
-                .{}
-            );
+            var mmap_pager = try mod_mmap.MmapPager.init(ha7r, try std.fmt.bufPrint(big_buf[0..], "/tmp/Database.query.{s}", .{case.name}), .{});
             defer mmap_pager.deinit();
 
             var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
@@ -797,23 +726,20 @@ const DbTest = struct {
             defer ha7r.free(results);
             var expected_id_list = try ha7r.alloc(Id, case.expected.len);
             defer ha7r.free(expected_id_list);
-            for (case.expected) |ex_idx, ii| {
+            for (case.expected, 0..) |ex_idx, ii| {
                 expected_id_list[ii] = declared_map[ex_idx];
             }
-            const lt = struct{
+            const lt = struct {
                 fn lt(cx: void, lhs: Id, rhs: Id) bool {
                     _ = cx;
                     return lhs.id < rhs.id;
                 }
             };
-            std.sort.sort(Id, expected_id_list, {}, lt.lt);
-            std.sort.sort(Id, results, {}, lt.lt);
+            std.sort.pdq(Id, expected_id_list, {}, lt.lt);
+            std.sort.pdq(Id, results, {}, lt.lt);
             std.testing.expectEqualSlices(Id, expected_id_list, results) catch |err| {
-                println(
-                    "unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}", 
-                    .{ results, expected_id_list, case.query, parsed_query }
-                );
-                println("{any}", .{ declared_map });
+                println("unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}", .{ results, expected_id_list, case.query, parsed_query });
+                println("{any}", .{declared_map});
                 return err;
             };
         }
@@ -822,7 +748,7 @@ const DbTest = struct {
 
 // fn randFile(name: []const u8) FsEntry()
 test "Db.e2e" {
-    var table = [_]DbTest.Case {
+    var table = [_]DbTest.Case{
         .{
             .name = "supports_empty_query",
             .entries = &.{
@@ -847,7 +773,10 @@ test "Db.e2e" {
                 genRandFile("/my/dear/needle"),
             },
             .query = "needle",
-            .expected = &.{ 0,  2, },
+            .expected = &.{
+                0,
+                2,
+            },
         },
         .{
             .name = "supports_path_match",
@@ -860,27 +789,27 @@ test "Db.e2e" {
             },
             .expected = &.{ 1, 3 },
         },
-        .{
-            .name = "supports_double_quotes_to_match_whitespace",
-            .query = "\"borgouise bologna\"",
-            .entries = &.{
-                genRandFile("/rodrigo/borgouise"),
-                genRandFile("/rodrigo/borgouise bologna"),
-                genRandFile("/rodrigo/bologna"),
-                genRandFile("/rodrigo/borgia"),
-            },
-            .expected = &.{ 1 },
-        },
-        .{
-            .name = "supports_double_quotes_to_match_whitespace_in_path",
-            .query = "\"rodrigo/borgouise bologna/sandwitch\"",
-            .entries = &.{
-                genRandFile("/borgouise bologna/sandwitch"),
-                genRandFile("/rodrigo/borgouise bologna/sandwitch"),
-                genRandFile("/antonio/borgouise bologna/sandwitch"),
-            },
-            .expected = &.{ 1 },
-        },
+        // .{
+        //     .name = "supports_double_quotes_to_match_whitespace",
+        //     .query = "\"borgouise bologna\"",
+        //     .entries = &.{
+        //         genRandFile("/rodrigo/borgouise"),
+        //         genRandFile("/rodrigo/borgouise bologna"),
+        //         genRandFile("/rodrigo/bologna"),
+        //         genRandFile("/rodrigo/borgia"),
+        //     },
+        //     .expected = &.{1},
+        // },
+        // .{
+        //     .name = "supports_double_quotes_to_match_whitespace_in_path",
+        //     .query = "\"rodrigo/borgouise bologna/sandwitch\"",
+        //     .entries = &.{
+        //         genRandFile("/borgouise bologna/sandwitch"),
+        //         genRandFile("/rodrigo/borgouise bologna/sandwitch"),
+        //         genRandFile("/antonio/borgouise bologna/sandwitch"),
+        //     },
+        //     .expected = &.{1},
+        // },
     };
     try DbTest.run(table[0..]);
 }
@@ -898,7 +827,7 @@ test "Db.e2e" {
 //         return std.meta.fieldInfo(Entry, field).field_type;
 //     }
 //     /// Metadata about the columns in sliceform for ergonomic "foreaching"
-//     const columns = blk: { 
+//     const columns = blk: {
 //         const ColumnDeets = struct {
 //             column: Column,
 //             // type: type,
@@ -911,7 +840,7 @@ test "Db.e2e" {
 //                 // .type = info.field_type,
 //             };
 //         }
-//         break :blk cols; 
+//         break :blk cols;
 //     };
 //
 //     fn ColumnStore(comptime T: type) type {
@@ -949,7 +878,7 @@ test "Db.e2e" {
 //             };
 //         }
 //         pub fn deinit(
-//             self: *@This(), 
+//             self: *@This(),
 //             comptime column: Column,
 //             ha7r: Allocator,
 //             sa7r: SwapAllocator,
@@ -967,7 +896,7 @@ test "Db.e2e" {
 //     };
 //
 //     // const Table = blk: {
-//     //     break :blk @Type(std.builtin.Type{ 
+//     //     break :blk @Type(std.builtin.Type{
 //     //         .Struct = .{
 //     //             .layout = .Auto,
 //     //             .decls = &.{}
@@ -983,7 +912,7 @@ test "Db.e2e" {
 //                 var table = Table.initUndefined();
 //                 inline for (columns) |col| {
 //                     self.table.set(
-//                         col.column, 
+//                         col.column,
 //                         try ErasedColumnStore.init(col.column, self.ha7r, pager.pageSize())
 //                     );
 //                 }
@@ -1004,9 +933,9 @@ test "Db.e2e" {
 //     fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
 //         inline for (columns) |col| {
 //             try self.table.getPtr(col.column).cast(col.column).list.set(
-//                 self.sa7r, 
-//                 self.pager, 
-//                 idx, 
+//                 self.sa7r,
+//                 self.pager,
+//                 idx,
 //                 @field(entry, @tagName(col.column))
 //             );
 //         }

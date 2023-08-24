@@ -27,7 +27,7 @@ const Entry = Database.Entry;
 const gram_len = Database._gram_len;
 const Gram = Database._Gram;
 
-pub const Error = error { InvalidQuery };
+pub const Error = error{InvalidQuery};
 const Plan = struct {
     const NodeId = usize;
     const NodeSlice = struct {
@@ -61,11 +61,7 @@ const Plan = struct {
         self.nodes.deinit(ha7r);
     }
 
-    fn build(
-        self: *@This(), 
-        ha7r: Allocator,
-        clause: *const Query.Filter.Clause
-    ) !void {
+    fn build(self: *@This(), ha7r: Allocator, clause: *const Query.Filter.Clause) !void {
         self.nodes.clearRetainingCapacity();
         // don't rely on the return pointer since it might be
         // invalid when sub nodes resize the arraylist
@@ -76,120 +72,95 @@ const Plan = struct {
         self.nodes.items[0] = root;
     }
 
-    fn buildQueryDAG(
-        self: *@This(), 
-        ha7r: Allocator,
-        clause: *const Query.Filter.Clause
-    ) anyerror!Node {
+    fn buildQueryDAG(self: *@This(), ha7r: Allocator, clause: *const Query.Filter.Clause) anyerror!Node {
         return switch (clause.*) {
             .op => |load| switch (load) {
                 .@"and" => |clauses| blk: {
                     if (clauses.len < 2) {
-                        println("and clauses need 2 or more children: {any}", .{ clause });
+                        println("and clauses need 2 or more children: {any}", .{clause});
                         return Error.InvalidQuery;
                     }
                     var start_idx = self.nodes.items.len;
                     // allocate the children contigiously in `self.nodes`
                     // and just return a slice from that
                     try self.nodes.resize(ha7r, start_idx + clauses.len);
-                    for (clauses) |subclause, ii| {
+                    for (clauses, 0..) |subclause, ii| {
                         var node = try self.buildQueryDAG(ha7r, &subclause);
                         // `buildQueryDAG` might grow the nodes array
-                        // thus moving the location so always address it 
+                        // thus moving the location so always address it
                         // through `self.nodes`
                         self.nodes.items[start_idx + ii] = node;
                     }
                     // TODO: consider using an arena allocator and pointers instead
                     // there's no advatage in this scheme if the NodeId's don't have
                     // generations
-                    break :blk Node {
-                        .load = Node.Payload {
-                            .ixion = NodeSlice { .start = start_idx, .len = clauses.len },
+                    break :blk Node{
+                        .load = Node.Payload{
+                            .ixion = NodeSlice{ .start = start_idx, .len = clauses.len },
                         },
                     };
                 },
                 .@"or" => |clauses| blk: {
                     if (clauses.len < 2) {
-                        println("or clauses need 2 or more children: {any}", .{ clause });
+                        println("or clauses need 2 or more children: {any}", .{clause});
                         return Error.InvalidQuery;
                     }
                     var start_idx = self.nodes.items.len;
                     try self.nodes.resize(ha7r, start_idx + clauses.len);
-                    for (clauses) |subclause, ii| {
+                    for (clauses, 0..) |subclause, ii| {
                         var node = try self.buildQueryDAG(ha7r, &subclause);
                         self.nodes.items[start_idx + ii] = node;
                     }
-                    break :blk Node {
-                        .load = Node.Payload {
-                            .@"union" = NodeSlice { .start = start_idx, .len = clauses.len },
+                    break :blk Node{
+                        .load = Node.Payload{
+                            .@"union" = NodeSlice{ .start = start_idx, .len = clauses.len },
                         },
                     };
                 },
-                .not => |subclause| blk: { 
-                    println("ERROR: we are her for some reason: {}", .{ clause });
-                    try self.nodes.append(
-                        ha7r, 
-                        try self.buildQueryDAG(ha7r, subclause)
-                    );
-                    break :blk Node {
-                        .load = Node.Payload {
+                .not => |subclause| blk: {
+                    println("ERROR: we are her for some reason: {}", .{clause});
+                    try self.nodes.append(ha7r, try self.buildQueryDAG(ha7r, subclause));
+                    break :blk Node{
+                        .load = Node.Payload{
                             .complement = self.nodes.items.len - 1,
                         },
                     };
                 },
             },
-            .param => |load|  switch (load) {
+            .param => |load| switch (load) {
                 .nameMatch => |nameMatch| blk: {
                     const GramPos = mod_gram.GramPos(gram_len);
                     var start_idx = self.nodes.items.len;
                     const appenderImpl = struct {
                         a7r: Allocator,
                         list: *std.ArrayListUnmanaged(Node),
-                        fn append(this: *@This(), gram: GramPos) !void {
-                            try this.list.append(this.a7r, Node {
-                                .load = Node.Payload {
+                        fn append(this: *const @This(), gram: GramPos) !void {
+                            try this.list.append(this.a7r, Node{
+                                .load = Node.Payload{
                                     .gramMatch = gram.gram,
                                 },
                             });
                         }
                     };
-                    try mod_gram.grammer(
-                        gram_len, 
-                        nameMatch.string,
-                        nameMatch.exact,
-                        &.{},
-                        mod_utils.Appender(GramPos).new(
-                            &appenderImpl { .a7r = ha7r, .list = &self.nodes },
-                            appenderImpl.append
-                        )
-                    );
-                    break :blk Node {
-                        .load = Node.Payload {
-                            .ixion = NodeSlice { 
-                                .start = start_idx, 
-                                .len = self.nodes.items.len - start_idx 
-                            },
+                    try mod_gram.grammer(gram_len, nameMatch.string, nameMatch.exact, &.{}, mod_utils.Appender(GramPos).new(&appenderImpl{ .a7r = ha7r, .list = &self.nodes }, appenderImpl.append));
+                    break :blk Node{
+                        .load = Node.Payload{
+                            .ixion = NodeSlice{ .start = start_idx, .len = self.nodes.items.len - start_idx },
                         },
                     };
                 },
                 .childOf => |subclause| blk: {
-                    try self.nodes.append(
-                        ha7r, 
-                        try self.buildQueryDAG(ha7r, subclause)
-                    );
-                    break :blk Node {
-                        .load = Node.Payload {
+                    try self.nodes.append(ha7r, try self.buildQueryDAG(ha7r, subclause));
+                    break :blk Node{
+                        .load = Node.Payload{
                             .childOf = self.nodes.items.len - 1,
                         },
                     };
                 },
                 .descendantOf => |subclause| blk: {
-                    try self.nodes.append(
-                        ha7r, 
-                        try self.buildQueryDAG(ha7r, subclause)
-                    );
-                    break :blk Node {
-                        .load = Node.Payload {
+                    try self.nodes.append(ha7r, try self.buildQueryDAG(ha7r, subclause));
+                    break :blk Node{
+                        .load = Node.Payload{
                             .descendantOf = self.nodes.items.len - 1,
                         },
                     };
@@ -209,7 +180,7 @@ plan: Plan = .{},
 // filters: std.ArrayListUnmanaged(Plan.Filter) = {},
 
 pub fn init(db: *Database) @This() {
-    return @This() {
+    return @This(){
         .db = db,
     };
 }
@@ -224,7 +195,7 @@ pub fn deinit(self: *@This()) void {
 
 const ExecErr = Allocator.Error || mod_mmap.Pager.SwapInError;
 
-fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id {
+fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]Id {
     // const IdSet = std.AutoHashMapUnmanaged(Id, void);
     // const IdSet = std.ArrayListUnmanaged(Id, void);
     const IdSet = std.AutoHashMap(Id, void);
@@ -236,14 +207,14 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
             // println("ixion: ", .{});
             var result = std.ArrayList(Id).fromOwnedSlice(
                 ha7r,
-                try self.execNode(&children[0], ha7r), 
+                try self.execNode(&children[0], ha7r),
             );
             defer result.deinit();
             // println("-- {any}", .{ result.items });
             for (children[1..]) |subnode| {
                 if (result.items.len == 0) break;
                 check.clearRetainingCapacity();
-                for (result.items) |item|{
+                for (result.items) |item| {
                     try check.put(item, {});
                 }
                 result.clearRetainingCapacity();
@@ -262,7 +233,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
             // point so clean those out
             // FIXME: this can be made more efficient
             check.clearRetainingCapacity();
-            for (result.items) |item|{
+            for (result.items) |item| {
                 try check.put(item, {});
             }
             result.clearRetainingCapacity();
@@ -276,7 +247,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
             var children = self.plan.nodes.items[slice.start..(slice.start + slice.len)];
             var result = std.ArrayList(Id).fromOwnedSlice(
                 ha7r,
-                try self.execNode(&children[0], ha7r), 
+                try self.execNode(&children[0], ha7r),
             );
             defer result.deinit();
             var set = IdSet.init(ha7r);
@@ -289,7 +260,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
                 defer ha7r.free(subnode_result);
                 for (subnode_result) |item| {
                     const res = try set.getOrPut(item);
-                    if (!res.found_existing){
+                    if (!res.found_existing) {
                         // FIXME: is this neccessary
                         res.value_ptr.* = {};
                         try result.append(item);
@@ -306,18 +277,11 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
             // println("gramMatch: {any}", .{ gram });
             var out = std.ArrayList(Id).init(ha7r);
             defer out.deinit();
-            try self.db.plist.gramItems(
-                gram, 
-                self.db.sa7r,
-                self.db.pager,
-                mod_utils.Appender(Id).forList(&out)
-            );
+            try self.db.plist.gramItems(gram, self.db.sa7r, self.db.pager, mod_utils.Appender(Id).forList(&out));
             break :blk out.toOwnedSlice();
         },
         .childOf => |child_idx| blk: {
-            var parents = try self.execNode(
-                &self.plan.nodes.items[child_idx], ha7r
-            );
+            var parents = try self.execNode(&self.plan.nodes.items[child_idx], ha7r);
             defer ha7r.free(parents);
             var result = std.ArrayList(Id).init(ha7r);
             defer result.deinit();
@@ -333,9 +297,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
         },
         .descendantOf => |child_idx| blk: {
             if (true) @panic("descendant of index not in use");
-            var ancestors = try self.execNode(
-                &self.plan.nodes.items[child_idx], ha7r
-            );
+            var ancestors = try self.execNode(&self.plan.nodes.items[child_idx], ha7r);
             defer ha7r.free(ancestors);
             var result = std.ArrayList(Id).init(ha7r);
             defer result.deinit();
@@ -353,7 +315,6 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r:Allocator) ExecErr![]Id
     // println("res_set: {any} for node: {}", .{ res_set, node });
     return res_set;
 }
-
 
 pub fn query(self: *@This(), input: *const Query) ![]const Id {
     // println("querying: query={}", .{ input });
@@ -381,11 +342,10 @@ pub fn query(self: *@This(), input: *const Query) ![]const Id {
         var ii: u24 = 0;
         while (try it.next()) |meta| {
             if (!meta.free) {
-                try out.append(self.db.ha7r, Id { .id = ii, .gen = meta.gen });
+                try out.append(self.db.ha7r, Id{ .id = ii, .gen = meta.gen });
             }
             ii += 1;
         }
         return out.items;
     }
 }
-

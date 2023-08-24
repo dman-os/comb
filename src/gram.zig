@@ -32,7 +32,7 @@ pub fn grammer(comptime gram_len: u4, string: []const u8, boundary_grams: bool, 
     if (delimiters.len > 0) {
         var iter = std.mem.tokenize(u8, string, delimiters);
         while (iter.next()) |token| {
-            try tokenGrammer(gram_len, token, @ptrToInt(token.ptr) - @ptrToInt(string.ptr), boundary_grams, out);
+            try tokenGrammer(gram_len, token, @intFromPtr(token.ptr) - @intFromPtr(string.ptr), boundary_grams, out);
         }
     } else {
         try tokenGrammer(gram_len, string, 0, boundary_grams, out);
@@ -127,7 +127,7 @@ fn tokenGrammer(comptime gram_len: u4, string: []const u8, offset: usize, bounda
 /// Panics if gram_len - start > string.len
 inline fn fillGram(comptime gram_len: u4, string: []const u8, start: usize) Gram(gram_len) {
     var gram = [1]u8{TEC} ** gram_len;
-    for (string) |char, ii| {
+    for (string, 0..) |char, ii| {
         gram[start + ii] = char;
     }
     // var ii = start;
@@ -291,18 +291,9 @@ test "grammer.trigram" {
     inline for (table) |case| {
         var list = std.ArrayList(GramPos(3)).init(std.testing.allocator);
         defer list.deinit();
-        try grammer(
-            3, 
-            case.string, 
-            case.boundary_grams, 
-            &std.ascii.whitespace, 
-            Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append)
-        );
+        try grammer(3, case.string, case.boundary_grams, &std.ascii.whitespace, Appender(GramPos(3)).new(&list, std.ArrayList(GramPos(3)).append));
         std.testing.expectEqualSlices(GramPos(3), case.expected, list.items) catch |err| {
-            std.debug.print(
-                "\nerror on {s}\n{any}\n !=\n {any}\n", 
-                .{ case.name, case.expected, list.items }
-            );
+            std.debug.print("\nerror on {s}\n{any}\n !=\n {any}\n", .{ case.name, case.expected, list.items });
             return err;
         };
     }
@@ -396,18 +387,9 @@ test "grammer.quadgram" {
     inline for (table) |case| {
         var list = std.ArrayList(GramPos(4)).init(std.testing.allocator);
         defer list.deinit();
-        try grammer(
-            4, 
-            case.string, 
-            case.boundary_grams, 
-            &std.ascii.whitespace, 
-            Appender(GramPos(4)).new(&list, std.ArrayList(GramPos(4)).append)
-        );
+        try grammer(4, case.string, case.boundary_grams, &std.ascii.whitespace, Appender(GramPos(4)).new(&list, std.ArrayList(GramPos(4)).append));
         std.testing.expectEqualSlices(GramPos(4), case.expected, list.items) catch |err| {
-            std.debug.print(
-                "\nerror on {s}\n{any}\n !=\n {any}\n", 
-                .{ case.name, case.expected, list.items }
-            );
+            std.debug.print("\nerror on {s}\n{any}\n !=\n {any}\n", .{ case.name, case.expected, list.items });
             return err;
         };
     }

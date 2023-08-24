@@ -60,8 +60,8 @@ pub fn Appender(comptime T: type) type {
                 @compileError("was expecting single item pointer, got type = " ++ @typeName(@TypeOf(coll)));
             }
             return Self{
-                .vptr = @ptrCast(*anyopaque, coll),
-                .func = @ptrCast(*const fn (*anyopaque, T) Err!void, func),
+                .vptr = @as(*anyopaque, @constCast(@ptrCast(coll))),
+                .func = @as(*const fn (*anyopaque, T) Err!void, @ptrCast(func)),
             };
         }
 
@@ -69,14 +69,14 @@ pub fn Appender(comptime T: type) type {
             pub const UnmanagedSet = struct {
                 a7r: Allocator,
                 set: *std.AutoHashMapUnmanaged(T, void),
-                pub fn put(curry: *@This(), item: T) !void {
+                pub fn put(curry: *const @This(), item: T) !void {
                     try curry.set.put(curry.a7r, item, {});
                 }
             };
             pub const UnamanagedList = struct {
                 a7r: Allocator,
                 list: *std.ArrayListUnmanaged(T),
-                pub fn append(curry: *@This(), item: T) !void {
+                pub fn append(curry: *const @This(), item: T) !void {
                     try curry.list.append(curry.a7r, item);
                 }
             };
@@ -144,12 +144,13 @@ pub fn fdPath(fd: std.os.fd_t) ![]const u8 {
 
 threadlocal var pathBufPathJoin: [std.fs.MAX_PATH_BYTES]u8 = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
 
-///  Allocate the returned slice to heap before next usage of this function on 
+///  Allocate the returned slice to heap before next usage of this function on
 ///  the same thread or woe be u.
 pub fn pathJoin(paths: []const []const u8) []const u8 {
     var fba7r = std.heap.FixedBufferAllocator.init(&pathBufPathJoin);
     const full_thing = std.fs.path.join(
-        fba7r.allocator(), paths,
+        fba7r.allocator(),
+        paths,
     ) catch unreachable;
     return full_thing;
 }
@@ -253,7 +254,7 @@ pub fn Mpmc(comptime T: type) type {
                 const start = std.time.nanoTimestamp();
                 try self.condition.timedWait(&self.mutex, timeout_ns);
                 const end = std.time.nanoTimestamp();
-                const elapsed = @intCast(u64, end - start);
+                const elapsed = @as(u64, @intCast(end - start));
                 timeout_ns_rem = if (timeout_ns_rem > elapsed) timeout_ns_rem - elapsed else 0;
             }
             return self.getInner() orelse self.getTimed(timeout_ns_rem);

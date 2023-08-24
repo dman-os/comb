@@ -21,7 +21,6 @@ const mod_mmap = @import("mmap.zig");
 pub const FanotifyWorker = @import("fanotify/FanotifyWorker.zig");
 pub const FAN = @import("fanotify/FAN.zig");
 
-
 test {
     _ = FanotifyWorker;
     _ = FAN;
@@ -54,7 +53,7 @@ pub const FanotifyEvent = struct {
             .old_name = if (old_name) |slice| try a7r.dupe(u8, slice) else null,
             .old_dir = if (old_dir) |slice| try a7r.dupe(u8, slice) else null,
             // .mask = meta.mask,
-            .kind = @bitCast(FAN.EVENT, @truncate(u32, meta.mask)),
+            .kind = @as(FAN.EVENT, @bitCast(@as(u32, @truncate(meta.mask)))),
             .pid = meta.pid,
             .timestamp = timestamp,
         };
@@ -74,20 +73,12 @@ pub const FanotifyEvent = struct {
         }
     }
 
-    pub fn format(
-        self: Self, 
-        comptime fmt: []const u8, 
-        options: std.fmt.FormatOptions, 
-        writer: anytype
-    ) !void {
+    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try std.fmt.format(
-            writer, 
-            @typeName(Self) ++ "{{ .name = {?s}, .dir = {?s}, .old_name = {?s}, .old_dir = {?s}, .kind = {}, .pid = {} .timestamp = {} }}", 
-            // @typeName(Self) ++ "{{\n .name = {?s},\n .dir = {?s},\n .kind = {},\n .pid = {}\n .timestamp = {} }}", 
-            .{ self.name, self.dir, self.old_name, self.old_dir, self.kind, self.pid, self.timestamp }
-        );
+        try std.fmt.format(writer, @typeName(Self) ++ "{{ .name = {?s}, .dir = {?s}, .old_name = {?s}, .old_dir = {?s}, .kind = {}, .pid = {} .timestamp = {} }}",
+        // @typeName(Self) ++ "{{\n .name = {?s},\n .dir = {?s},\n .kind = {},\n .pid = {}\n .timestamp = {} }}",
+        .{ self.name, self.dir, self.old_name, self.old_dir, self.kind, self.pid, self.timestamp });
     }
 };
 
@@ -134,7 +125,7 @@ pub const file_handle = extern struct {
     f_handle: u8,
 
     pub fn file_name(self: *@This()) [*:0]const u8 {
-        return @intToPtr([*:0]u8, @ptrToInt(&self.f_handle) + @as(usize, self.handle_bytes));
+        return @as([*:0]u8, @ptrFromInt(@intFromPtr(&self.f_handle) + @as(usize, self.handle_bytes)));
     }
 };
 
@@ -174,9 +165,9 @@ pub fn init(
     flags: FAN.INIT,
     event_flags: c_uint,
 ) FanotifyInitErr!std.os.fd_t {
-    const resp = std.os.linux.syscall2(.fanotify_init, @enumToInt(class) | flags.asInt(), event_flags);
+    const resp = std.os.linux.syscall2(.fanotify_init, @intFromEnum(class) | flags.asInt(), event_flags);
     switch (std.os.errno(resp)) {
-        .SUCCESS => return @intCast(std.os.fd_t, resp),
+        .SUCCESS => return @as(std.os.fd_t, @intCast(resp)),
         .INVAL => unreachable,
         .MFILE => return error.ProcessFdQuotaExceeded,
         .NOSYS => return error.OperationNotSupported,
@@ -237,11 +228,11 @@ pub fn mark(
 ) !void {
     const resp = std.os.linux.syscall5(
         .fanotify_mark,
-        @bitCast(usize, @as(isize, fanotify_fd)),
-        @enumToInt(action) | flags,
+        @as(usize, @bitCast(@as(isize, fanotify_fd))),
+        @intFromEnum(action) | flags,
         @as(usize, mask.asInt()),
-        @bitCast(usize, @as(isize, dir_fd)),
-        @ptrToInt(path.ptr),
+        @as(usize, @bitCast(@as(isize, dir_fd))),
+        @intFromPtr(path.ptr),
     );
     switch (std.os.errno(resp)) {
         .SUCCESS => {},
@@ -275,12 +266,12 @@ pub fn open_by_handle_at(
     while (true) {
         const resp = std.os.linux.syscall3(
             .open_by_handle_at,
-            @bitCast(usize, @as(isize, mount_fd)),
-            @ptrToInt(handle),
-            @bitCast(usize, @as(isize, flags)),
+            @as(usize, @bitCast(@as(isize, mount_fd))),
+            @intFromPtr(handle),
+            @as(usize, @bitCast(@as(isize, flags))),
         );
         switch (std.os.errno(resp)) {
-            .SUCCESS => return @intCast(std.os.fd_t, resp),
+            .SUCCESS => return @as(std.os.fd_t, @intCast(resp)),
             // we was interrupted, try again
             .INTR => continue,
             .FAULT => unreachable,
@@ -317,13 +308,7 @@ pub const MountErr = error{
 } || std.os.UnexpectedError;
 
 /// Read the man page
-pub fn mount(
-    source: [*:0]const u8, 
-    dir: [*:0]const u8, 
-    fstype: ?[*:0]const u8, 
-    flags: u32, 
-    data: usize
-) MountErr!void {
+pub fn mount(source: [*:0]const u8, dir: [*:0]const u8, fstype: ?[*:0]const u8, flags: u32, data: usize) MountErr!void {
     const resp = std.os.linux.mount(source, dir, fstype, flags, data);
     switch (std.os.errno(resp)) {
         .SUCCESS => {},
@@ -345,32 +330,22 @@ pub fn demo() !void {
         fn append(self: *@This(), event_in: FanotifyEvent) !void {
             var event = event_in;
             defer event.deinit(self.ha7r);
-            println("recieved evt: {}", .{ event });
+            println("recieved evt: {}", .{event});
         }
     };
-    var sink = Sink {
-        .ha7r = ha7r
-    };
-    try listener(
-        ha7r, 
-        &die_signal, 
-        mod_utils.Appender(FanotifyEvent).new(
-            &sink,
-            Sink.append
-        ),
-        .{ 
-            .mark_event_mask = .{
-                .create = true,
-                .modify = true,
-                // .attrib = true,
-                .delete = true,
-                // .moved_to = true,
-                // .moved_from = true,
-                .ondir = true,
-                .rename = true
-            } 
-        }
-    );
+    var sink = Sink{ .ha7r = ha7r };
+    try listener(ha7r, &die_signal, mod_utils.Appender(FanotifyEvent).new(&sink, Sink.append), .{
+        .mark_event_mask = .{
+            .create = true,
+            .modify = true,
+            // .attrib = true,
+            .delete = true,
+            // .moved_to = true,
+            // .moved_from = true,
+            .ondir = true,
+            .rename = true,
+        },
+    });
 }
 
 pub const Config = struct {
@@ -385,7 +360,7 @@ pub const Config = struct {
         // .moved_to = true,
         // .moved_from = true,
         .ondir = true,
-        .rename = true
+        .rename = true,
     },
     /// milliseconds for which `poll` on the `fanotify`
     /// handle will wait before timing out. Set to `-1` to wait forever.
@@ -401,7 +376,7 @@ pub fn listener(
     const fd = blk: {
         const fd = try init(
             FAN.CLASS.NOTIF,
-            FAN.INIT {
+            FAN.INIT{
                 // .report_fid = true,
                 .report_dir_fid = true,
                 .report_name = true,
@@ -409,24 +384,15 @@ pub fn listener(
             },
             std.os.O.RDONLY | std.os.O.CLOEXEC,
         );
-        try mark(
-            fd, 
-            FAN.MARK.MOD.ADD, 
-            // FIXME: consider monitoring specific mounts instead of the fs
-            FAN.MARK.FILESYSTEM, 
-            config.mark_event_mask,
-            std.os.AT.FDCWD, 
-            config.mark_fs_path
-        );
+        try mark(fd, FAN.MARK.MOD.ADD,
+        // FIXME: consider monitoring specific mounts instead of the fs
+        FAN.MARK.FILESYSTEM, config.mark_event_mask, std.os.AT.FDCWD, config.mark_fs_path);
         break :blk fd;
     };
     defer std.os.close(fd);
-    var mount_fd = try std.os.openZ(
-        config.mark_fs_path,
-        // std.os.O.RDONLY | std.os.O.PATH | std.os.O.DIRECTORY,
-        std.os.O.RDONLY | std.os.O.DIRECTORY,
-        0
-    ); 
+    var mount_fd = try std.os.openZ(config.mark_fs_path,
+    // std.os.O.RDONLY | std.os.O.PATH | std.os.O.DIRECTORY,
+    std.os.O.RDONLY | std.os.O.DIRECTORY, 0);
     defer std.os.close(mount_fd);
 
     var pollfds = [_]std.os.pollfd{std.os.pollfd{
@@ -461,14 +427,11 @@ pub fn listener(
             var left_bytes = read_len;
             var event_count: usize = 0;
             while (true) {
-                const meta_ptr = @ptrCast(*align(1) const event_metadata, ptr);
+                const meta_ptr = @as(*align(1) const event_metadata, @ptrCast(ptr));
                 const meta = meta_ptr.*;
-                if (
-                    left_bytes < @sizeOf(event_metadata) 
-                    or left_bytes < @intCast(usize, meta.event_len)
-                    // FIXME: is this case even possible?
-                    or meta.event_len < @sizeOf(event_metadata)
-                ) {
+                if (left_bytes < @sizeOf(event_metadata) or left_bytes < @as(usize, @intCast(meta.event_len))
+                // FIXME: is this case even possible?
+                or meta.event_len < @sizeOf(event_metadata)) {
                     break;
                 }
 
@@ -481,7 +444,7 @@ pub fn listener(
                 if (try parseRawEvent(ha7r, timestamp, meta_ptr, mount_fd)) |event|
                     try event_sink.append(event);
 
-                ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
+                ptr = @as(*u8, @ptrFromInt(@intFromPtr(ptr) + meta.event_len));
                 left_bytes -= meta.event_len;
                 event_count += 1;
             }
@@ -498,8 +461,8 @@ pub fn listener(
 }
 
 fn parseRawEvent(
-    ha7r: Allocator, 
-    timestamp: i64, 
+    ha7r: Allocator,
+    timestamp: i64,
     meta_ptr: *align(1) const event_metadata,
     mount_fd: std.os.fd_t,
 ) !?FanotifyEvent {
@@ -526,7 +489,7 @@ fn parseRawEvent(
         // created/deleted/moved child object is reported only if  an  fanotify
         // group  was initialized with the flag FAN_REPORT_TARGET_FID.
 
-        const kind = @bitCast(FAN.EVENT, @truncate(u32, meta.mask));
+        const kind = @as(FAN.EVENT, @bitCast(@as(u32, @truncate(meta.mask))));
 
         var arena = std.heap.ArenaAllocator.init(ha7r);
         defer arena.deinit();
@@ -536,14 +499,9 @@ fn parseRawEvent(
         var opt_old_name: ?[]u8 = null;
         var opt_old_dir: ?[]u8 = null;
 
-        var start_addr = @ptrToInt(meta_ptr) + @sizeOf(event_metadata);
-        while (
-            start_addr < @ptrToInt(meta_ptr) + meta.event_len
-        ) {
-            const info_hdr = @intToPtr(
-                *event_info_header, 
-                start_addr
-            );
+        var start_addr = @intFromPtr(meta_ptr) + @sizeOf(event_metadata);
+        while (start_addr < @intFromPtr(meta_ptr) + meta.event_len) {
+            const info_hdr = @as(*event_info_header, @ptrFromInt(start_addr));
             defer start_addr = start_addr + info_hdr.len;
             // lifted from the manual fanotify(7)
             // Note that for the directory entry modification events FAN_CREATE,
@@ -551,7 +509,7 @@ fn parseRawEvent(
             // directory and not the created/deleted/moved child object. If the
             // value of  info_type  field is FAN_EVENT_INFO_TYPE_DFID_NAME, the
             // file handle is followed by a null terminated string that identifies
-            // the created/deleted/moved  directory entry name.  
+            // the created/deleted/moved  directory entry name.
 
             // For other events such as FAN_OPEN, FAN_ATTRIB, FAN_DELETE_SELF,  and
             // FAN_MOVE_SELF, if the value of info_type field is
@@ -568,16 +526,13 @@ fn parseRawEvent(
 
             // if just fid
             if (info_hdr.info_type == FAN.EVENT.INFO_TYPE.FID) {
-                const fid_info = @intToPtr(
-                    *event_info_fid, 
-                    start_addr
-                );
+                const fid_info = @as(*event_info_fid, @ptrFromInt(start_addr));
                 const handle = &fid_info.handle;
                 // defer println(
-                //     "raw event FID: {} dir={?s} name={?s}", 
+                //     "raw event FID: {} dir={?s} name={?s}",
                 //     .{ .{ meta_ptr, fid_info, }, opt_dir.some, opt_name.some }
                 // );
-                // read the name and dir from the handle and assume that it belongs 
+                // read the name and dir from the handle and assume that it belongs
                 // to the file of interest. Simple.
                 if (open_by_handle_at(
                     mount_fd,
@@ -591,16 +546,13 @@ fn parseRawEvent(
                     // std.debug.assert(opt_name == null);
                     // std.debug.assert(opt_dir == null);
                     if (opt_name != null or opt_dir != null) {
-                        println(
-                            "opt_name={?s} opt_dir={?s} path={?s} kind={}", 
-                            .{ opt_name, opt_dir, path, kind }
-                        );
+                        println("opt_name={?s} opt_dir={?s} path={?s} kind={}", .{ opt_name, opt_dir, path, kind });
                     }
                     opt_name = try aha7r.dupe(u8, std.fs.path.basename(path));
                     opt_dir = try aha7r.dupe(u8, std.fs.path.dirname(path) orelse "/"[0..]);
                 } else |err| switch (err) {
                     OpenByHandleErr.StaleFileHandle => {
-                        std.log.debug("err: {}", .{ err });
+                        std.log.debug("err: {}", .{err});
                     },
                     else => {
                         std.log.warn("open_by_handle_at failed with {} at {}", .{ err, meta });
@@ -614,19 +566,13 @@ fn parseRawEvent(
                         // );
                     },
                 }
-            } else if (
-                info_hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME
-                or 
-                info_hdr.info_type == FAN.EVENT.INFO_TYPE.NEW_DFID_NAME
-                or 
-                info_hdr.info_type == FAN.EVENT.INFO_TYPE.OLD_DFID_NAME
-            ) {
-                const fid_info = @intToPtr(
-                    *event_info_fid, 
-                    start_addr
-                );
+            } else if (info_hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME or
+                info_hdr.info_type == FAN.EVENT.INFO_TYPE.NEW_DFID_NAME or
+                info_hdr.info_type == FAN.EVENT.INFO_TYPE.OLD_DFID_NAME)
+            {
+                const fid_info = @as(*event_info_fid, @ptrFromInt(start_addr));
                 // defer println(
-                //     "raw event DFID: {} dir={?s} name={?s}", 
+                //     "raw event DFID: {} dir={?s} name={?s}",
                 //     .{ .{ meta_ptr, fid_info, }, opt_dir.some, opt_name.some }
                 // );
 
@@ -649,7 +595,7 @@ fn parseRawEvent(
                 } else |err| blk: {
                     switch (err) {
                         OpenByHandleErr.StaleFileHandle => {
-                            std.log.debug("err: {}", .{ err });
+                            std.log.debug("err: {}", .{err});
                         },
                         else => {
                             var stuff = try std.os.fcntl(mount_fd, std.os.F.GETFD, 0);
@@ -676,10 +622,8 @@ fn parseRawEvent(
                     if (opt_path) |path| {
                         dir = path;
                     }
-                } 
-                if (
-                    info_hdr.info_type == FAN.EVENT.INFO_TYPE.OLD_DFID_NAME
-                ) {
+                }
+                if (info_hdr.info_type == FAN.EVENT.INFO_TYPE.OLD_DFID_NAME) {
                     std.debug.assert(opt_old_name == null);
                     std.debug.assert(opt_old_dir == null);
                     if (name) |slice| {
@@ -688,7 +632,7 @@ fn parseRawEvent(
                     if (dir) |slice| {
                         opt_old_dir = try aha7r.dupe(u8, slice);
                     }
-                } 
+                }
                 // info_hdr.info_type == FAN.EVENT.INFO_TYPE.DFID_NAME
                 // or info_hdr.info_type == FAN.EVENT.INFO_TYPE.NEW_DFID_NAME
                 else {
@@ -702,13 +646,11 @@ fn parseRawEvent(
                     }
                 }
             } else {
-                println("raw event UNEXPECTED: {}", .{ .{ meta_ptr, info_hdr } });
+                println("raw event UNEXPECTED: {}", .{.{ meta_ptr, info_hdr }});
                 @panic("unexpected info type");
             }
         }
-        const event = try FanotifyEvent.init(
-            ha7r, opt_name, opt_dir, opt_old_name, opt_old_dir, &meta, timestamp
-        );
+        const event = try FanotifyEvent.init(ha7r, opt_name, opt_dir, opt_old_name, opt_old_dir, &meta, timestamp);
         return event;
     }
 }
@@ -766,7 +708,7 @@ const FanotifyTest = struct {
             const fd = blk: {
                 const fd = try init(
                     FAN.CLASS.NOTIF,
-                    FAN.INIT {
+                    FAN.INIT{
                         // .report_fid = true,
                         .report_dir_fid = true,
                         .report_name = true,
@@ -774,33 +716,23 @@ const FanotifyTest = struct {
                     },
                     std.os.O.RDONLY | std.os.O.CLOEXEC,
                 );
-                try mark(
-                    fd, 
-                    FAN.MARK.MOD.ADD, 
-                    FAN.MARK.FILESYSTEM, 
-                    FAN.EVENT {
-                        .create = true,
-                        .modify = true,
-                        .attrib = true,
-                        .delete = true,
-                        // .moved_to = true,
-                        // .moved_from = true,
-                        .ondir = true,
-                        .rename = true,
-                    },
-                    std.os.AT.FDCWD, 
-                    ctx.path
-                );
+                try mark(fd, FAN.MARK.MOD.ADD, FAN.MARK.FILESYSTEM, FAN.EVENT{
+                    .create = true,
+                    .modify = true,
+                    .attrib = true,
+                    .delete = true,
+                    // .moved_to = true,
+                    // .moved_from = true,
+                    .ondir = true,
+                    .rename = true,
+                }, std.os.AT.FDCWD, ctx.path);
                 break :blk fd;
             };
             defer std.os.close(fd);
 
-            var mount_fd = try std.os.openZ(
-                ctx.path,
-                // std.os.O.RDONLY | std.os.O.PATH | std.os.O.DIRECTORY,
-                std.os.O.RDONLY | std.os.O.DIRECTORY,
-                0
-            ); 
+            var mount_fd = try std.os.openZ(ctx.path,
+            // std.os.O.RDONLY | std.os.O.PATH | std.os.O.DIRECTORY,
+            std.os.O.RDONLY | std.os.O.DIRECTORY, 0);
             defer std.os.close(mount_fd);
 
             var pollfds = [_]std.os.pollfd{std.os.pollfd{
@@ -849,14 +781,11 @@ const FanotifyTest = struct {
                     var left_bytes = read_len;
                     var event_count: usize = 0;
                     while (true) {
-                        const meta_ptr = @ptrCast(*align(1) const event_metadata, ptr);
+                        const meta_ptr = @as(*align(1) const event_metadata, @ptrCast(ptr));
                         const meta = meta_ptr.*;
-                        if (
-                            left_bytes < @sizeOf(event_metadata) 
-                            or left_bytes < @intCast(usize, meta.event_len)
-                            // FIXME: is this case even possible?
-                            or meta.event_len < @sizeOf(event_metadata)
-                        ) {
+                        if (left_bytes < @sizeOf(event_metadata) or left_bytes < @as(usize, @intCast(meta.event_len))
+                        // FIXME: is this case even possible?
+                        or meta.event_len < @sizeOf(event_metadata)) {
                             break;
                         }
 
@@ -866,12 +795,10 @@ const FanotifyTest = struct {
 
                         if ((meta.mask & FAN.Q_OVERFLOW) > 0) @panic("queue overflowed");
 
-                        if (
-                            try parseRawEvent(alloc8or, timestamp, meta_ptr, mount_fd)
-                        ) |event|
+                        if (try parseRawEvent(alloc8or, timestamp, meta_ptr, mount_fd)) |event|
                             try ctx.events.append(event);
 
-                        ptr = @intToPtr(*u8, @ptrToInt(ptr) + meta.event_len);
+                        ptr = @as(*u8, @ptrFromInt(@intFromPtr(ptr) + meta.event_len));
                         left_bytes -= meta.event_len;
                         event_count += 1;
                     }
@@ -931,7 +858,7 @@ const FanotifyTest = struct {
             var path = try mod_utils.fdPath(tmp_dir.dir.fd);
             // var path = try tmp_dir.dir.realpath(a7r, tmpfs_name);
             // defer a7r.free(path);
-            break :blk try std.fs.path.joinZ(a7r, &.{path, tmpfs_name});
+            break :blk try std.fs.path.joinZ(a7r, &.{ path, tmpfs_name });
         };
         errdefer a7r.free(tmpfs_path);
 
@@ -952,7 +879,7 @@ const FanotifyTest = struct {
 
         var out = std.ArrayList(FanotifyEvent).init(a7r);
         errdefer {
-            for(out.items) |*evt| {
+            for (out.items) |*evt| {
                 evt.deinit(a7r);
             }
             out.deinit();
@@ -987,31 +914,25 @@ const FanotifyTest = struct {
 
     fn expectEvent(
         self: *const Self,
-        expected_kind: FAN.EVENT, 
-        expected_name: ?[]const u8, 
-        expected_dir: ?[]const u8, 
+        expected_kind: FAN.EVENT,
+        expected_name: ?[]const u8,
+        expected_dir: ?[]const u8,
     ) !FanotifyEvent {
         for (self.events.items) |event| {
             var common = expected_kind.asInt() & event.kind.asInt();
-            if (
-                common > 0 
-                // if ondir is all they have in common, not interested
-                and common != (FAN.EVENT { .ondir = true }).asInt()
-            ) {
+            if (common > 0
+            // if ondir is all they have in common, not interested
+            and common != (FAN.EVENT{ .ondir = true }).asInt()) {
                 if (expected_name) |name| {
-                    if (!std.mem.eql(
-                        u8, 
-                        name, 
-                        event.name orelse {
-                            // println(
-                            //     "found event but name was null: {s} != null", 
-                            //     .{ name }
-                            // );
-                            continue;
-                        }
-                    )) {
+                    if (!std.mem.eql(u8, name, event.name orelse {
                         // println(
-                        //     "found event but name slices weren't equal: {s} != {s}", 
+                        //     "found event but name was null: {s} != null",
+                        //     .{ name }
+                        // );
+                        continue;
+                    })) {
+                        // println(
+                        //     "found event but name slices weren't equal: {s} != {s}",
                         //     .{ name, event.name orelse unreachable }
                         // );
                         continue;
@@ -1020,18 +941,14 @@ const FanotifyTest = struct {
                 if (expected_dir) |dir| {
                     const event_dir = event.dir orelse {
                         // println(
-                        //     "found event but dir was null: {s} != null", 
+                        //     "found event but dir was null: {s} != null",
                         //     .{ dir }
                         // );
                         continue;
                     };
-                    if (!std.mem.eql(
-                        u8, 
-                        dir, 
-                        event_dir[self.tmpfs_path.len..]
-                    )) {
+                    if (!std.mem.eql(u8, dir, event_dir[self.tmpfs_path.len..])) {
                         // println(
-                        //     "found event but dir slices weren't equal {s} != {s}", 
+                        //     "found event but dir slices weren't equal {s} != {s}",
                         //     .{ dir, event.dir orelse unreachable }
                         // );
                         continue;
@@ -1043,7 +960,6 @@ const FanotifyTest = struct {
         return error.EventNotFound;
     }
 };
-
 
 test "fanotify_create_file" {
     if (builtin.single_threaded) return error.SkipZigTest;
@@ -1065,11 +981,11 @@ test "fanotify_create_file" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .create = true }, 
-        file_name, 
+        FAN.EVENT{ .create = true },
+        file_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1098,11 +1014,11 @@ test "fanotify_create_file_nested" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .create = true }, 
-        file_name, 
-        "/"++file_dir,
+        FAN.EVENT{ .create = true },
+        file_name,
+        "/" ++ file_dir,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1126,11 +1042,11 @@ test "fanotify_create_dir" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .create = true, .ondir = true },
-        dir_name, 
+        FAN.EVENT{ .create = true, .ondir = true },
+        dir_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1155,11 +1071,13 @@ test "fanotify_delete_file" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .delete = true, },
-        file_name, 
+        FAN.EVENT{
+            .delete = true,
+        },
+        file_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1183,11 +1101,11 @@ test "fanotify_delete_dir" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .delete = true, .ondir = true },
-        dir_name, 
+        FAN.EVENT{ .delete = true, .ondir = true },
+        dir_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1213,18 +1131,20 @@ test "fanotify_move_file" {
     defer res.deinit(a7r);
 
     const event = res.expectEvent(
-        FAN.EVENT { .rename = true, },
-        new_name, 
+        FAN.EVENT{
+            .rename = true,
+        },
+        new_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
     const old_name = event.old_name orelse unreachable;
     try std.testing.expectEqualStrings(file_name, old_name);
     // res.expectEvent(
     //     FAN.EVENT { .moved_from = true, },
-    //     file_name, 
+    //     file_name,
     //     null,
     // ) catch |err| {
     //     println("{any}", .{ res.events.items });
@@ -1252,11 +1172,11 @@ test "fanotify_move_dir" {
     defer res.deinit(a7r);
 
     const event = res.expectEvent(
-        FAN.EVENT { .rename = true, .ondir = true },
-        new_name, 
+        FAN.EVENT{ .rename = true, .ondir = true },
+        new_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
     const old_name = event.old_name orelse unreachable;
@@ -1283,11 +1203,13 @@ test "fanotify_mod_file" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .modify = true, },
-        file_name, 
+        FAN.EVENT{
+            .modify = true,
+        },
+        file_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1306,9 +1228,7 @@ test "fanotify_attrib_file" {
             _ = a7r;
             var file = try dir.openFile(file_name, .{});
             defer file.close();
-            try file.setPermissions(
-                std.fs.File.Permissions{ .inner = std.fs.File.PermissionsUnix.unixNew(777) }
-            );
+            try file.setPermissions(std.fs.File.Permissions{ .inner = std.fs.File.PermissionsUnix.unixNew(777) });
         }
     };
     var a7r = std.testing.allocator;
@@ -1316,11 +1236,11 @@ test "fanotify_attrib_file" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .attrib = true },
-        file_name, 
+        FAN.EVENT{ .attrib = true },
+        file_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }
@@ -1340,9 +1260,7 @@ test "fanotify_attrib_dir" {
             _ = a7r;
             var subdir = try dir.openIterableDir(dir_name, .{});
             defer subdir.close();
-            try subdir.dir.setPermissions(
-                std.fs.File.Permissions{ .inner = std.fs.File.PermissionsUnix.unixNew(777) }
-            );
+            try subdir.dir.setPermissions(std.fs.File.Permissions{ .inner = std.fs.File.PermissionsUnix.unixNew(777) });
         }
     };
     var a7r = std.testing.allocator;
@@ -1350,11 +1268,11 @@ test "fanotify_attrib_dir" {
     defer res.deinit(a7r);
 
     _ = res.expectEvent(
-        FAN.EVENT { .attrib = true, .ondir = true },
-        dir_name, 
+        FAN.EVENT{ .attrib = true, .ondir = true },
+        dir_name,
         null,
     ) catch |err| {
-        println("{any}", .{ res.events.items });
+        println("{any}", .{res.events.items});
         return err;
     };
 }

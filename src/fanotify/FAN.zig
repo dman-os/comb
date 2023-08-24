@@ -56,7 +56,6 @@ pub const EVENT = packed struct {
     /// 8th bit
     moved_to: bool = false,
 
-
     /// File or directory has been created.
     ///
     /// (since Linux 5.1)
@@ -168,15 +167,10 @@ pub const EVENT = packed struct {
     pub const ONDIR = 0x40000000;
 
     pub fn asInt(self: @This()) u32 {
-        return @bitCast(u32, self);
+        return @as(u32, @bitCast(self));
     }
 
-    pub fn format(
-        self: @This(), 
-        comptime fmt: []const u8, 
-        options: std.fmt.FormatOptions, 
-        writer: anytype
-    ) !void {
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
         try std.fmt.format(writer, @typeName(@This()) ++ " {{", .{});
@@ -185,7 +179,7 @@ pub const EVENT = packed struct {
         inline for (tinfo.fields) |field| {
             if (field.type == bool)
                 if (@field(self, field.name))
-                    try std.fmt.format(writer, " {s},", .{ field.name });
+                    try std.fmt.format(writer, " {s},", .{field.name});
         }
         try std.fmt.format(writer, " }}", .{});
     }
@@ -193,45 +187,36 @@ pub const EVENT = packed struct {
     comptime {
         const Self = @This();
         if (@sizeOf(Self) != @sizeOf(u32)) {
-            @compileError(std.fmt.comptimePrint(
-                "unexpected size mismatch: {} !=  {}\n",
-                .{ @sizeOf(Self), @sizeOf(u32) }
-            ));
+            @compileError(std.fmt.comptimePrint("unexpected size mismatch: {} !=  {}\n", .{ @sizeOf(Self), @sizeOf(u32) }));
         }
         if (@bitSizeOf(Self) != @bitSizeOf(u32)) {
-            @compileError(std.fmt.comptimePrint(
-                "unexpected bitSize mismatch: {} !=  {}\n",
-                .{ @bitSizeOf(Self), @bitSizeOf(u32) }
-            ));
+            @compileError(std.fmt.comptimePrint("unexpected bitSize mismatch: {} !=  {}\n", .{ @bitSizeOf(Self), @bitSizeOf(u32) }));
         }
         var table = .{
-            .{ Self { .access = true }, ACCESS },
-            .{ Self { .modify = true }, MODIFY },
-            .{ Self { .attrib = true }, ATTRIB },
-            .{ Self { .close_write = true }, CLOSE_WRITE },
-            .{ Self { .close_nowrite = true }, CLOSE_NOWRITE },
-            .{ Self { .open = true }, OPEN },
-            .{ Self { .moved_from = true }, MOVED_FROM },
-            .{ Self { .moved_to = true }, MOVED_TO },
-            .{ Self {.moved_from = true, .moved_to = true }, MOVE },
-            .{ Self { .create = true }, CREATE },
-            .{ Self { .delete = true }, DELETE },
-            .{ Self { .delete_self = true }, DELETE_SELF },
-            .{ Self { .move_self = true }, MOVE_SELF },
-            .{ Self { .open_exec = true }, OPEN_EXEC },
-            .{ Self { .open_perm = true }, OPEN_PERM },
-            .{ Self { .access_perm = true }, ACCESS_PERM },
-            .{ Self { .open_exec_perm = true }, OPEN_EXEC_PERM },
-            .{ Self { .event_on_child = true }, EVENT_ON_CHILD },
-            .{ Self { .rename = true }, RENAME },
-            .{ Self { .ondir = true }, ONDIR },
+            .{ Self{ .access = true }, ACCESS },
+            .{ Self{ .modify = true }, MODIFY },
+            .{ Self{ .attrib = true }, ATTRIB },
+            .{ Self{ .close_write = true }, CLOSE_WRITE },
+            .{ Self{ .close_nowrite = true }, CLOSE_NOWRITE },
+            .{ Self{ .open = true }, OPEN },
+            .{ Self{ .moved_from = true }, MOVED_FROM },
+            .{ Self{ .moved_to = true }, MOVED_TO },
+            .{ Self{ .moved_from = true, .moved_to = true }, MOVE },
+            .{ Self{ .create = true }, CREATE },
+            .{ Self{ .delete = true }, DELETE },
+            .{ Self{ .delete_self = true }, DELETE_SELF },
+            .{ Self{ .move_self = true }, MOVE_SELF },
+            .{ Self{ .open_exec = true }, OPEN_EXEC },
+            .{ Self{ .open_perm = true }, OPEN_PERM },
+            .{ Self{ .access_perm = true }, ACCESS_PERM },
+            .{ Self{ .open_exec_perm = true }, OPEN_EXEC_PERM },
+            .{ Self{ .event_on_child = true }, EVENT_ON_CHILD },
+            .{ Self{ .rename = true }, RENAME },
+            .{ Self{ .ondir = true }, ONDIR },
         };
         for (table) |case| {
             if (case[0].asInt() != @as(u32, case[1])) {
-                @compileError(std.fmt.comptimePrint(
-                    "unexpected bit set: {}({}) !=  {}\n",
-                    .{ case[0], case[0].asInt(), case[1] }
-                ));
+                @compileError(std.fmt.comptimePrint("unexpected bit set: {}({}) !=  {}\n", .{ case[0], case[0].asInt(), case[1] }));
             }
         }
     }
@@ -291,7 +276,7 @@ pub const INIT = packed struct {
     /// 8th bit
     report_pidfd: bool = false,
 
-    /// Report thread ID (TID) instead of process ID (PID) in the pid field 
+    /// Report thread ID (TID) instead of process ID (PID) in the pid field
     /// of the struct fanotify_event_metadata supplied
     ///
     /// (since Linux 4.20)
@@ -326,49 +311,35 @@ pub const INIT = packed struct {
     pub const REPORT_DFID_NAME_TARGET = (REPORT_DFID_NAME | REPORT_FID) | REPORT_TARGET_FID;
 
     pub fn asInt(self: @This()) u13 {
-        return @bitCast(u13, self);
+        return @as(u13, @bitCast(self));
     }
 
     comptime {
         const Self = @This();
         if (@sizeOf(Self) != @sizeOf(u13)) {
-            @compileError(std.fmt.comptimePrint(
-                "unexpected size mismatch: {} !=  {}\n",
-                .{ @sizeOf(Self), @sizeOf(u13) }
-            ));
+            @compileError(std.fmt.comptimePrint("unexpected size mismatch: {} !=  {}\n", .{ @sizeOf(Self), @sizeOf(u13) }));
         }
         if (@bitSizeOf(Self) != @bitSizeOf(u13)) {
-            @compileError(std.fmt.comptimePrint(
-                "unexpected bitSize mismatch: {} !=  {}\n",
-                .{ @bitSizeOf(Self), @bitSizeOf(u13) }
-            ));
+            @compileError(std.fmt.comptimePrint("unexpected bitSize mismatch: {} !=  {}\n", .{ @bitSizeOf(Self), @bitSizeOf(u13) }));
         }
         var table = .{
-            .{ Self { .cloexec = true }, CLOEXEC },
-            .{ Self { .nonblock = true }, NONBLOCK },
-            .{ Self { .unlimited_queue = true }, UNLIMITED_QUEUE },
-            .{ Self { .unlimited_marks = true }, UNLIMITED_MARKS },
-            .{ Self { .enable_audit = true }, ENABLE_AUDIT },
-            .{ Self { .report_pidfd = true }, REPORT_PIDFD },
-            .{ Self { .report_tid = true }, REPORT_TID },
-            .{ Self { .report_fid = true }, REPORT_FID },
-            .{ Self { .report_dir_fid = true }, REPORT_DIR_FID },
-            .{ Self { .report_name = true }, REPORT_NAME },
-            .{ Self { .report_target_fid = true }, REPORT_TARGET_FID },
-            .{ Self { .report_dir_fid = true, .report_name = true }, REPORT_DFID_NAME },
-            .{ Self { 
-                .report_dir_fid = true, 
-                .report_name = true, 
-                .report_fid = true,
-                .report_target_fid = true 
-            }, REPORT_DFID_NAME_TARGET },
+            .{ Self{ .cloexec = true }, CLOEXEC },
+            .{ Self{ .nonblock = true }, NONBLOCK },
+            .{ Self{ .unlimited_queue = true }, UNLIMITED_QUEUE },
+            .{ Self{ .unlimited_marks = true }, UNLIMITED_MARKS },
+            .{ Self{ .enable_audit = true }, ENABLE_AUDIT },
+            .{ Self{ .report_pidfd = true }, REPORT_PIDFD },
+            .{ Self{ .report_tid = true }, REPORT_TID },
+            .{ Self{ .report_fid = true }, REPORT_FID },
+            .{ Self{ .report_dir_fid = true }, REPORT_DIR_FID },
+            .{ Self{ .report_name = true }, REPORT_NAME },
+            .{ Self{ .report_target_fid = true }, REPORT_TARGET_FID },
+            .{ Self{ .report_dir_fid = true, .report_name = true }, REPORT_DFID_NAME },
+            .{ Self{ .report_dir_fid = true, .report_name = true, .report_fid = true, .report_target_fid = true }, REPORT_DFID_NAME_TARGET },
         };
         for (table) |case| {
             if (case[0].asInt() != @as(u13, case[1])) {
-                @compileError(std.fmt.comptimePrint(
-                    "unexpected bit set: {}({}) !=  {}\n",
-                    .{ case[0], case[0].asInt(), case[1] }
-                ));
+                @compileError(std.fmt.comptimePrint("unexpected bit set: {}({}) !=  {}\n", .{ case[0], case[0].asInt(), case[1] }));
             }
         }
     }

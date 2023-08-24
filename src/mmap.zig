@@ -20,19 +20,19 @@ pub const Pager = struct {
     const Self = @This();
     pub const Error = AllocError || SwapInError;
 
-    pub const AllocError = error {
+    pub const AllocError = error{
         FileTooBig,
         FileBusy,
         InputOutput,
     } || Allocator.Error || std.os.UnexpectedError;
 
-    pub const SwapInError = error {
+    pub const SwapInError = error{
         OutOfMemory,
-        LockedMemoryLimitExceeded,
+        KernelResourceExhausted,
     } || std.os.UnexpectedError;
 
     pub const PageNo = u32;
-    pub const PageSlice = []align(mmap_align)u8;
+    pub const PageSlice = []align(mmap_align) u8;
 
     pub const BlockId = packed struct {
         idx: u32,
@@ -125,62 +125,64 @@ pub const Pager = struct {
         const const_ptr_info = @typeInfo(ConstPagerPtr);
         std.debug.assert(const_ptr_info == .Pointer); // Must be a pointer
         std.debug.assert(const_ptr_info.Pointer.size == .One); // Must be a single-item pointer
-        std.debug.assert(const_ptr_info.Pointer.is_const); // Must be const 
+        std.debug.assert(const_ptr_info.Pointer.is_const); // Must be const
 
         const alignment = ptr_info.Pointer.alignment;
 
         const gen = struct {
             fn allocImpl(alloc_ptr: *anyopaque) AllocError!Pager.PageNo {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.always_inline, allocFn, .{ self, });
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
+                return @call(.always_inline, allocFn, .{
+                    self,
+                });
             }
 
             fn allocBlockImpl(alloc_ptr: *anyopaque, len: u32) AllocError!Pager.BlockId {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, allocBlockFn, .{ self, len });
             }
 
             fn swapInImpl(alloc_ptr: *anyopaque, no: Pager.PageNo) SwapInError!Pager.PageSlice {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, swapInFn, .{ self, no });
             }
 
             fn swapInBlockImpl(alloc_ptr: *anyopaque, id: Pager.BlockId) SwapInError!Pager.PageSlice {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, swapInBlockFn, .{ self, id });
             }
 
             fn swapOutImpl(alloc_ptr: *anyopaque, no: Pager.PageNo) void {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, swapOutFn, .{ self, no });
             }
 
             fn swapOutBlockImpl(alloc_ptr: *anyopaque, id: Pager.BlockId) void {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, swapOutBlockFn, .{ self, id });
             }
 
             fn freeImpl(alloc_ptr: *anyopaque, no: Pager.PageNo) void {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, freeFn, .{ self, no });
             }
 
             fn freeBlockImpl(alloc_ptr: *anyopaque, id: Pager.BlockId) void {
-                const self = @ptrCast(PagerPtr, @alignCast(alignment, alloc_ptr));
+                const self = @as(PagerPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
                 return @call(.always_inline, freeBlockFn, .{ self, id });
             }
 
             fn isSwappedInImpl(alloc_ptr: *const anyopaque, no: Pager.PageNo) bool {
-                const self = @ptrCast(*const PagerPtr, &@alignCast(alignment, alloc_ptr)).*;
+                const self = @as(*const PagerPtr, @ptrCast(&@as(*align(alignment) const anyopaque, @alignCast(alloc_ptr)))).*;
                 return @call(.always_inline, isSwappedInFn, .{ self, no });
             }
 
             fn pageSizeImpl(alloc_ptr: *const anyopaque) usize {
-                const self = @ptrCast(*const PagerPtr, &@alignCast(alignment, alloc_ptr)).*;
-                return @call(.always_inline, pageSizeFn, .{ self });
+                const self = @as(*const PagerPtr, @ptrCast(&@as(*align(alignment) const anyopaque, @alignCast(alloc_ptr)))).*;
+                return @call(.always_inline, pageSizeFn, .{self});
             }
 
-            const vtable = VTable {
+            const vtable = VTable{
                 .alloc = allocImpl,
                 .allocBlock = allocBlockImpl,
                 .free = freeImpl,
@@ -223,14 +225,14 @@ pub const MmapPager = struct {
         free: bool,
         // len: usize,
     };
-    
+
     const PageBlocks = std.AutoHashMapUnmanaged(
         u32,
         std.AutoHashMapUnmanaged(PageNo, ?PageSlice),
     );
 
     const FreeList = std.AutoHashMapUnmanaged(
-        u32, 
+        u32,
         std.AutoHashMapUnmanaged(PageNo, void),
     );
 
@@ -262,11 +264,11 @@ pub const MmapPager = struct {
         if (self.config.deinit_clean_up_file) {
             if (mod_utils.fdPath(self.backing_file.handle)) |actual_path| {
                 self.backing_file.close();
-                std.fs.deleteFileAbsolute(actual_path) catch |err|{
-                    std.log.warn("error deleting file  when trying to remove mmap file: {}",. { err });
+                std.fs.deleteFileAbsolute(actual_path) catch |err| {
+                    std.log.warn("error deleting file  when trying to remove mmap file: {}", .{err});
                 };
             } else |err| {
-                std.log.warn("trouble with readlink when trying to remove mmap file: {}",. { err });
+                std.log.warn("trouble with readlink when trying to remove mmap file: {}", .{err});
             }
         }
         var active_count: usize = 0;
@@ -283,13 +285,13 @@ pub const MmapPager = struct {
             }
         }
         if (active_count > 0) {
-            std.log.warn("{} allocated pages at deinit of " ++ @typeName(Self), .{ active_count });
+            std.log.warn("{} allocated pages at deinit of " ++ @typeName(Self), .{active_count});
         }
         if (swapped_in_count > 0) {
             if (self.config.deinit_leak_swapped_in_pages) {
-                std.log.warn("leaked {} swapped in pages at deinit of " ++ @typeName(Self), .{ swapped_in_count });
+                std.log.warn("leaked {} swapped in pages at deinit of " ++ @typeName(Self), .{swapped_in_count});
             } else {
-                std.log.warn("swapped out {} pages that were swapped in and in use at deinit of " ++ @typeName(Self), .{ swapped_in_count });
+                std.log.warn("swapped out {} pages that were swapped in and in use at deinit of " ++ @typeName(Self), .{swapped_in_count});
             }
         }
         self.pages.deinit(self.a7r);
@@ -311,15 +313,15 @@ pub const MmapPager = struct {
 
     pub fn pager(self: *Self) Pager {
         return Pager.init(
-            self, 
-            @as(*const Self, self), 
-            alloc, 
+            self,
+            @as(*const Self, self),
+            alloc,
             allocBlock,
-            free, 
+            free,
             freeBlock,
-            swapIn, 
+            swapIn,
             swapInBlock,
-            swapOut, 
+            swapOut,
             swapOutBlock,
             pageSize,
             isSwappedIn,
@@ -341,11 +343,9 @@ pub const MmapPager = struct {
             // look for free blocks to the right and find out their len
             var right_free_len: u32 = 0;
             var ii: u32 = id.idx + id.len;
-            while (
-                ii < self.pages.items.len
-                and
-                self.pages.items[ii].free
-            ) {
+            while (ii < self.pages.items.len and
+                self.pages.items[ii].free)
+            {
                 ii += 1;
                 right_free_len += 1;
             }
@@ -353,7 +353,7 @@ pub const MmapPager = struct {
             // combine them into the new block
             if (right_free_len > 0) {
                 // println(
-                //     "idx == {}, right_free_len = {}, free_classes = {}", 
+                //     "idx == {}, right_free_len = {}, free_classes = {}",
                 //     .{ id.idx, right_free_len, self.free_list.count() }
                 // );
                 // println(
@@ -362,9 +362,7 @@ pub const MmapPager = struct {
                 // );
                 var list = self.free_list.get(right_free_len).?;
                 // remove it from the free list
-                std.debug.assert(
-                    list.remove(id.idx + 1)
-                );
+                std.debug.assert(list.remove(id.idx + 1));
                 if (list.count() == 0) {
                     _ = self.free_list.remove(right_free_len);
                     list.deinit(self.a7r);
@@ -386,9 +384,7 @@ pub const MmapPager = struct {
             if (left_free_len > 0) {
                 var list = self.free_list.get(left_free_len).?;
                 // remove it from the free list
-                std.debug.assert(
-                    list.remove(id.idx - left_free_len)
-                );
+                std.debug.assert(list.remove(id.idx - left_free_len));
                 if (list.count() == 0) {
                     _ = self.free_list.remove(left_free_len);
                     list.deinit(self.a7r);
@@ -406,7 +402,7 @@ pub const MmapPager = struct {
                 res.value_ptr.* = std.AutoHashMapUnmanaged(PageNo, void){};
             }
             break :blk res.value_ptr;
-        }; 
+        };
         // println("putting in free block of len {} at slot {}", .{ block_len, start });
         try list.put(self.a7r, start, {});
     }
@@ -444,13 +440,13 @@ pub const MmapPager = struct {
             }
             const left = min_len - len;
             if (left > 0) {
-                try self.markBlockFree(BlockId { .idx = start + len, .len = left });
+                try self.markBlockFree(BlockId{ .idx = start + len, .len = left });
             }
             for (self.pages.items[start..(start + len)]) |*page| {
                 page.free = false;
             }
             // println("reallocing block at {} with len {}", .{ start, len });
-            return BlockId {
+            return BlockId{
                 .idx = start,
                 .len = len,
             };
@@ -476,7 +472,7 @@ pub const MmapPager = struct {
                     std.AutoHashMapUnmanaged(PageNo, ?PageSlice){},
                 );
                 break :blk pair.value_ptr;
-            }; 
+            };
             try set.put(self.a7r, id.idx, null);
             return id;
         } else {
@@ -484,16 +480,15 @@ pub const MmapPager = struct {
             try self.pages.ensureUnusedCapacity(self.a7r, block_len);
             // // ensure capacity on the free list to avoid error checking on free calls
             // try self.free_list.ensureUnusedCapacity(block_len);
-            std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + block_len) * self.config.page_size)
-                catch |err| return switch (err) {
-                    std.os.TruncateError.AccessDenied => unreachable,
-                    std.os.TruncateError.FileTooBig => error.FileTooBig,
-                    std.os.TruncateError.InputOutput=> error.InputOutput,
-                    std.os.TruncateError.FileBusy=> error.FileBusy,
-                    std.os.UnexpectedError.Unexpected => std.os.UnexpectedError.Unexpected,
-                };
+            std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + block_len) * self.config.page_size) catch |err| return switch (err) {
+                std.os.TruncateError.AccessDenied => unreachable,
+                std.os.TruncateError.FileTooBig => error.FileTooBig,
+                std.os.TruncateError.InputOutput => error.InputOutput,
+                std.os.TruncateError.FileBusy => error.FileBusy,
+                std.os.UnexpectedError.Unexpected => std.os.UnexpectedError.Unexpected,
+            };
             var ii: usize = 0;
-            while(ii < block_len) : ({
+            while (ii < block_len) : ({
                 ii += 1;
             }) {
                 try self.pages.append(self.a7r, Page{
@@ -508,10 +503,10 @@ pub const MmapPager = struct {
                     std.AutoHashMapUnmanaged(PageNo, ?PageSlice){},
                 );
                 break :b pair.value_ptr;
-            }; 
-            const idx = @intCast(u32, self.pages.items.len) - block_len;
+            };
+            const idx = @as(u32, @intCast(self.pages.items.len)) - block_len;
             try set.put(self.a7r, idx, null);
-            return BlockId { 
+            return BlockId{
                 .idx = idx,
                 .len = block_len,
             };
@@ -522,7 +517,7 @@ pub const MmapPager = struct {
         if (self.blocks.getPtr(id.len)) |set| {
             if (set.fetchRemove(id.idx)) |pair| {
                 if (pair.value != null) {
-                    std.log.warn("page {} was freed while swapped in", .{ id });
+                    std.log.warn("page {} was freed while swapped in", .{id});
                     @panic("ehh");
                 }
                 self.markBlockFree(id) catch @panic("oom");
@@ -536,7 +531,7 @@ pub const MmapPager = struct {
 
     /// This doesn't swap out the page.
     pub fn free(self: *Self, no: PageNo) void {
-        self.freeBlock(BlockId { .idx = no, .len = 1 });
+        self.freeBlock(BlockId{ .idx = no, .len = 1 });
         // if (no == self.pages.items.len - 1) {
         //     var ii = no;
         //     while (true) : ({
@@ -556,7 +551,7 @@ pub const MmapPager = struct {
             if (set.getPtr(id.idx)) |opt| {
                 if (opt.*) |slice| {
                     return slice;
-                } else  {
+                } else {
                     var slice = std.os.mmap(
                         null,
                         self.config.page_size * id.len,
@@ -565,11 +560,11 @@ pub const MmapPager = struct {
                         self.backing_file.handle,
                         // -1,
                         id.idx * self.config.page_size,
-                    ) catch |err| return switch(err) {
+                    ) catch |err| return switch (err) {
                         std.os.MMapError.MemoryMappingNotSupported => @panic("system doesn't support mmaping"),
                         std.os.MMapError.AccessDenied => unreachable,
                         std.os.MMapError.PermissionDenied => unreachable,
-                        std.os.MMapError.LockedMemoryLimitExceeded => error.LockedMemoryLimitExceeded,
+                        std.os.MMapError.LockedMemoryLimitExceeded, std.os.MMapError.ProcessFdQuotaExceeded, std.os.MMapError.SystemFdQuotaExceeded => error.KernelResourceExhausted,
                         std.os.MMapError.OutOfMemory => error.OutOfMemory,
                         std.os.UnexpectedError.Unexpected => std.os.UnexpectedError.Unexpected,
                     };
@@ -591,7 +586,7 @@ pub const MmapPager = struct {
                 if (opt.*) |slice| {
                     std.os.munmap(slice);
                     opt.* = null;
-                } else  {
+                } else {
                     std.log.warn(@typeName(Self) ++ " received swapOut for page not in memory at no {}", .{id});
                     @panic("eawoo");
                 }
@@ -620,11 +615,11 @@ pub const MmapPager = struct {
                 self.backing_file.handle,
                 // -1,
                 no * self.config.page_size,
-            ) catch |err| return switch(err) {
+            ) catch |err| return switch (err) {
                 std.os.MMapError.MemoryMappingNotSupported => @panic("system doesn't support mmaping"),
                 std.os.MMapError.AccessDenied => unreachable,
                 std.os.MMapError.PermissionDenied => unreachable,
-                std.os.MMapError.LockedMemoryLimitExceeded => error.LockedMemoryLimitExceeded,
+                std.os.MMapError.LockedMemoryLimitExceeded, std.os.MMapError.ProcessFdQuotaExceeded, std.os.MMapError.SystemFdQuotaExceeded => error.KernelResourceExhausted,
                 std.os.MMapError.OutOfMemory => error.OutOfMemory,
                 std.os.UnexpectedError.Unexpected => std.os.UnexpectedError.Unexpected,
             };
@@ -664,15 +659,15 @@ test "MmapPager.usage" {
     const item_per_page = page_size / @sizeOf(usize);
     const page_count = 10;
     var nums = [_]usize{0} ** (page_count * item_per_page);
-    for (nums) |*num, ii| {
+    for (&nums, 0..) |*num, ii| {
         num.* = ii;
     }
     var pages: [page_count]PageNo = undefined;
-    for (pages) |*no, pii| {
+    for (&pages, 0..) |*no, pii| {
         no.* = try pager.alloc();
         var bytes = try pager.swapIn(no.*);
         defer pager.swapOut(no.*);
-        for (std.mem.bytesAsSlice(usize, bytes)) |*num, ii| {
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |*num, ii| {
             num.* = nums[(pii * item_per_page) + ii];
         }
     }
@@ -680,10 +675,10 @@ test "MmapPager.usage" {
         pager.free(no);
     };
 
-    for (pages) |no, pii| {
+    for (pages, 0..) |no, pii| {
         var bytes = try pager.swapIn(no);
         defer pager.swapOut(no);
-        for (std.mem.bytesAsSlice(usize, bytes)) |num, ii| {
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |num, ii| {
             try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
         }
     }
@@ -694,7 +689,7 @@ test "MmapPager.usage" {
         // try std.testing.expectError(error.PageNotAllocated, pager.swapIn(pages[page_no]));
 
         var new_stuff = [_]usize{0} ** item_per_page;
-        for (new_stuff) |*num, ii| {
+        for (&new_stuff, 0..) |*num, ii| {
             num.* = item_per_page - ii;
             nums[(page_no * item_per_page) + ii] = item_per_page - ii;
         }
@@ -702,14 +697,14 @@ test "MmapPager.usage" {
         var no = try pager.alloc();
         var bytes = try pager.swapIn(no);
         defer pager.swapOut(no);
-        for (std.mem.bytesAsSlice(usize, bytes)) |*num, ii| {
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |*num, ii| {
             num.* = new_stuff[ii];
         }
     }
-    for (pages) |no, pii| {
+    for (pages, 0..) |no, pii| {
         var bytes = try pager.swapIn(no);
         defer pager.swapOut(no);
-        for (std.mem.bytesAsSlice(usize, bytes)) |num, ii| {
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |num, ii| {
             try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
         }
     }
@@ -719,7 +714,7 @@ test "MmapPager.usage" {
         {
             const slice = try pager.swapInBlock(block_id);
             defer pager.swapOutBlock(block_id);
-            std.mem.copy(u8, slice, std.mem.sliceAsBytes(&nums));
+            @memcpy(slice, std.mem.sliceAsBytes(&nums));
         }
         {
             const slice = try pager.swapInBlock(block_id);
@@ -736,25 +731,25 @@ test "MmapPager.usage" {
 /// Mainly avoids unessary syscalls and double map of the same page
 pub const LRUSwapCache = struct {
     const Self = @This();
-    
+
     const HotPage = struct {
         /// the net number of swap in and swap outs on this page
         /// put in cold list when this hits zero
-        swap_ins: usize, 
+        swap_ins: usize,
         slice: PageSlice,
     };
 
     const ColdPage = struct {
         no: PageNo,
         /// timestamp from our monotonic timer
-        last_used: usize, 
+        last_used: usize,
         slice: PageSlice,
     };
 
     const HotList = std.AutoHashMapUnmanaged(PageNo, HotPage);
     const ColdList = struct {
         const Que = std.TailQueue(ColdPage);
-        const Vec = std.ArrayListUnmanaged(Que.Node); 
+        const Vec = std.ArrayListUnmanaged(Que.Node);
         // Mpas to the an index in the Vec
         const Map = std.AutoHashMapUnmanaged(PageNo, usize);
 
@@ -765,7 +760,7 @@ pub const LRUSwapCache = struct {
 
         fn init(a7r: Allocator, max_cold: u32) !ColdList {
             if (max_cold == 0) @panic("max_cold set too low on " ++ @typeName(Self));
-            var self = ColdList {
+            var self = ColdList{
                 .vec = Vec{},
                 .map = Map{},
                 .que = Que{},
@@ -793,11 +788,11 @@ pub const LRUSwapCache = struct {
     max_cold: u32,
 
     pub fn init(
-        a7r: Allocator, 
-        backing_pager: Pager, 
+        a7r: Allocator,
+        backing_pager: Pager,
         max_cold: u32,
     ) !Self {
-        var self = Self {
+        var self = Self{
             .a7r = a7r,
             .backing_pager = backing_pager,
             .hot = HotList{},
@@ -807,10 +802,10 @@ pub const LRUSwapCache = struct {
         };
         return self;
     }
-    
+
     pub fn deinit(self: *Self) void {
         if (self.hot.count() > 0) {
-            std.log.warn("{} hot pages in " ++ @typeName(Self) ++ " at time of deinit", .{ self.hot.count() });
+            std.log.warn("{} hot pages in " ++ @typeName(Self) ++ " at time of deinit", .{self.hot.count()});
         }
         var it = self.cold.map.keyIterator();
         while (it.next()) |no| {
@@ -823,22 +818,22 @@ pub const LRUSwapCache = struct {
     pub fn hotCount(self: *const Self) u32 {
         return self.hot.count();
     }
-    
+
     pub fn coldCount(self: *const Self) u32 {
         return self.cold.map.count();
     }
 
     pub fn pager(self: *Self) Pager {
         return Pager.init(
-            self, 
-            @as(*const Self, self), 
-            alloc, 
+            self,
+            @as(*const Self, self),
+            alloc,
             allocBlock,
-            free, 
+            free,
             freeBlock,
-            swapIn, 
+            swapIn,
             swapInBlock,
-            swapOut, 
+            swapOut,
             swapOutBlock,
             pageSize,
             isSwappedIn,
@@ -893,15 +888,7 @@ pub const LRUSwapCache = struct {
             const idx = pair.value_ptr.*;
             const cold_p = self.cold.vec.items[idx].data;
             const slice = cold_p.slice;
-            std.debug.assert(
-                (
-                    try self.hot.fetchPut(
-                            self.a7r, 
-                            no, 
-                            HotPage { .slice = slice, .swap_ins = 1 }
-                    )
-                ) == null
-            );
+            std.debug.assert((try self.hot.fetchPut(self.a7r, no, HotPage{ .slice = slice, .swap_ins = 1 })) == null);
             self.cold.que.remove(&self.cold.vec.items[idx]);
             self.cold.map.removeByPtr(pair.key_ptr);
             self.cold.free_list.append(self.a7r, idx) catch @panic("impossible");
@@ -910,15 +897,7 @@ pub const LRUSwapCache = struct {
             // println("swappingIn fresh page {}", .{ no });
             const slice = try self.backing_pager.swapIn(no);
             errdefer self.backing_pager.swapOut(no);
-            std.debug.assert(
-                (
-                    try self.hot.fetchPut(
-                            self.a7r, 
-                            no, 
-                            HotPage { .slice = slice, .swap_ins = 1 }
-                    )
-                ) == null
-            );
+            std.debug.assert((try self.hot.fetchPut(self.a7r, no, HotPage{ .slice = slice, .swap_ins = 1 })) == null);
             return slice;
         }
     }
@@ -944,19 +923,19 @@ pub const LRUSwapCache = struct {
 
                 // check the free list for free spots
                 const idx = if (self.cold.free_list.popOrNull()) |idx| blk: {
-                    self.cold.vec.items[idx] = ColdList.Que.Node {
-                        .data = ColdPage { 
+                    self.cold.vec.items[idx] = ColdList.Que.Node{
+                        .data = ColdPage{
                             .no = no,
-                            .last_used  = self.timer.read(),
+                            .last_used = self.timer.read(),
                             .slice = slice,
                         },
                     };
                     break :blk idx;
                 } else blk: {
-                    self.cold.vec.append(self.a7r, ColdList.Que.Node {
-                        .data = ColdPage { 
+                    self.cold.vec.append(self.a7r, ColdList.Que.Node{
+                        .data = ColdPage{
                             .no = no,
-                            .last_used  = self.timer.read(),
+                            .last_used = self.timer.read(),
                             .slice = slice,
                         },
                     }) catch @panic("impossible");
@@ -964,8 +943,8 @@ pub const LRUSwapCache = struct {
                 };
                 self.cold.que.append(&self.cold.vec.items[idx]);
                 self.cold.map.put(
-                    self.a7r, 
-                    no, 
+                    self.a7r,
+                    no,
                     idx,
                 ) catch @panic("impossible");
             } else {
@@ -973,11 +952,9 @@ pub const LRUSwapCache = struct {
             }
         } else {
             self.backing_pager.swapOut(no);
-            std.log.warn(
-                "unrecognized page no swapped Out through " ++ 
-                @typeName(Self) ++ 
-                ": you're prolly misusing the cache", .{}
-            );
+            std.log.warn("unrecognized page no swapped Out through " ++
+                @typeName(Self) ++
+                ": you're prolly misusing the cache", .{});
             @panic("eawoo");
         }
     }
@@ -992,14 +969,14 @@ pub const SinglePageCache = struct {
 
     const InPage = struct {
         no: PageNo,
-        slice: []align(mmap_align)u8,
+        slice: []align(mmap_align) u8,
     };
 
     backing_pager: Pager,
     in_page: ?InPage = null,
 
     pub fn init(backing_pager: Pager) Self {
-        return Self { .in_page = null, .backing_pager = backing_pager };
+        return Self{ .in_page = null, .backing_pager = backing_pager };
     }
 
     pub fn deinit(self: *Self) void {
@@ -1010,12 +987,12 @@ pub const SinglePageCache = struct {
 
     // pub fn pager(self: *Self) Pager {
     //     return Pager.init(
-    //         self, 
-    //         @as(*const Self, self), 
-    //         alloc, 
-    //         free, 
-    //         swapIn, 
-    //         swapOut, 
+    //         self,
+    //         @as(*const Self, self),
+    //         alloc,
+    //         free,
+    //         swapIn,
+    //         swapOut,
     //         pageSize,
     //         isSwappedIn,
     //     );
@@ -1035,13 +1012,11 @@ pub const SinglePageCache = struct {
                 // TODO: consider giving a warning for free calls while swapped in
                 self.in_page = null;
             } else {
-                std.log.warn(
-                    "unrecognized page no freed through " ++ 
-                    @typeName(SinglePageCache) ++ 
-                    ": you're prolly misusing the cache", .{}
-                );
+                std.log.warn("unrecognized page no freed through " ++
+                    @typeName(SinglePageCache) ++
+                    ": you're prolly misusing the cache", .{});
             }
-        } 
+        }
         self.backing_pager.free(no);
     }
 
@@ -1056,7 +1031,7 @@ pub const SinglePageCache = struct {
                 // println("page swap for cache from {} to {}", .{in_p.no, no});
                 self.backing_pager.swapOut(in_p.no);
                 const slice = try self.backing_pager.swapIn(no);
-                self.in_page = InPage {
+                self.in_page = InPage{
                     .no = no,
                     .slice = slice,
                 };
@@ -1065,7 +1040,7 @@ pub const SinglePageCache = struct {
         } else {
             // println("swapping in page {} and adding to cache", .{no});
             const slice = try self.backing_pager.swapIn(no);
-            self.in_page = InPage {
+            self.in_page = InPage{
                 .no = no,
                 .slice = slice,
             };
@@ -1078,19 +1053,15 @@ pub const SinglePageCache = struct {
             if (no == in_p.no) {
                 self.in_page = null;
                 // println("swapping out page {} from cache", .{no});
-            } else{
-                std.log.warn(
-                    "unrecognized page no swapped Out through " ++ 
-                    @typeName(SinglePageCache) ++ 
-                    ": you're prolly misusing the cache", .{}
-                );
+            } else {
+                std.log.warn("unrecognized page no swapped Out through " ++
+                    @typeName(SinglePageCache) ++
+                    ": you're prolly misusing the cache", .{});
             }
         } else {
-            std.log.warn(
-                "page swapped Out through an empty " ++ 
-                @typeName(SinglePageCache) ++ 
-                ": you're prolly misusing the cache", .{}
-            );
+            std.log.warn("page swapped Out through an empty " ++
+                @typeName(SinglePageCache) ++
+                ": you're prolly misusing the cache", .{});
         }
         self.backing_pager.swapOut(no);
     }
@@ -1155,8 +1126,8 @@ pub const SwapAllocator = struct {
     pub fn dupe(self: SwapAllocator, bytes: []const u8) Error!DupeRes {
         const ptr = try self.alloc(bytes.len);
         var slice = try self.swapIn(ptr);
-        std.mem.copy(u8, slice, bytes);
-        return DupeRes {
+        @memcpy(slice, bytes);
+        return DupeRes{
             .ptr = ptr,
             .slice = slice,
         };
@@ -1166,7 +1137,7 @@ pub const SwapAllocator = struct {
         const ptr = try self.alloc(bytes.len);
         var slice = try self.swapIn(ptr);
         defer self.swapOut(ptr);
-        std.mem.copy(u8, slice, bytes);
+        @memcpy(slice, bytes);
         return ptr;
     }
 
@@ -1187,23 +1158,35 @@ pub const SwapAllocator = struct {
 
         const gen = struct {
             fn allocImpl(alloc_ptr: *anyopaque, len: usize) AllocError!Ptr {
-                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.always_inline, allocFn, .{ self, len,  });
+                const self = @as(AllocPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
+                return @call(.always_inline, allocFn, .{
+                    self,
+                    len,
+                });
             }
 
             fn swapInImpl(alloc_ptr: *anyopaque, ptr: Ptr) SwapInError![]u8 {
-                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.always_inline, swapInFn, .{ self, ptr,  });
+                const self = @as(AllocPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
+                return @call(.always_inline, swapInFn, .{
+                    self,
+                    ptr,
+                });
             }
 
             fn swapOutImpl(alloc_ptr: *anyopaque, ptr: Ptr) void {
-                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.always_inline, swapOutFn, .{ self, ptr, });
+                const self = @as(AllocPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
+                return @call(.always_inline, swapOutFn, .{
+                    self,
+                    ptr,
+                });
             }
 
             fn freeImpl(alloc_ptr: *anyopaque, ptr: Ptr) void {
-                const self = @ptrCast(AllocPtr, @alignCast(alignment, alloc_ptr));
-                return @call(.always_inline, freeFn, .{ self, ptr, });
+                const self = @as(AllocPtr, @ptrCast(@as(*align(alignment) anyopaque, @alignCast(alloc_ptr))));
+                return @call(.always_inline, freeFn, .{
+                    self,
+                    ptr,
+                });
             }
 
             const vtable = VTable{
@@ -1221,7 +1204,6 @@ pub const SwapAllocator = struct {
     }
 };
 
-
 pub const PagingSwapAllocatorConfig = struct {
     page_size: usize = std.mem.page_size,
 };
@@ -1233,41 +1215,29 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
         const Self = @This();
 
         const bucket_count = std.math.log2(config.page_size);
-        const BuckIndex = std.meta.Int(
-            .unsigned, 
-            std.math.log2(std.math.ceilPowerOfTwoAssert(u16, bucket_count + 1))
-        );
-        const SlotIndex = std.meta.Int(
-            .unsigned, 
-            @bitSizeOf(SwapAllocator.Ptr) - @bitSizeOf(BuckIndex)
-        );
+        const BuckIndex = std.meta.Int(.unsigned, std.math.log2(std.math.ceilPowerOfTwoAssert(u16, bucket_count + 1)));
+        const SlotIndex = std.meta.Int(.unsigned, @bitSizeOf(SwapAllocator.Ptr) - @bitSizeOf(BuckIndex));
         /// TODO: hate the name
         pub const CustomPtr = packed struct {
             buck: BuckIndex,
             slot: SlotIndex,
 
             fn toGpPtr(self: CustomPtr) SwapAllocator.Ptr {
-                return @bitCast(SwapAllocator.Ptr, self);
+                return @as(SwapAllocator.Ptr, @bitCast(self));
             }
             fn fromGpPtr(ptr: SwapAllocator.Ptr) CustomPtr {
-                return @bitCast(CustomPtr, ptr);
+                return @as(CustomPtr, @bitCast(ptr));
             }
         };
 
         comptime {
             // TODO: THiS gets fucked if usize bytes are above 255
             if (@sizeOf(CustomPtr) != @sizeOf(SwapAllocator.Ptr)) {
-                @compileError(std.fmt.comptimePrint(
-                   @typeName(CustomPtr) ++ " size {} != " ++ @typeName(SwapAllocator.Ptr) ++ " {}",
-                    .{ @sizeOf(CustomPtr), @sizeOf(SwapAllocator.Ptr) }
-                ));
+                @compileError(std.fmt.comptimePrint(@typeName(CustomPtr) ++ " size {} != " ++ @typeName(SwapAllocator.Ptr) ++ " {}", .{ @sizeOf(CustomPtr), @sizeOf(SwapAllocator.Ptr) }));
             }
             // we need this for the puprpose of working with BlockIds
             if (@sizeOf(SlotIndex) < @sizeOf(u32))
-                @compileError(std.fmt.comptimePrint(
-                   @typeName(SlotIndex) ++ " size {} < " ++ @typeName(u32) ++ " {}",
-                    .{ @sizeOf(SlotIndex), @sizeOf(u32) }
-                ));
+                @compileError(std.fmt.comptimePrint(@typeName(SlotIndex) ++ " size {} < " ++ @typeName(u32) ++ " {}", .{ @sizeOf(SlotIndex), @sizeOf(u32) }));
         }
 
         const Bucket = struct {
@@ -1310,11 +1280,9 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
                 for (self.pages.items) |no| {
                     // since this bucket is exclusively using the page
                     // this should be safe from double swap out
-                    if (sa6r.pager.isSwappedIn(no))
-                    {
+                    if (sa6r.pager.isSwappedIn(no)) {
                         sa6r.pager.swapAndFree(no);
-                    }
-                    else sa6r.pager.free(no);
+                    } else sa6r.pager.free(no);
                 }
                 self.pages.deinit(sa6r.ha7r);
                 self.free_list.deinit();
@@ -1342,12 +1310,12 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
                         }
                     }
                     try self.allocs.ensureUnusedCapacity(sa6r.ha7r, 1);
-                    try self.allocs.append(sa6r.ha7r, Allocation {
+                    try self.allocs.append(sa6r.ha7r, Allocation{
                         // .gen = 0,
                         .free = false,
                         .len = alloc_len,
                     });
-                    return @intCast(SlotIndex, self.allocs.items.len - 1);
+                    return @as(SlotIndex, @intCast(self.allocs.items.len - 1));
                 }
             }
 
@@ -1360,7 +1328,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
                 // const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
                 const size = @divExact(config.page_size, self.per_page);
                 const page_slot = slot - (page_idx * self.per_page);
-                return page_slice[page_slot * size..(page_slot * size) + meta.len];
+                return page_slice[page_slot * size .. (page_slot * size) + meta.len];
             }
 
             pub fn swapOut(self: *Bucket, slot: SlotIndex, pager: *Pager) void {
@@ -1378,10 +1346,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
             }
         };
 
-        const LargeAllocation = struct {
-            block: BlockId,
-            requested_size: usize
-        };
+        const LargeAllocation = struct { block: BlockId, requested_size: usize };
 
         ha7r: Allocator,
         pager: Pager,
@@ -1397,7 +1362,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.buckets) |*opt| {
+            for (&self.buckets) |*opt| {
                 if (opt.*) |*buck| {
                     buck.deinit(self);
                 }
@@ -1415,7 +1380,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
             if (self.buckets[buck_idx] == null) {
                 const slot_size = @as(usize, 1) << buck_idx;
                 self.buckets[buck_idx] = Bucket.init(
-                    self.ha7r, 
+                    self.ha7r,
                     @divExact(config.page_size, slot_size),
                 );
             }
@@ -1426,18 +1391,18 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
 
         fn largeAlloc(self: *Self, len: usize) SwapAllocator.AllocError!SwapAllocator.Ptr {
             const page_count = std.math.divCeil(usize, len, config.page_size) catch @panic("overflow");
-            const block_id = try self.pager.allocBlock(@intCast(u32, page_count));
+            const block_id = try self.pager.allocBlock(@as(u32, @intCast(page_count)));
             const slot = @as(SlotIndex, block_id.idx);
             try self.large_allocs.put(
                 self.ha7r,
-                slot, 
-                LargeAllocation {
+                slot,
+                LargeAllocation{
                     .block = block_id,
                     .requested_size = len,
                 },
             );
             // println(
-            //     "allocated large alloc for len {} using {} pages to block id {}", 
+            //     "allocated large alloc for len {} using {} pages to block id {}",
             //     .{ len, page_count, block_id}
             // );
             return (CustomPtr{ .buck = bucket_count, .slot = slot }).toGpPtr();
@@ -1447,12 +1412,12 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
             const buck_idx = std.math.log2(std.math.ceilPowerOfTwoAssert(usize, len));
             if (buck_idx >= bucket_count) {
                 // printn(
-                //     "we got a big one boys. page_size = {}, len = {}, buck_idx = {}, buck_count = {}, idx type = {any}", 
+                //     "we got a big one boys. page_size = {}, len = {}, buck_idx = {}, buck_count = {}, idx type = {any}",
                 //     .{ config.page_size, len, buck_idx, bucket_count, @typeInfo(BuckIndex) }
                 // );
                 return try self.largeAlloc(len);
             } else {
-                const buck_idx_fit = @intCast(BuckIndex, buck_idx);
+                const buck_idx_fit = @as(BuckIndex, @intCast(buck_idx));
                 return try self.buckAlloc(buck_idx_fit, len);
             }
         }
@@ -1462,13 +1427,11 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
             const buck_idx = ptr.buck;
             if (buck_idx == bucket_count) {
                 if (self.large_allocs.fetchRemove(ptr.slot)) |large| {
-                    self.pager.freeBlock(
-                        large.value.block
-                    );
+                    self.pager.freeBlock(large.value.block);
                 } else {
                     @panic("double free: Ptr points to an unrecognized large allocation");
                 }
-            } else if (self.buckets[buck_idx]) |*buck|{
+            } else if (self.buckets[buck_idx]) |*buck| {
                 buck.free(ptr.slot);
             } else {
                 @panic("Ptr points to empty bucket");
@@ -1485,7 +1448,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
                 } else {
                     @panic("Ptr points to an unrecognized large allocation");
                 }
-            } else if (self.buckets[buck_idx]) |*buck|{
+            } else if (self.buckets[buck_idx]) |*buck| {
                 return try buck.swapIn(ptr.slot, &self.pager);
             } else {
                 @panic("Ptr points to empty bucket");
@@ -1501,7 +1464,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
                 } else {
                     @panic("Ptr points to an unrecognized large allocation");
                 }
-            } else if (self.buckets[buck_idx]) |*buck|{
+            } else if (self.buckets[buck_idx]) |*buck| {
                 buck.swapOut(ptr.slot, &self.pager);
             } else {
                 @panic("Ptr points to empty bucket");
@@ -1520,7 +1483,7 @@ test "PagingSwapAllocator.usage" {
 
     var lru = try LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
     defer lru.deinit();
-    
+
     var ma7r = PagingSwapAllocator(.{}).init(ha7r, lru.pager());
     defer ma7r.deinit();
 
@@ -1529,27 +1492,21 @@ test "PagingSwapAllocator.usage" {
     // std.debug.print("Size MPA: {}\n", .{@sizeOf(PagingSwapAllocator(.{ .page_size = 4 * 1024 }))});
     // std.debug.print("Size GPA: {}\n", .{@sizeOf(std.heap.GeneralPurposeAllocator(.{}))});
 
-    const table = [_][]const u8{
-        "i wondered all night"[0..],
-        "i wondered all night"[0..],
-        "i wondered all night all about you"[0..],
-        "i've been here for years just wondering around about the neighborhood"[0..],
-        ([_]u8{42} ** (10 * page_size))[0..]
-    };
+    const table = [_][]const u8{ "i wondered all night"[0..], "i wondered all night"[0..], "i wondered all night all about you"[0..], "i've been here for years just wondering around about the neighborhood"[0..], ([_]u8{42} ** (10 * page_size))[0..] };
     var ptrs: [table.len]SwapAllocator.Ptr = undefined;
 
-    for (&table) |case, ii| {
+    for (&table, 0..) |case, ii| {
         ptrs[ii] = try sa7r.alloc(case.len);
         var string = try sa7r.swapIn(ptrs[ii]);
         defer sa7r.swapOut(ptrs[ii]);
-        std.mem.copy(u8, string, case);
+        @memcpy(string, case);
     }
-    defer for (ptrs) |ptr|{
+    defer for (ptrs) |ptr| {
         sa7r.free(ptr);
     };
 
     // std.debug.print("Allocer\n{any}\n", .{ sa7r.buckets });
-    for (&ptrs) |ptr, ii| {
+    for (&ptrs, 0..) |ptr, ii| {
         const string = try sa7r.swapIn(ptr);
         defer sa7r.swapOut(ptr);
         // println("{s} != {s}", .{ table[ii], string });
@@ -1562,7 +1519,7 @@ test "PagingSwapAllocator.usage" {
         ptrs[1] = try sa7r.alloc(replacement.len);
         var string = try sa7r.swapIn(ptrs[1]);
         defer sa7r.swapOut(ptrs[1]);
-        std.mem.copy(u8, string, replacement);
+        @memcpy(string, replacement);
     }
     {
         const string = try sa7r.swapIn(ptrs[1]);
@@ -1573,7 +1530,7 @@ test "PagingSwapAllocator.usage" {
 
 /// A general prurpos array list making use of pages from a `Pager`
 /// but falling back to a `SwapAllocator` if size is still under a page.
-/// This allows multiple lists sharing the same `SwapAllocator` to share a 
+/// This allows multiple lists sharing the same `SwapAllocator` to share a
 /// page.
 pub fn SwapList(comptime T: type) type {
     return struct {
@@ -1605,17 +1562,12 @@ pub fn SwapList(comptime T: type) type {
         pages: std.ArrayListUnmanaged(PageNo) = .{},
 
         pub fn init(page_size: usize) Self {
-            return Self {
+            return Self{
                 .per_page = page_size / @sizeOf(T),
             };
         }
 
-        pub fn deinit(
-            self: *Self, 
-            ha7r: Allocator, 
-            sa7r: SwapAllocator, 
-            pager: Pager
-        ) void {
+        pub fn deinit(self: *Self, ha7r: Allocator, sa7r: SwapAllocator, pager: Pager) void {
             for (self.pages.items) |no| {
                 pager.free(no);
             }
@@ -1634,27 +1586,16 @@ pub fn SwapList(comptime T: type) type {
             }
         }
 
-        pub fn ensureUnusedCapacity(
-            self: *Self, 
-            ha7r: Allocator, 
-            sa7r: SwapAllocator, 
-            pager: Pager, 
-            n_items: usize
-        ) !void {
+        pub fn ensureUnusedCapacity(self: *Self, ha7r: Allocator, sa7r: SwapAllocator, pager: Pager, n_items: usize) !void {
             const cap = self.capacity();
             const desired_cap = self.len + n_items;
             if (cap >= desired_cap) {
                 return;
             }
-            const new_cap = if (cap == 0) 
-                    std.math.ceilPowerOfTwoAssert(usize, n_items)
-                else 
-                (
-                    cap * (
-                        std.math.divCeil(usize, desired_cap, cap) 
-                        catch @panic("overflow")
-                    )
-                );
+            const new_cap = if (cap == 0)
+                std.math.ceilPowerOfTwoAssert(usize, n_items)
+            else
+                (cap * (std.math.divCeil(usize, desired_cap, cap) catch @panic("overflow")));
             if (new_cap < self.per_page) {
                 const ptr = try sa7r.alloc(new_cap * @sizeOf(T));
                 errdefer sa7r.free(ptr);
@@ -1666,17 +1607,15 @@ pub fn SwapList(comptime T: type) type {
                     }
                     var new = try sa7r.swapIn(ptr);
                     defer sa7r.swapOut(ptr);
-                    std.mem.copy(u8, new[0..old.len], old);
-                } 
-                self.small_list = SmallList {
+                    @memcpy(new[0..old.len], old);
+                }
+                self.small_list = SmallList{
                     .ptr = ptr,
                     .len = new_cap,
                 };
             } else {
-                var new_pages_req = 
-                    (
-                        std.math.divCeil(usize, new_cap, self.per_page) catch @panic("overflow")
-                    ) - self.pages.items.len;
+                var new_pages_req =
+                    (std.math.divCeil(usize, new_cap, self.per_page) catch @panic("overflow")) - self.pages.items.len;
                 // println(
                 //     "expanding cap to {}, from {} with new pages {}, desired = {}",
                 //     .{ new_cap, cap, new_pages_req, desired_cap }
@@ -1691,7 +1630,7 @@ pub fn SwapList(comptime T: type) type {
                     // println("allocated page {} for " ++ @typeName(T) ++ " list", .{ no });
                     try self.pages.append(ha7r, no);
                 }
-                // NOTE: we won't necessarily double the first time we ditch the 
+                // NOTE: we won't necessarily double the first time we ditch the
                 // small_list since the old capacity might not be page flush
                 if (self.small_list) |small| {
                     const old = try sa7r.swapIn(small.ptr);
@@ -1701,33 +1640,23 @@ pub fn SwapList(comptime T: type) type {
                     }
                     var new = try pager.swapIn(self.pages.items[0]);
                     defer pager.swapOut(self.pages.items[0]);
-                    std.mem.copy(u8, new[0..old.len], old);
+                    @memcpy(new[0..old.len], old);
                     self.small_list = null;
                 }
                 std.debug.assert(self.pages.items.len * self.per_page > desired_cap);
             }
         }
 
-        pub fn swapIn(
-            self: *const Self, 
-            sa7r: SwapAllocator, 
-            pager: Pager, 
-            idx: usize
-        ) !*T {
+        pub fn swapIn(self: *const Self, sa7r: SwapAllocator, pager: Pager, idx: usize) !*T {
             if (idx >= self.len) @panic("out of bounds bich");
             return try self.swapInUnchecked(sa7r, pager, idx);
         }
 
         /// Does no bound checking. Use to access slots with-in capacity
         /// but not necessarily length. Use `swapIn` for safer alternative.
-        fn swapInUnchecked(
-            self: *const Self, 
-            sa7r: SwapAllocator, 
-            pager: Pager, 
-            idx: usize
-        ) !*T {
+        fn swapInUnchecked(self: *const Self, sa7r: SwapAllocator, pager: Pager, idx: usize) !*T {
             if (self.small_list) |*small| {
-                const bytes = @alignCast(@alignOf(T), try sa7r.swapIn(small.ptr));
+                const bytes: []align(@alignOf(T)) u8 = @alignCast(try sa7r.swapIn(small.ptr));
                 const page_slice = std.mem.bytesAsSlice(T, bytes[0..((bytes.len / @sizeOf(T)) * @sizeOf(T))]);
                 return &page_slice[idx];
             } else {
@@ -1738,22 +1667,12 @@ pub fn SwapList(comptime T: type) type {
             }
         }
 
-        pub fn swapOut(
-            self: *const Self,
-            sa7r: SwapAllocator, 
-            pager: Pager, 
-            idx: usize
-        ) void {
+        pub fn swapOut(self: *const Self, sa7r: SwapAllocator, pager: Pager, idx: usize) void {
             if (idx >= self.len) @panic("out of bounds");
             self.swapOutUnchecked(sa7r, pager, idx);
         }
 
-        fn swapOutUnchecked(
-            self: *const Self, 
-            sa7r: SwapAllocator, 
-            pager: Pager, 
-            idx: usize
-        ) void {
+        fn swapOutUnchecked(self: *const Self, sa7r: SwapAllocator, pager: Pager, idx: usize) void {
             if (self.small_list) |small| {
                 sa7r.swapOut(small.ptr);
             } else {
@@ -1762,13 +1681,7 @@ pub fn SwapList(comptime T: type) type {
             }
         }
 
-        pub fn set(
-            self: *const Self, 
-            sa7r: SwapAllocator, 
-            pager: Pager, 
-            idx: usize, 
-            item: T
-        ) !void {
+        pub fn set(self: *const Self, sa7r: SwapAllocator, pager: Pager, idx: usize, item: T) !void {
             if (idx >= self.len) @panic("out of bounds bich");
             var ptr = try self.swapIn(sa7r, pager, idx);
             defer self.swapOut(sa7r, pager, idx);
@@ -1805,13 +1718,7 @@ pub fn SwapList(comptime T: type) type {
             list: *const Self,
             in_idx: ?usize = null,
 
-            pub fn new(
-                list: *const Self, 
-                from: usize, 
-                to: usize, 
-                sa7r: SwapAllocator,
-                pager: Pager
-            ) Iterator {
+            pub fn new(list: *const Self, from: usize, to: usize, sa7r: SwapAllocator, pager: Pager) Iterator {
                 return Iterator{
                     .cur = from,
                     .stop = to,
@@ -1831,7 +1738,6 @@ pub fn SwapList(comptime T: type) type {
                     self.in_idx = null;
                 }
             }
-
 
             pub fn next(self: *Iterator) !?*T {
                 if (self.cur == self.stop) {
@@ -1878,7 +1784,7 @@ test "SwapList.usage" {
     const item_per_page = page_size / @sizeOf(usize);
     const page_count = 10;
     var nums = [_]usize{0} ** (page_count * item_per_page);
-    for (nums) |*num, ii| {
+    for (&nums, 0..) |*num, ii| {
         num.* = ii;
         try list.append(ha7r, sa7r, pager, ii);
     }
@@ -1899,8 +1805,8 @@ test "SwapList.usage" {
 // }
 //
 // /// A SwapList that doesn't make use of the heap.
-// /// Stores the list metadata using a `SwapListSimple` until it overflows a page, 
-// /// then uses an instance of itself to store the list metadata. 
+// /// Stores the list metadata using a `SwapListSimple` until it overflows a page,
+// /// then uses an instance of itself to store the list metadata.
 // /// This'll add one extra page `swapIn` operation per metadata storage mesa-levels
 // /// used but an LRU cached pager should help here.
 // pub fn SwapListUltraPetite(comptime T: type) type {
@@ -1923,10 +1829,10 @@ test "SwapList.usage" {
 //
 //         pub const Config = struct {
 //             page_size: usize = std.mem.page_size,
-//             /// the page count at which we'd be manually managing pages 
+//             /// the page count at which we'd be manually managing pages
 //             /// instead of using the `SwapAllocator`
 //             page_out_threshold: usize = blk: {
-//                 // do fancy pants heurstic, we don't want to wait until we have 
+//                 // do fancy pants heurstic, we don't want to wait until we have
 //                 // enough items for say 20 pages until we...page out
 //                 break :blk fields.len;
 //             },

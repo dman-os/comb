@@ -13,8 +13,8 @@ run:
     zig build run
 
 alias t := test
-test:
-    zig build test
+test *ARGS:
+    zig build test {{ARGS}} --summary all
 
 test-f +FILTER:
     zig test src/main.zig -freference-trace --test-filter {{FILTER}}
