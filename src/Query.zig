@@ -65,6 +65,19 @@ pub const Filter = struct {
             pub fn deinit(self: *@This(), ha7r: Allocator) void {
                 ha7r.free(self.string);
             }
+
+            pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                const T = @This();
+                if (fmt.len != 0) std.fmt.invalidFmtErr(fmt, value);
+                try writer.writeAll(@typeName(T));
+                try writer.writeAll("{ ");
+                try writer.writeAll(".string = \"");
+                try std.fmt.formatType(value.string, "s", options, writer, std.fmt.default_max_depth);
+                try writer.writeAll("\", ");
+                try writer.writeAll(".exact = ");
+                try std.fmt.formatType(value.exact, "any", options, writer, std.fmt.default_max_depth);
+                try writer.writeAll(" }");
+            }
         },
         childOf: *Clause,
         descendantOf: *Clause,

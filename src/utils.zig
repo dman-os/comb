@@ -156,7 +156,9 @@ pub fn pathJoin(paths: []const []const u8) []const u8 {
 }
 
 pub fn isElevated() bool {
+    // std.testing.expectEqual(std.os.linux.geteuid(), 0) catch @panic("not elevated");
     return std.os.linux.geteuid() == 0;
+    // return true;
 }
 
 // fn Trait(

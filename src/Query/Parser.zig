@@ -1,3 +1,5 @@
+// TODO: rename Param to Query?
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -18,144 +20,148 @@ const Token = union(enum) {
     andOp,
     orOp,
     notOp,
-    // backSlash,
-    doubleQuote,
+    quotedValue: []const u8,
     param: []const u8,
     value: []const u8,
 };
 
+// panics if passed the double quote or the colon
+fn byteToToken(byte: u8) ?Token {
+    std.debug.assert(byte != '"' and byte != param_val_delimiter);
+    return switch (byte) {
+        '(' => Token.lparen,
+        ')' => Token.rparen,
+        '^' => Token.notOp,
+        '&' => Token.andOp,
+        '|' => Token.orOp,
+        else => null,
+    };
+}
+
+// this panics if the segment is empty
+fn segmentToToken(segment: []const u8) Token {
+    std.debug.assert(segment.len > 0);
+    if (std.mem.eql(u8, segment, "and") or
+        std.mem.eql(u8, segment, "AND"))
+    {
+        return Token.andOp;
+    } else if (std.mem.eql(u8, segment, "or") or
+        std.mem.eql(u8, segment, "OR"))
+    {
+        return Token.orOp;
+    } else if (std.mem.eql(u8, segment, "not") or
+        std.mem.eql(u8, segment, "NOT"))
+    {
+        return Token.notOp;
+    } else {
+        return Token{ .value = segment };
+    }
+}
+
 fn tokenize(raw: []const u8, appender: mod_utils.Appender(Token)) !void {
-    var it1 = std.mem.tokenize(u8, raw, " ");
-    while (it1.next()) |token_init| {
-        var token = token_init;
-        if (std.mem.eql(u8, token, "(")) {
-            try appender.append(Token.lparen);
-        } else if (std.mem.eql(u8, token, ")")) {
-            try appender.append(Token.rparen);
-        } else if (std.mem.eql(u8, token, "&") or
-            std.mem.eql(u8, token, "and") or
-            std.mem.eql(u8, token, "AND"))
-        {
-            try appender.append(Token.andOp);
-        } else if (std.mem.eql(u8, token, "|") or
-            std.mem.eql(u8, token, "or") or
-            std.mem.eql(u8, token, "OR"))
-        {
-            try appender.append(Token.orOp);
-        } else if (std.mem.eql(u8, token, "not") or
-            std.mem.eql(u8, token, "NOT"))
-        {
-            try appender.append(Token.notOp);
+    std.debug.assert(raw.len > 0);
+    // var it1 = std.mem.tokenizeSequence(u8, raw, " ");
+    var seg_start: usize = 0;
+    var idx: usize = 0;
+    while (true) {
+        const byte = raw[idx];
+        // NOTE: this won't include current byte in segment
+        const segment = raw[seg_start..idx];
+        if (segment.len == 0) {
+            switch (byte) {
+                ' ', '\t', '\n', '\r', std.ascii.control_code.vt, std.ascii.control_code.ff, param_val_delimiter => {
+                    // NOTE: reset segment length to start after the current byte
+                    seg_start = idx + 1;
+                },
+                '"' => {
+                    const quote_start = idx;
+                    while (true) {
+                        // enter the quoted section
+                        idx += 1;
+                        const closing_byte = raw[idx];
+                        switch (closing_byte) {
+                            // handle quote close
+                            '"' => {
+                                const value = raw[quote_start + 1 .. idx]; // note: don't include the opening, closing quotes
+                                try appender.append(Token{ .quotedValue = value });
+                                break;
+                            },
+                            // handle escapes
+                            '\\' => {
+                                idx += 1;
+                            },
+                            else => {},
+                        }
+                    }
+                    // NOTE: reset segment length to start after the quote closer
+                    seg_start = idx + 1;
+                },
+                else => if (byteToToken(byte)) |token| {
+                    try appender.append(token);
+                    // NOTE: we only start a new segment if the current byte was a valid
+                    // token
+                    seg_start = idx + 1;
+                },
+            }
         } else {
-            // TODO: consider supporting escape slashes
-            // // handle back slash
-            // // eg. \\\\\(dan | joe)
-            // //     ^
-            // while (true) {
-            //     if (token[0] == '\\') {
-            //         try appender.append(Token.backSlash);
-            //         token = token[1..];
-            //     } else {
-            //         break;
-            //     }
-            // }
-
-            // handle lparen without whitespace
-            // eg. (dan | joe)
-            //     ^
-            if (token[0] == '(') {
-                try appender.append(Token.lparen);
-                token = token[1..];
+            // if the previous byte's a backslash
+            if (raw[idx - 1] == '\\') {
+                // we're escaping the current byte, let the segment keep growing
+            } else {
+                switch (byte) {
+                    // handle params
+                    // e.g.  limit:15
+                    //       |----^
+                    // NOTE: checking for params first allows using keywords like and
+                    // as param names
+                    param_val_delimiter => {
+                        const segment_pre = raw[seg_start..idx];
+                        std.debug.assert(segment_pre.len > 0);
+                        try appender.append(Token{ .param = segment_pre });
+                        seg_start = idx + 1;
+                    },
+                    // handle all operators that can appear after segments
+                    // e.g.   `hey|hello`, `hey hello`, `hey&hello`, `^(hey)`,
+                    //         |--^         |--^         |--^           |--^
+                    //        `(hey(hello))`, `hey^(hello)`, 'hey"hello"'
+                    //          |--^           |--^           |--^
+                    '|',
+                    ' ',
+                    '\t',
+                    '\n',
+                    '\r',
+                    std.ascii.control_code.vt,
+                    std.ascii.control_code.ff,
+                    '&',
+                    ')',
+                    '(',
+                    '^',
+                    '"',
+                    => {
+                        // get the segment before the operator
+                        const segment_pre = raw[seg_start..idx];
+                        try appender.append(segmentToToken(segment_pre));
+                        // NOTE: we want the next segment to include the current byte
+                        // so that the first if block above catches it
+                        seg_start = idx;
+                    },
+                    else => {
+                        // nothing interesting, keep growing segment
+                    },
+                }
             }
-            // handle not without whitespace seprating it
-            // eg. ^joking
-            //     ^
-            if (token[0] == '^') {
-                try appender.append(Token.notOp);
-                token = token[1..];
+        }
+        idx += 1;
+        if (idx == raw.len) {
+            if (seg_start < raw.len) {
+                const last_segment = raw[seg_start..];
+                try appender.append(segmentToToken(last_segment));
             }
-            // handle rparen without whitespace
-            // eg. (dan | joe)
-            //               ^
-            var add_r_paren = token[token.len - 1] == ')';
-            if (add_r_paren) {
-                token = token[1..(token.len - 1)];
-            }
-
-            // handle starting double quotes
-            // eg. "PDA bracelet"
-            //     ^
-            if (token[0] == '"') {
-                try appender.append(Token.doubleQuote);
-                token = token[1..];
-            }
-            // handle closing double quotes
-            // eg. "PDA bracelet"
-            //                  ^
-            var add_closing_quotes = token[token.len - 1] == '"';
-            if (add_closing_quotes) {
-                token = token[1..(token.len - 1)];
-            }
-
-            // handle param pairs
-            // eg. limit:125
-            //         ^
-            var it2 = std.mem.split(u8, token, ([_]u8{param_val_delimiter})[0..]);
-            var val = it2.next().?;
-            var rest = it2.rest();
-            if (rest.len != 0) {
-                // `val` must be the param with `rest` containing the actual value.
-                try appender.append(Token{ .param = val });
-                val = rest;
-            }
-            // handle starting double quotes
-            // eg. "PDA bracelet"
-            //     ^
-            if (val[0] == '"') {
-                try appender.append(Token.doubleQuote);
-                val = val[1..];
-            }
-            // handle closing double quotes
-            // eg. "PDA bracelet"
-            //                  ^
-            var add_closing_quotes_2 = val[val.len - 1] == '"';
-            if (add_closing_quotes_2) {
-                val = val[1..(val.len - 1)];
-            }
-
-            try appender.append(Token{ .value = val });
-
-            if (add_closing_quotes_2) {
-                try appender.append(Token.doubleQuote);
-            }
-            // // handle double quote exact match support
-            // // eg. "you're a contra"
-            // if (val[0] == '"') {
-            //     // if the quoted section continues across whitespace
-            //     if (val[val.len - 1] != '"') {
-            //         // rparen from earlier doesn't count
-            //         // eg. "(hallo) computer"
-            //         //            ^
-            //         add_r_paren = false;
-            //     } else {
-            //         try appender.append(Token{ .value = val });
-            //     }
-            //     while (true) {
-            //         // there's no whitespace in the val
-            //         if (val[val.len - 1] == '"') {
-            //             break;
-            //         }
-            //     }
-            // }
-            if (add_closing_quotes) {
-                try appender.append(Token.doubleQuote);
-            }
-            if (add_r_paren) {
-                try appender.append(Token.rparen);
-            }
+            break;
         }
     }
 }
+
 const Param = union(enum) {
     limit: u64,
     offset: u64,
@@ -256,7 +262,7 @@ pub fn parse(self: *Self, ha7r: Allocator, raw: []const u8) Error!Query {
 
 fn expect_param(self: *Self, ha7r: Allocator) !Param {
     return switch (self.cur() orelse return error.UnexpectedToken) {
-        Token.lparen, Token.notOp, Token.doubleQuote, Token.value => Param{ .tlc = try self.expect_clause(ha7r) },
+        Token.lparen, Token.notOp, Token.quotedValue, Token.value => Param{ .tlc = try self.expect_clause(ha7r) },
         Token.param => |name| if (std.mem.eql(u8, name, "limit")) blk: {
             self.advance();
             break :blk Param{ .limit = try self.expect_int() };
@@ -279,7 +285,7 @@ fn expect_clause(self: *Self, ha7r: Allocator) Error!Filter.Clause {
             try cb.addSubClause(try self.expect_clause(ha7r));
             break :blk try cb.build();
         },
-        Token.value => blk: {
+        Token.value, Token.quotedValue => blk: {
             if (self.peekNext()) |next| {
                 if (next == Token.andOp or
                     next == Token.orOp)
@@ -287,9 +293,6 @@ fn expect_clause(self: *Self, ha7r: Allocator) Error!Filter.Clause {
                     break :blk try self.expect_binary_op_clause(ha7r);
                 }
             }
-            break :blk try self.expect_name_match(ha7r);
-        },
-        Token.doubleQuote => blk: {
             break :blk try self.expect_name_match(ha7r);
         },
         Token.lparen => blk: {
@@ -371,9 +374,31 @@ fn expect_name_match(self: *Self, ha7r: Allocator) !Filter.Clause {
                 break :blk try cb.build();
             }
         },
-        Token.doubleQuote => { // blk: {
-            // TODO
-            @panic("todo");
+        Token.quotedValue => |value| blk: {
+            var path_it = std.mem.tokenize(u8, value, std.fs.path.sep_str);
+            var str = path_it.next() orelse unreachable;
+            if (path_it.peek() != null) {
+                var clause = blk2: {
+                    var cb = Query.Filter.Clause.Builder.init(ha7r);
+                    defer cb.deinit();
+                    try cb.addNameMatch(str, true);
+                    break :blk2 try cb.build();
+                };
+                while (path_it.next()) |name| {
+                    var cb = Query.Filter.Clause.Builder.init(ha7r);
+                    defer cb.deinit();
+                    cb.setOperator(.@"and");
+                    try cb.addChildOf(clause);
+                    try cb.addNameMatch(name, path_it.peek() != null);
+                    clause = try cb.build();
+                }
+                break :blk clause;
+            } else {
+                var cb = Query.Filter.Clause.Builder.init(ha7r);
+                defer cb.deinit();
+                try cb.addNameMatch(str, false);
+                break :blk try cb.build();
+            }
         },
         else => error.UnexpectedToken,
     };

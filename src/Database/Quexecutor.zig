@@ -118,7 +118,7 @@ const Plan = struct {
                     };
                 },
                 .not => |subclause| blk: {
-                    println("ERROR: we are her for some reason: {}", .{clause});
+                    println("ERROR: we are here for some reason: {}", .{clause});
                     try self.nodes.append(ha7r, try self.buildQueryDAG(ha7r, subclause));
                     break :blk Node{
                         .load = Node.Payload{
@@ -142,7 +142,8 @@ const Plan = struct {
                             });
                         }
                     };
-                    try mod_gram.grammer(gram_len, nameMatch.string, nameMatch.exact, &.{}, mod_utils.Appender(GramPos).new(&appenderImpl{ .a7r = ha7r, .list = &self.nodes }, appenderImpl.append));
+                    // NOTE: should we use delimiters here?
+                    try mod_gram.grammer(gram_len, nameMatch.string, nameMatch.exact, std.ascii.whitespace[0..], mod_utils.Appender(GramPos).new(&appenderImpl{ .a7r = ha7r, .list = &self.nodes }, appenderImpl.append));
                     break :blk Node{
                         .load = Node.Payload{
                             .ixion = NodeSlice{ .start = start_idx, .len = self.nodes.items.len - start_idx },
@@ -274,7 +275,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]I
             @panic("fuck");
         },
         .gramMatch => |gram| blk: {
-            // println("gramMatch: {any}", .{ gram });
+            // println("gramMatch: {s}", .{ gram });
             var out = std.ArrayList(Id).init(ha7r);
             defer out.deinit();
             try self.db.plist.gramItems(gram, self.db.sa7r, self.db.pager, mod_utils.Appender(Id).forList(&out));

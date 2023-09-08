@@ -25,6 +25,7 @@ pub const mod_index = @import("index.zig");
 
 pub const std_options = struct {
     pub const log_level = std.log.Level.info;
+    pub const fmt_max_depth = 10;
 };
 
 pub const mod_fanotify = @import("fanotify.zig");
@@ -160,8 +161,8 @@ test {
         // _ = @import("benches.zig");
         fan: @import("fanotify.zig"),
         gram: @import("gram.zig"),
-        index:  @import("index.zig"),
-        mmap:  @import("mmap.zig"),
+        index: @import("index.zig"),
+        mmap: @import("mmap.zig"),
         plist: @import("plist.zig"),
         tw: @import("treewalking.zig"),
         utils: @import("utils.zig"),

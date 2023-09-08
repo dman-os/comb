@@ -738,8 +738,7 @@ const DbTest = struct {
             std.sort.pdq(Id, expected_id_list, {}, lt.lt);
             std.sort.pdq(Id, results, {}, lt.lt);
             std.testing.expectEqualSlices(Id, expected_id_list, results) catch |err| {
-                println("unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}", .{ results, expected_id_list, case.query, parsed_query });
-                println("{any}", .{declared_map});
+                println("unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}\n\tdeclated_map: {any}", .{ results, expected_id_list, case.query, parsed_query, declared_map });
                 return err;
             };
         }
@@ -789,27 +788,27 @@ test "Db.e2e" {
             },
             .expected = &.{ 1, 3 },
         },
-        // .{
-        //     .name = "supports_double_quotes_to_match_whitespace",
-        //     .query = "\"borgouise bologna\"",
-        //     .entries = &.{
-        //         genRandFile("/rodrigo/borgouise"),
-        //         genRandFile("/rodrigo/borgouise bologna"),
-        //         genRandFile("/rodrigo/bologna"),
-        //         genRandFile("/rodrigo/borgia"),
-        //     },
-        //     .expected = &.{1},
-        // },
-        // .{
-        //     .name = "supports_double_quotes_to_match_whitespace_in_path",
-        //     .query = "\"rodrigo/borgouise bologna/sandwitch\"",
-        //     .entries = &.{
-        //         genRandFile("/borgouise bologna/sandwitch"),
-        //         genRandFile("/rodrigo/borgouise bologna/sandwitch"),
-        //         genRandFile("/antonio/borgouise bologna/sandwitch"),
-        //     },
-        //     .expected = &.{1},
-        // },
+        .{
+            .name = "supports_double_quotes_to_match_whitespace",
+            .query = "\"borgouise bologna\"",
+            .entries = &.{
+                genRandFile("/rodrigo/borgouise"),
+                genRandFile("/rodrigo/borgouise bologna"),
+                genRandFile("/rodrigo/bologna"),
+                genRandFile("/rodrigo/borgia"),
+            },
+            .expected = &.{1},
+        },
+        .{
+            .name = "supports_double_quotes_to_match_whitespace_in_path",
+            .query = "\"rodrigo/borgouise bologna/sandwitch\"",
+            .entries = &.{
+                genRandFile("/borgouise bologna/sandwitch"),
+                genRandFile("/rodrigo/borgouise bologna/sandwitch"),
+                genRandFile("/antonio/borgouise bologna/sandwitch"),
+            },
+            .expected = &.{1},
+        },
     };
     try DbTest.run(table[0..]);
 }
