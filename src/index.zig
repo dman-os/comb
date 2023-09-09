@@ -15,51 +15,14 @@ const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 
-pub const BSTConfig = struct {
-    // link_to_parent: bool = true,
-    extension: fn (type, type) type = noExtension,
-
-    pub fn noExtension(comptime T: type, comptime Tree: type) type {
-        _ = T;
-        _ = Tree;
-        return struct {};
-    }
-    pub fn heapExtension(comptime T: type, comptime Tree: type) type {
-        return struct {
-            pub fn initHeap(ha: Allocator, item: T) !*Tree {
-                var ptr = try ha.create(Tree);
-                ptr.* = Tree{
-                    .item = item,
-                };
-                return ptr;
-            }
-            pub fn deinitHeap(ha: Allocator, self: *Tree) void {
-                defer ha.destroy(self);
-                if (self.left_child) |child| {
-                    deinitHeap(ha, child);
-                }
-                if (self.right_child) |child| {
-                    deinitHeap(ha, child);
-                }
-            }
-        };
-    }
-};
-
 pub fn BST(
     comptime T: type,
     comptime Ctx: type,
     comptime cmp: fn (cx: Ctx, a: T, b: T) std.math.Order,
-    // comptime config: BSTConfig,
-    // comptime init: fn (cx: Ctx, item: T, parent: *anyopaque) *anyopaque,
 ) type {
     return struct {
         const Self = @This();
-        // pub usingnamespace config.extension(T, Self);
 
-        // usingnamespace if (config.link_to_parent) struct {
-        //     parent: ?*const Self = null,
-        // } else struct {};
         parent: ?*const Self = null,
         item: T,
         left_child: ?*Self = null,
@@ -88,6 +51,29 @@ pub fn BST(
             }
         }
 
+        pub fn find(self: *Self, cx: Ctx, val: T) ?*Self {
+            switch (cmp(cx, self.item, val)) {
+                .eq => {
+                    return self;
+                },
+                .lt => {
+                    if (self.left_child) |child| {
+                        return child.find(cx, val);
+                    } else {
+                        return null;
+                    }
+                },
+                .gt => {
+                    // println("node {} is adding {} to left", .{ self.item, in.item });
+                    if (self.right_child) |child| {
+                        return child.find(cx, val);
+                    } else {
+                        return null;
+                    }
+                },
+            }
+        }
+
         pub fn initHeap(ha: Allocator, item: T) !*Self {
             var ptr = try ha.create(Self);
             ptr.* = Self{
@@ -95,6 +81,7 @@ pub fn BST(
             };
             return ptr;
         }
+
         pub fn deinitHeap(ha: Allocator, self: *Self) void {
             defer ha.destroy(self);
             if (self.left_child) |child| {
@@ -130,6 +117,10 @@ test "BST.insert" {
         const child = try MyBst.initHeap(ha, val);
         tree.insert({}, child);
     }
+    try std.testing.expect(tree.find({}, 500) != null);
+    try std.testing.expect(tree.find({}, 0) != null);
+    try std.testing.expect(tree.find({}, 54) != null);
+    try std.testing.expect(tree.find({}, 1223) == null);
 }
 
 // const BTreeConfig = struct {
