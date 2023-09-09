@@ -316,3 +316,20 @@ pub fn Mpmc(comptime T: type) type {
         }
     };
 }
+
+fn assertStructHasFieldOfType(comptime T: type, comptime name: []const u8, comptime FT: type) void {
+    switch (@typeInfo(T)) {
+        .Struct => |info| {
+            for (info.fields) |field| {
+                if (std.mem.eql(field.name, name)) {
+                    if (info.type == FT) {
+                        return;
+                    }
+                    @compileError("field \"" ++ name ++ "\" on struct (" ++ @typeName(T) ++ ") of the wrong type: expecting " ++ @typeName(FT) ++ " but found " ++ @typeName(field.type));
+                }
+            }
+            @compileError("unable to find field \"" ++ name ++ "\" on struct " ++ @typeName(T) ++ " of type " ++ @typeName(FT));
+        },
+        else => @compileError("expecting struct type, found type: " ++ @typeName(T)),
+    }
+}

@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .main_pkg_path = .{ .path = "src/" },
+        .test_runner = "./test_runner.zig",
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);

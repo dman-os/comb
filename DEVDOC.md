@@ -17,12 +17,12 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
     - [ ] B-Tree implementation for field indices
         - [ ] BSTree
     - [x] `std.Thread.Condition` based `Queue`
-      - A single CPU is still saturated when it's flooded with events. Investigate what's making this happen
+      - A single CPU core is still saturated when it's flooded with events. Investigate what's making this happen
         - Crossed fingers it won't be the syscalls (can't be!)
         - My current suspicion is that it's the db query for the parent of the target entry that's spiking the CPU
     - [ ] Parser
       - [ ] fwd slash escaping
-      - [ ] whitespace in double quote
+      - [x] whitespace in double quote
     - [ ] Lru cache resizing: use large cache during initial index and downsize afterwards
 
 - [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
