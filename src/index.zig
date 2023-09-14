@@ -250,6 +250,7 @@ test "BST.insert" {
 //     order: usize = 12,
 // };
 
+// Order will be multiplied by to ensure an even value.
 fn BTree(
     comptime T: type,
     comptime Ctx: type,
@@ -259,218 +260,182 @@ fn BTree(
 ) type {
     return struct {
         const Self = @This();
-        const Node = struct {
+        const Node = union(enum) {
             // multiply by 2 to keep max children even and max keys odd
             const KeyArray = std.BoundedArray(T, (2 * order) - 1);
             const ChildrenArray = std.BoundedArray(*Node, 2 * order);
+            const Leaf =struct {
+                keys: KeyArray,
+            };
+            const Internal = struct {
+                keys: KeyArray,
+                children: ChildrenArray,
 
-            keys: KeyArray,
-            children: ?ChildrenArray = null,
+                fn splitChildIfFull(self: *@This(), ha: Allocator, child_ii: usize) !bool {
+                    switch (self.children.slice()[child_ii].*) {
+                        .leaf => |*node| {
+                            if (node.keys.len == (2 * order) - 1) {
+                                const right = try Node.fromSliceLeaf(ha, node.keys.slice()[order..]);
+                                const mid = node.keys.get(order - 1);
+                                node.keys.resize(order - 1) catch unreachable;
+                                if (child_ii == self.children.len - 1) {
+                                    self.keys.append(mid) catch unreachable;
+                                    self.children.append(right) catch unreachable;
+                                } else {
+                                    self.keys.insert(child_ii, mid) catch unreachable;
+                                    self.children.insert(child_ii, right) catch unreachable;
+                                }
+                                return true;
+                            }
+                            return false;
+                        },
+                        .internal => |*node| {
+                            if (node.keys.len == (2 * order) - 1) {
+                                const right = try Node.fromSliceInternal(ha, node.keys.slice()[order..], node.children.slice()[order..]);
+                                node.children.resize(order) catch unreachable;
+                                const mid = node.keys.get(order - 1);
+                                node.keys.resize(order - 1) catch unreachable;
+                                if (child_ii == self.children.len - 1) {
+                                    self.keys.append(mid) catch unreachable;
+                                    self.children.append(right) catch unreachable;
+                                } else {
+                                    self.keys.insert(child_ii, mid) catch unreachable;
+                                    self.children.insert(child_ii, right) catch unreachable;
+                                }
+                                return true;
+                            }
+                            return false;
+                        },
+                    }
+                    // println(
+                    //     "splitting {*} left.len = {}, left.c.len = {?}, right.len = {}, right.c.len = {?} ",
+                    //     .{
+                    //         self,
+                    //         self.keys.len,
+                    //         if (self.children) |xx| xx.len else null,
+                    //         right.keys.len,
+                    //         if (right.children) |xx| xx.len else null
+                    //     }
+                    // );
+                }
+            };
+
+            leaf: Leaf,
+            internal: Internal,
 
             fn deinit(self: *Node, ha: Allocator) void {
-                if (self.children) |children| {
-                    for (children.slice()) |child| {
-                        child.deinit(ha);
-                    }
+                switch (self.*) {
+                    .internal => |int| {
+                        for (int.children.slice()) |child| {
+                            child.deinit(ha);
+                        }
+                    },
+                    else => {},
                 }
                 ha.destroy(self);
             }
 
-            fn init(ha: Allocator) !*Node {
+            fn initLeaf(ha: Allocator, first: T) !*Node {
                 const self = try ha.create(Node);
                 self.* = Node{
-                    .keys = KeyArray.init(0) catch unreachable,
+                    .leaf = .{
+                        .keys = KeyArray.fromSlice(&[_]T{first}) catch unreachable,
+                    },
                 };
                 return self;
             }
 
-            fn initWithChildren(ha: Allocator, left: *Node, mid: T, right: *Node) !*Node {
+            fn fromSliceLeaf(ha: Allocator, keys: []const T) !*Node {
                 const self = try ha.create(Node);
-                var children = ChildrenArray.init(0) catch unreachable;
-                children.append(left) catch unreachable;
-                children.append(right) catch unreachable;
-                self.* = Node{
-                    .keys = KeyArray.init(0) catch unreachable,
-                    .children = children,
-                };
-                self.keys.append(mid) catch unreachable;
-                return self;
-            }
-
-            fn fromSlice(ha: Allocator, keys: []const T, children: ?[]*Node) !*Node {
-                const self = try ha.create(Node);
-                self.* = Node{
+                self.* = Node{ .leaf = .{
                     .keys = KeyArray.fromSlice(keys) catch unreachable,
-                };
-                if (children) |slice| {
-                    self.children = ChildrenArray.fromSlice(slice) catch unreachable;
-                }
+                } };
                 return self;
             }
 
-            pub fn isLeaf(self: *const Node) bool {
-                return self.children == null;
+            fn fromSliceInternal(ha: Allocator, keys: []const T, children: []*Node) !*Node {
+                const self = try ha.create(Node);
+                self.* = Node{ .internal = .{
+                    .keys = KeyArray.fromSlice(keys) catch unreachable,
+                    .children = ChildrenArray.fromSlice(children) catch unreachable,
+                } };
+                return self;
             }
 
-            pub fn len(self: *const Node) usize {
-                return self.keys.len;
+            fn len(self: *const Node) usize {
+                return switch (self.*) {
+                    .leaf => |node| node.keys.len,
+                    .internal => |node| node.keys.len,
+                };
             }
 
-            pub const InsertOutcome = union(enum) {
-                routine,
-                // replaced: T,
-                split: struct {
-                    new_key: T,
-                    new_child: *Node,
-                },
-            };
-
-            pub fn insert(self: *Node, ha: Allocator, cx: Ctx, item: T) !InsertOutcome {
-                defer {
-                    if (self.children) |xx| {
-                        std.debug.assert(self.keys.len < xx.len);
-                            // println("happened when inserting into {*}, len = {}, c.len = {?}", 
-                            //     .{ 
-                            //         self,
-                            //         self.keys.len, 
-                            //         xx.len, 
-                            //     }
-                            // );
-                    }
-                }
-                if (self.children) |*children| {
-                    // internal node case
-                    const chosen_child = self.insertIndex(cx, item);
-                    // we always add the value to the child
-                    const outcome = try children.get(chosen_child).insert(ha, cx, item);
-                    switch (outcome) {
-                        // the child has split into two
-                        .split => |child_split| {
-                            // we need to add the new separating key
-                            // and the new child
-                            if (self.keys.len == (2 * order) - 1) {
-                                // TODO: we can probably reuse chosen_child here
-                                // full case
-                                const self_split = try self.split(ha);
-                                if (cmp(cx, child_split.new_key, self_split.new_key) == .gt) {
-                                    // insert to new child
-                                    self_split.new_child.insertNonFull(cx, child_split.new_key, child_split.new_child);
-                                } else {
-                                    // insert to self
-                                    self.insertNonFull(cx, child_split.new_key, child_split.new_child);
+            fn insert(self: *Node, ha: Allocator, cx: Ctx, item: T) !void {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            // FIXME: replace with binary search
+                            if (cmp(cx, item, key) == .lt) {
+                                node.keys.insert(ii, item) catch unreachable;
+                                return;
+                            }
+                        }
+                        // it's above all our keys so add it at the end
+                        node.keys.append(item) catch unreachable;
+                    },
+                    .internal => |*node| {
+                        var ii = blk: {
+                            for (node.keys.slice(), 0..) |key, ii| {
+                                // FIXME: replace with binary search
+                                if (cmp(cx, item, key) == .lt) {
+                                    break :blk ii;
                                 }
-                                return InsertOutcome{ .split = .{ .new_key = self_split.new_key, .new_child = self_split.new_child } };
-                            } 
-                            if (chosen_child == (children.len - 1)) {
-                                children.append(child_split.new_child) catch unreachable;
-                                self.keys.append(child_split.new_key) catch unreachable;
-                            } else {
-                                children.insert(chosen_child + 1, child_split.new_child) catch unreachable;
-                                self.keys.insert(chosen_child, child_split.new_key) catch unreachable;
                             }
-                            return InsertOutcome{ .routine = {} };
-                        },
-                        else => return outcome,
-                    }
-                }
-                // leaf node case
-                if (self.keys.len == (2 * order) - 1) {
-                    // full case
-                    const self_split = try self.split(ha);
-                    if (cmp(cx, item, self_split.new_key) == .gt) {
-                        // insert to new child
-                        self_split.new_child.insertNonFull(cx, item, null);
-                    } else {
-                        // insert to self
-                        self.insertNonFull(cx, item, null);
-                    }
-                    return InsertOutcome{ .split = .{ .new_key = self_split.new_key, .new_child = self_split.new_child } };
-                } 
-                self.insertNonFull(cx, item, null);
-                return InsertOutcome{ .routine = {} };
-            }
-
-            fn insertNonFull(self: *Node, cx: Ctx, item: T, new_child: ?*Node) void {
-                std.debug.assert(self.keys.len < (2 * order) - 1);
-                const ii = self.insertIndex(cx, item);
-                if (ii == self.keys.len) {
-                    self.keys.append(item) catch unreachable;
-                    if (new_child) |child| {
-                        if (self.children) |*children| {
-                            children.append(child) catch unreachable;
-                        } else {
-                            unreachable;
-                        }
-                    }
-                } else {
-                    self.keys.insert(ii, item) catch unreachable;
-                    if (new_child) |child| {
-                        if (self.children) |*children| {
-                            children.insert(ii, child) catch unreachable;
-                        } else {
-                            unreachable;
-                        }
-                    }
-                }
-            }
-
-            fn insertIndex(self: *Node, cx: Ctx, item: T) usize {
-                const slice = self.keys.slice();
-                for (slice, 0..) |key, ii| {
-                    // FIXME: replace with binary search
-                    if (cmp(cx, item, key) == .lt) {
-                        return ii;
-                    }
-                }
-                // it's above all our keys so add it to the last child
-                return slice.len;
-            }
-
-            fn split(self: *Node, ha: Allocator) !struct {
-                new_key: T,
-                new_child: *Node,
-            } {
-                std.debug.assert(self.keys.len == (2 * order) - 1);
-                const right = try Node.fromSlice(ha, self.keys.slice()[order..], null);
-                if (self.children) |*children| {
-                    right.children = ChildrenArray.fromSlice(children.slice()[order..]) catch unreachable;
-                    children.resize(order) catch unreachable;
-                }
-                const mid = self.keys.get(order - 1);
-                self.keys.resize(order - 1) catch unreachable;
-                // println(
-                //     "splitting {*} left.len = {}, left.c.len = {?}, right.len = {}, right.c.len = {?} ", 
-                //     .{ 
-                //         self,
-                //         self.keys.len, 
-                //         if (self.children) |xx| xx.len else null, 
-                //         right.keys.len, 
-                //         if (right.children) |xx| xx.len else null 
-                //     }
-                // );
-                return .{ .new_key = mid, .new_child = right };
-            }
-
-            pub fn find(self: *@This(), cx: Ctx, needle: T) ?T {
-                for (self.keys.slice(), 0..) |key, ii| {
-                    switch (cmp(cx, needle, key)) {
-                        .eq => {
-                            return key;
-                        },
-                        .lt => {
-                            if (self.children) |children| {
-                                return children.get(ii).find(cx, needle);
-                            } else {
-                                return null;
+                            // it's above all our keys so add it to the last child
+                            break :blk node.children.len - 1;
+                        };
+                        if (try node.splitChildIfFull(ha, ii)) {
+                            if (cmp(cx, item, node.keys.get(ii)) == .gt) {
+                                // add to the new daughter node
+                                ii += 1;
                             }
-                        },
-                        .gt => {},
-                    }
+                        }
+                        const chosen_child = node.children.get(ii);
+                        try chosen_child.insert(ha, cx, item);
+                    },
                 }
-                if (self.children) |children| {
-                    return children.get(children.len - 1).find(cx, needle);
-                } else {
-                    return null;
+            }
+
+            /// This returns the node containing the key and the index of the key
+            pub fn find(self: *@This(), cx: Ctx, needle: T) ?struct { *Node, usize } {
+                switch (self.*) {
+                    .leaf => |node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            switch (cmp(cx, needle, key)) {
+                                .eq => {
+                                    return .{ self, ii };
+                                },
+                                .lt => {
+                                    return null;
+                                },
+                                .gt => {},
+                            }
+                        }
+                        return null;
+                    },
+                    .internal => |node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            switch (cmp(cx, needle, key)) {
+                                .eq => {
+                                    return .{ self, ii };
+                                },
+                                .lt => {
+                                    return node.children.get(ii).find(cx, needle);
+                                },
+                                .gt => {},
+                            }
+                        }
+                        return node.children.get(node.children.len - 1).find(cx, needle);
+                    },
                 }
             }
 
@@ -503,25 +468,34 @@ fn BTree(
 
         pub fn insert(self: *Self, cx: Ctx, item: T) !void {
             if (self.root) |node| {
-                switch (try node.insert(self.ha, cx, item)) {
-                    .routine => {},
-                    .split => |split| {
-                        self.root = try Node.initWithChildren(self.ha, node, split.new_key, split.new_child);
-                    },
+                if (node.len() == (2 * order) - 1) {
+                    var internal = Node.Internal{
+                        .keys = Node.KeyArray.init(0) catch unreachable,
+                        .children = Node.ChildrenArray.fromSlice(&[_]*Node{node}) catch unreachable,
+                    };
+                    _ = try internal.splitChildIfFull(self.ha, 0);
+                    var new_root = try self.ha.create(Node);
+                    new_root.* = Node{ .internal = internal };
+                    try new_root.insert(self.ha, cx, item);
+                    self.root = new_root;
+                } else {
+                    try node.insert(self.ha, cx, item);
                 }
             } else {
-                var node = try Node.init(self.ha);
-                node.keys.append(item) catch unreachable;
-                self.root = node;
+                self.root = try Node.initLeaf(self.ha, item);
             }
         }
 
         pub fn find(self: *Self, cx: Ctx, needle: T) ?T {
-            if (self.root) |node| {
-                return node.find(cx, needle);
-            } else {
-                return null;
+            if (self.root) |root| {
+                if (root.find(cx, needle)) |found| {
+                    return switch (found[0].*) {
+                        .leaf => |node| node.keys.get(found[1]),
+                        .internal => |node| node.keys.get(found[1])
+                    };
+                }
             }
+            return null;
         }
 
         pub fn print(self: *Self) void {

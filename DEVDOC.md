@@ -15,7 +15,7 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
       - [x] ~~`tmpfs` alternative for testing~~ Issues with `tmpfs` now fixed
     - [ ] Queries
     - [ ] B-Tree implementation for field indices
-        - [ ] BSTree
+        - [x] BSTree
     - [x] `std.Thread.Condition` based `Queue`
       - A single CPU core is still saturated when it's flooded with events. Investigate what's making this happen
         - Crossed fingers it won't be the syscalls (can't be!)
