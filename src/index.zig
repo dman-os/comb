@@ -107,6 +107,11 @@ fn SwapBTree(
                 }
             }
 
+            // This assumes that the Node at the ptr has not children
+            fn deinitUnchecked(sa: SwapAllocator, ptr: Ptr) void {
+                defer sa.free(ptr);
+            }
+
             fn swapIn(sa: SwapAllocator, ptr: Ptr) !*Node {
                 const slice = try sa.swapIn(ptr);
                 std.debug.assert(slice.len >= @sizeOf(Node));
@@ -207,6 +212,221 @@ fn SwapBTree(
                 }
             }
 
+            fn delete(self: *Node, sa: SwapAllocator, cx: Ctx, needle: T) !?T {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            switch (cmp(cx, needle, key)) {
+                                .eq => {
+                                    return node.keys.orderedRemove(ii);
+                                },
+                                .lt => break,
+                                .gt => {},
+                            }
+                        }
+                        return null;
+                    },
+                    .internal => |*node| {
+                        const child_ii = blk: {
+                            for (node.keys.slice(), 0..) |key, ii| {
+                                switch (cmp(cx, needle, key)) {
+                                    .eq => {
+                                        const child_ptr = node.children.get(ii);
+                                        const child = try Node.swapIn(sa, child_ptr);
+                                        defer sa.swapOut(child_ptr);
+                                        // return node.keys.orderedRemove(ii);
+                                        if (child.len() >= order) {
+                                            node.keys.set(ii, try child.deleteMax(sa, cx));
+                                            return key;
+                                        }
+
+                                        const child_b_ptr = node.children.get(ii + 1);
+                                        const child_b = try Node.swapIn(sa, child_b_ptr);
+                                        if (child_b.len() >= order) {
+                                            // NOTE: we only defer swapOut in this block
+                                            defer sa.swapOut(child_ptr);
+                                            node.keys.set(ii, try child_b.deleteMin(sa, cx));
+                                            return key;
+                                        }
+
+                                        // NOTE: we always swap out before merge since it'll free the mergee
+                                        sa.swapOut(child_ptr);
+                                        try child.merge(sa, node.keys.orderedRemove(ii), node.children.orderedRemove(ii + 1));
+                                        // FIXME: why does the book rec recursive delete here instead of just excluding needle from the merge
+                                        return try child.delete(sa, cx, needle);
+                                    },
+                                    .lt => break :blk ii,
+                                    .gt => {},
+                                }
+                            }
+                            break :blk node.children.len - 1;
+                        };
+                        const chosen_ptr = node.children.get(child_ii);
+                        var chosen_child = try Node.swapIn(sa, chosen_ptr);
+                        var swap_out_child = true;
+                        defer if (swap_out_child) sa.swapOut(chosen_ptr);
+                        if (chosen_child.len() < order) {
+                            const has_left = child_ii > 0;
+                            const has_right = child_ii < node.children.len - 1;
+                            if (has_left) {
+                                const left_ptr = node.children.get(child_ii - 1);
+                                const left = try Node.swapIn(sa, left_ptr);
+                                defer sa.swapOut(left_ptr);
+                                if (left.len() >= order) {
+                                    // give chosen key[chosen]
+                                    chosen_child.keys().insert(0, node.keys.get(child_ii - 1)) catch unreachable;
+                                    // replace key[chosen] with key[last] from left
+                                    node.keys.set(child_ii - 1, left.keys().pop());
+                                    switch (chosen_child.*) {
+                                        // give chosen last child from left
+                                        .internal => |*chosen_internal| {
+                                            chosen_internal.children.insert(0, left.internal.children.pop()) catch unreachable;
+                                        },
+                                        else => {},
+                                    }
+                                    return try chosen_child.delete(sa, cx, needle);
+                                } else if (has_right) {
+                                    const right_ptr = node.children.get(child_ii + 1);
+                                    const right = try Node.swapIn(sa, right_ptr);
+                                    defer sa.swapOut(right_ptr);
+                                    // if both siblings and chosen are under order
+                                    // TODO: what's the point of checking right here? it doesn't get modified
+                                    if (right.len() < order) {
+                                        sa.swapOut(chosen_ptr);
+                                        // we disable the defer block for chosen to avoid double
+                                        // swap out as `merge` will deinit it
+                                        swap_out_child = false;
+                                        try left.merge(sa, node.keys.orderedRemove(child_ii - 1), node.children.orderedRemove(child_ii));
+                                        return try left.delete(sa, cx, needle);
+                                    }
+                                }
+                            }
+                            if (has_right) {
+                                const right_ptr = node.children.get(child_ii + 1);
+                                const right = try Node.swapIn(sa, right_ptr);
+                                defer sa.swapOut(right_ptr);
+                                if (right.len() >= order) {
+                                    // give chosen key[chosen]
+                                    chosen_child.keys().append(node.keys.get(child_ii)) catch unreachable;
+                                    // replace key[chosen] with key[first] from right
+                                    node.keys.set(child_ii, right.keys().orderedRemove(0));
+                                    switch (chosen_child.*) {
+                                        // give chosen last child from right
+                                        .internal => |*chosen_internal| {
+                                            chosen_internal.children.append(right.internal.children.orderedRemove(0)) catch unreachable;
+                                        },
+                                        else => {},
+                                    }
+                                    return try chosen_child.delete(sa, cx, needle);
+                                }
+                            }
+                        }
+                        return try chosen_child.delete(sa, cx, needle);
+                    },
+                }
+            }
+
+            fn deleteMin(self: *Node, sa: SwapAllocator, cx: Ctx) !T {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        return node.keys.orderedRemove(0);
+                    },
+                    .internal => |*node| {
+                        const chosen_ptr = node.children.get(0);
+                        var chosen_child = try Node.swapIn(sa, chosen_ptr);
+                        defer sa.swapOut(chosen_ptr);
+                        if (chosen_child.len() < order) {
+                            const right_ptr = node.children.get(1);
+                            const right = try Node.swapIn(sa, right_ptr);
+                            if (right.len() >= order) {
+                                defer sa.swapOut(right_ptr);
+                                // give chosen key[chosen]
+                                chosen_child.keys().append(node.keys.get(0)) catch unreachable;
+                                // replace self.key[chosen] with key[first] from right
+                                node.keys.set(0, right.keys().orderedRemove(0));
+                                switch (chosen_child.*) {
+                                    // give chosen first child from right
+                                    .internal => |*chosen_internal| {
+                                        chosen_internal.children.append(right.internal.children.orderedRemove(0)) catch unreachable;
+                                    },
+                                    else => {},
+                                }
+                            } else {
+                                sa.swapOut(right_ptr);
+                                // both are under order, merge them
+                                try chosen_child.merge(sa, node.keys.orderedRemove(0), node.children.orderedRemove(1));
+                            }
+                        }
+                        return try chosen_child.deleteMin(sa, cx);
+                    },
+                }
+            }
+
+            fn deleteMax(self: *Node, sa: SwapAllocator, cx: Ctx) !T {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        return node.keys.pop();
+                    },
+                    .internal => |*node| {
+                        const chosen_ptr = node.children.get(node.children.len - 1);
+                        var chosen_child = try Node.swapIn(sa, chosen_ptr);
+                        var swap_out_child = true;
+                        defer if (swap_out_child) sa.swapOut(chosen_ptr);
+                        if (chosen_child.len() < order) {
+                            const left_ptr = node.children.get(node.children.len - 2);
+                            const left = try Node.swapIn(sa, left_ptr);
+                            defer sa.swapOut(left_ptr);
+                            if (left.len() >= order) {
+                                // give chosen key[chosen]
+                                chosen_child.keys().insert(0, node.keys.pop()) catch unreachable;
+                                // replace self.key[chosen] with key[last] from left
+                                node.keys.append(left.keys().pop()) catch unreachable;
+                                switch (chosen_child.*) {
+                                    // give chosen last child from left
+                                    .internal => |*chosen_internal| {
+                                        chosen_internal.children.insert(0, left.internal.children.pop()) catch unreachable;
+                                    },
+                                    else => {},
+                                }
+                            } else {
+                                sa.swapOut(chosen_ptr);
+                                swap_out_child = false;
+                                // both are under order, merge them
+                                try left.merge(sa, node.keys.pop(), node.children.pop());
+                                // NOTE: we delete from left after the merge
+                                return try left.deleteMax(sa, cx);
+                            }
+                        }
+                        return try chosen_child.deleteMax(sa, cx);
+                    },
+                }
+            }
+
+            // this assumes both self and right are of the same Node type.
+            fn merge(self: *Node, sa: SwapAllocator, median: T, right_ptr: Ptr) !void {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        const right = try Node.swapIn(sa, right_ptr);
+                        defer Node.deinitUnchecked(sa, right_ptr);
+                        defer sa.swapOut(right_ptr);
+
+                        node.keys.append(median) catch unreachable;
+                        node.keys.appendSlice(right.leaf.keys.slice()) catch unreachable;
+                    },
+                    .internal => |*node| {
+                        const right = try Node.swapIn(sa, right_ptr);
+                        defer Node.deinitUnchecked(sa, right_ptr);
+                        defer sa.swapOut(right_ptr);
+                        defer right.internal.children.resize(0) catch unreachable;
+
+                        node.keys.append(median) catch unreachable;
+                        node.keys.appendSlice(right.internal.keys.slice()) catch unreachable;
+
+                        node.children.appendSlice(right.internal.children.slice()) catch unreachable;
+                    },
+                }
+            }
+
             /// This returns the node containing the key and the index of the key
             fn find(sa: SwapAllocator, ptr: Ptr, cx: Ctx, needle: T) !?struct {
                 usize,
@@ -251,6 +471,39 @@ fn SwapBTree(
                         const child_ptr = node.children.get(node.children.len - 1);
                         return try Node.find(sa, child_ptr, cx, needle);
                     },
+                }
+            }
+
+            fn countKeys(self: *const Node, sa: SwapAllocator) !usize {
+                switch (self.*) {
+                    .leaf => |node| {
+                        return node.keys.len;
+                    },
+                    .internal => |node| {
+                        var total: usize = node.keys.len;
+                        for (node.children.slice()) |child_ptr| {
+                            const child = try Node.swapIn(sa, child_ptr);
+                            defer sa.swapOut(child_ptr);
+                            total += try child.countKeys(sa);
+                        }
+                        return total;
+                    },
+                }
+            }
+
+            fn print(self: *const Node, sa: SwapAllocator, depth: usize) void {
+                for (self.constKeys().slice(), 0..) |key, kk| {
+                    println("node {} on depth {} key[{}] = {}", .{ @intFromPtr(self), depth, kk, key });
+                }
+                switch (self.*) {
+                    .internal => |node| {
+                        for (node.children.slice()) |child_ptr| {
+                            const child = try Node.swapIn(sa, child_ptr);
+                            defer sa.swapOut(child_ptr);
+                            try child.print(sa, depth + 1);
+                        }
+                    },
+                    else => {},
                 }
             }
         };
@@ -311,6 +564,67 @@ fn SwapBTree(
             }
             return null;
         }
+
+        pub fn delete(self: *Self, cx: Ctx, needle: T) !?T {
+            if (self.root) |root_ptr| {
+                var deinit_root = false;
+                defer if (deinit_root) Node.deinitUnchecked(self.sa, root_ptr);
+                const root = try Node.swapIn(self.sa, root_ptr);
+                defer self.sa.swapOut(root_ptr);
+                if (try root.delete(self.sa, cx, needle)) |found| {
+                    switch (root.*) {
+                        .leaf => |*node| if (node.keys.len == 0) {
+                            deinit_root = true;
+                            self.root = null;
+                        },
+                        .internal => |*node| if (node.keys.len == 0) {
+                            deinit_root = true;
+                            defer node.children.resize(0) catch unreachable;
+                            self.root = node.children.get(0);
+                        },
+                    }
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        pub fn countKeys(self: *const Self) !usize {
+            if (self.root) |root_ptr| {
+                const root = try Node.swapIn(self.sa, root_ptr);
+                defer self.sa.swapOut(root_ptr);
+                return try root.countKeys(self.sa);
+            } else {
+                return 0;
+            }
+        }
+
+        pub fn count_depth(self: *const Self) !usize {
+            if (self.root) |rn| {
+                var depth: usize = 1;
+                var ptr = rn;
+                while (true) {
+                    const node = try Node.swapIn(self.sa, ptr);
+                    defer self.sa.swapOut(ptr);
+                    switch (node.*) {
+                        .internal => |in| ptr = in.children.get(0),
+                        else => break,
+                    }
+                    depth += 1;
+                }
+                return depth;
+            } else {
+                return 0;
+            }
+        }
+
+        pub fn print(self: *Self) !void {
+            if (self.root) |ptr| {
+                const node = try Node.swapIn(self.sa, ptr);
+                defer self.sa.swapOut(ptr);
+                try node.print(self.sa, 0);
+            }
+        }
     };
 }
 
@@ -359,6 +673,65 @@ test "SwapBTree.insert" {
     try std.testing.expect(try tree.find({}, 123) != null);
     try std.testing.expect(try tree.find({}, 0) != null);
     try std.testing.expect(try tree.find({}, 54) != null);
+    // try std.testing.expect(tree.find({}, 1223) == null);
+}
+
+test "SwapBTree.delete" {
+    const page_size = std.mem.page_size;
+    const MyBtree = SwapBTree(
+        usize,
+        void,
+        struct {
+            fn cmp(cx: void, a: usize, b: usize) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        3,
+        // .{
+        //     .extension = BSTConfig.heapExtension,
+        // },
+    );
+    const ha = std.testing.allocator;
+    var mmap_pager = try mod_mmap.MmapPager.init(ha, "/tmp/SwapBTree.insert", .{
+        .page_size = page_size,
+    });
+    defer mmap_pager.deinit();
+
+    var lru = try mod_mmap.LRUSwapCache.init(ha, mmap_pager.pager(), 1);
+    defer lru.deinit();
+    var pager = lru.pager();
+
+    var msa = mod_mmap.PagingSwapAllocator(.{}).init(ha, pager);
+    defer msa.deinit();
+    var sa = msa.allocator();
+
+    var tree = MyBtree.init(sa);
+    defer tree.deinit() catch unreachable;
+    const items = "CGMPTXABDEFJKLNOQRSUVYZ";
+    for (items) |val| {
+        try tree.insert({}, val);
+    }
+    // tree.print();
+    // try std.testing.expectEqual(@as(usize, 23), tree.countKeys());
+    // try std.testing.expectEqual(@as(usize, 3), tree.count_depth());
+    try std.testing.expect(try tree.find({}, 'F') != null);
+    try std.testing.expect(try tree.delete({}, 'F') != null);
+    try std.testing.expect(try tree.find({}, 'F') == null);
+    try std.testing.expectEqual(@as(usize, 22), try tree.countKeys());
+    try std.testing.expect(try tree.delete({}, 'M') != null);
+    try std.testing.expectEqual(@as(usize, 21), try tree.countKeys());
+    try std.testing.expect(try tree.delete({}, 'G') != null);
+    try std.testing.expectEqual(@as(usize, 20), try tree.countKeys());
+    try std.testing.expect(try tree.delete({}, 'D') != null);
+    try std.testing.expectEqual(@as(usize, 19), try tree.countKeys());
+    try std.testing.expect(try tree.delete({}, 'B') != null);
+    try std.testing.expectEqual(@as(usize, 18), try tree.countKeys());
+    const del_items = "CPTXAEJKLNOQRSUVYZ";
+    for (del_items) |val| {
+        try std.testing.expect(try tree.delete({}, val) != null);
+    }
+    try std.testing.expect(try tree.count_depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
 }
 
