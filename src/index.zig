@@ -11,192 +11,312 @@ const FsEntry = mod_treewalking.FsEntry;
 
 const mod_mmap = @import("mmap.zig");
 const SwapList = mod_mmap.SwapList;
+const SwapAllocator = mod_mmap.SwapAllocator;
+const Pager = mod_mmap.Pager;
 const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 
-pub fn BST(
+// const BTreeConfig = struct {
+//     order: usize = 12,
+// };
+
+// Order will be multiplied by to ensure an even value.
+fn SwapBTree(
     comptime T: type,
     comptime Ctx: type,
     comptime cmp: fn (cx: Ctx, a: T, b: T) std.math.Order,
+    // comptime config: BTreeConfig,
+    comptime order: usize,
 ) type {
+    if (order == 0) {
+        @compileError("order is 0");
+    }
     return struct {
         const Self = @This();
-
-        item: T,
-        parent: ?*Self = null,
-        left_child: ?*Self = null,
-        right_child: ?*Self = null,
-
-        pub fn insert(self: *Self, cx: Ctx, in: *Self) void {
-            switch (cmp(cx, in.item, self.item)) {
-                .lt => {
-                    // println("node {} is adding {} to left", .{ self.item, in.item });
-                    if (self.left_child) |child| {
-                        child.insert(cx, in);
-                    } else {
-                        self.left_child = in;
-                        in.parent = self;
-                    }
-                },
-                .eq, .gt => {
-                    // println("node {} is adding {} to left", .{ self.item, in.item });
-                    if (self.right_child) |child| {
-                        child.insert(cx, in);
-                    } else {
-                        self.right_child = in;
-                        in.parent = self;
-                    }
-                },
-            }
-        }
-
-        pub fn transplant(self: *Self, in: ?*Self) void {
-            if (self.parent) |parent| {
-                if (self == parent.left_child) {
-                    parent.left_child = in;
-                } else {
-                    parent.right_child = in;
-                }
-                if (in) |incoming| {
-                    incoming.parent = parent;
-                }
-            }
-        }
-
-        pub fn delete(self: *Self) ?*Self {
-            defer self.parent = null;
-            defer self.right_child = null;
-            defer self.left_child = null;
-            if (self.left_child) |left| {
-                if (self.right_child) |right| {
-                    // find the successor which should be the min from
-                    // the right branch
-                    const succ = right.min();
-                    if (succ.parent != self) {
-                        // transplant it with its right child
-                        // NOTE: it doesn't have a left child since it's a min
-                        succ.transplant(succ.right_child);
-                        succ.right_child = right;
-                        right.parent = succ;
-                    }
-                    self.transplant(succ);
-                    succ.left_child = left;
-                    left.parent = succ;
-                    return succ;
-                } else {
-                    self.transplant(left);
-                    return left;
-                }
-            } else {
-                self.transplant(self.right_child);
-                return self.right_child orelse self.parent;
-            }
-        }
-
-        pub fn find(self: *Self, cx: Ctx, val: T) ?*Self {
-            switch (cmp(cx, val, self.item)) {
-                .eq => {
-                    return self;
-                },
-                .lt => {
-                    if (self.left_child) |child| {
-                        return child.find(cx, val);
-                    } else {
-                        return null;
-                    }
-                },
-                .gt => {
-                    // println("node {} is adding {} to left", .{ self.item, in.item });
-                    if (self.right_child) |child| {
-                        return child.find(cx, val);
-                    } else {
-                        return null;
-                    }
-                },
-            }
-        }
-
-        pub fn min(self: *Self) *Self {
-            if (self.left_child) |child| {
-                return child.min();
-            } else {
-                return self;
-            }
-        }
-
-        pub fn max(self: *Self) *Self {
-            if (self.right_child) |child| {
-                return child.max();
-            } else {
-                return self;
-            }
-        }
-
-        pub fn predecessor(self: *Self) ?*Self {
-            if (self.left_child) |child| {
-                return child.max();
-            }
-            var x = self;
-            var y = self.parent;
-            while (true) {
-                if (y) |parent| {
-                    if (parent.left_child) |child| {
-                        if (x == child) {
-                            x = parent;
-                            y = parent.parent;
-                            continue;
-                        }
-                    }
-                }
-                break;
-            }
-            return y;
-        }
-
-        pub fn successor(self: *Self) ?*Self {
-            if (self.right_child) |child| {
-                return child.min();
-            }
-            var x = self;
-            var y = self.parent;
-            while (true) {
-                if (y) |parent| {
-                    if (parent.right_child) |child| {
-                        if (x == child) {
-                            x = parent;
-                            y = parent.parent;
-                            continue;
-                        }
-                    }
-                }
-                break;
-            }
-            return y;
-        }
-
-        pub fn initHeap(ha: Allocator, item: T) !*Self {
-            var ptr = try ha.create(Self);
-            ptr.* = Self{
-                .item = item,
+        const Node = union(enum) {
+            const KeyArray = std.BoundedArray(T, (2 * order) - 1);
+            const ChildrenArray = std.BoundedArray(Ptr, 2 * order);
+            const NodeNPtr = struct {
+                node: *Node,
+                ptr: Ptr,
             };
-            return ptr;
+
+            const Leaf = struct {
+                keys: KeyArray,
+            };
+            const Internal = struct {
+                keys: KeyArray,
+                children: ChildrenArray,
+
+                fn splitChildIfFull(self: *@This(), sa: SwapAllocator, child_ii: usize) !bool {
+                    const child_ptr = self.children.slice()[child_ii];
+                    const child = try Node.swapIn(sa, child_ptr);
+                    defer sa.swapOut(child_ptr);
+                    switch (child.*) {
+                        .leaf => |*node| {
+                            if (node.keys.len == (2 * order) - 1) {
+                                const right_ptr = try Node.fromSliceLeafPtr(sa, node.keys.slice()[order..]);
+                                const mid = node.keys.get(order - 1);
+                                node.keys.resize(order - 1) catch unreachable;
+                                if (child_ii == self.children.len - 1) {
+                                    self.keys.append(mid) catch unreachable;
+                                    self.children.append(right_ptr) catch unreachable;
+                                } else {
+                                    self.keys.insert(child_ii, mid) catch unreachable;
+                                    self.children.insert(child_ii + 1, right_ptr) catch unreachable;
+                                }
+                                return true;
+                            }
+                            return false;
+                        },
+                        .internal => |*node| {
+                            if (node.keys.len == (2 * order) - 1) {
+                                const right_ptr = try Node.fromSliceInternalPtr(sa, node.keys.slice()[order..], node.children.slice()[order..]);
+                                node.children.resize(order) catch unreachable;
+                                const mid = node.keys.get(order - 1);
+                                node.keys.resize(order - 1) catch unreachable;
+                                if (child_ii == self.children.len - 1) {
+                                    self.keys.append(mid) catch unreachable;
+                                    self.children.append(right_ptr) catch unreachable;
+                                } else {
+                                    self.keys.insert(child_ii, mid) catch unreachable;
+                                    self.children.insert(child_ii + 1, right_ptr) catch unreachable;
+                                }
+                                return true;
+                            }
+                            return false;
+                        },
+                    }
+                }
+            };
+            leaf: Leaf,
+            internal: Internal,
+
+            fn deinit(sa: SwapAllocator, ptr: Ptr) !void {
+                defer sa.free(ptr);
+                const self = try Node.swapIn(sa, ptr);
+                defer sa.swapOut(ptr);
+                switch (self.*) {
+                    .internal => |int| {
+                        for (int.children.slice()) |child_ptr| {
+                            try Node.deinit(sa, child_ptr);
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            fn swapIn(sa: SwapAllocator, ptr: Ptr) !*Node {
+                const slice = try sa.swapIn(ptr);
+                std.debug.assert(slice.len >= @sizeOf(Node));
+                const hptr: *align(@alignOf(Node)) [@sizeOf(Node)]u8 = @alignCast(@ptrCast(slice.ptr));
+                return std.mem.bytesAsValue(Node, hptr);
+            }
+
+            fn fromSliceLeaf(sa: SwapAllocator, key_slice: []const T) !NodeNPtr {
+                const ptr = try sa.alloc(@sizeOf(Node));
+                const node = try Node.swapIn(sa, ptr);
+                node.* = Node{
+                    .leaf = .{
+                        .keys = KeyArray.fromSlice(key_slice) catch unreachable,
+                    },
+                };
+                return NodeNPtr{ .node = node, .ptr = ptr };
+            }
+
+            fn fromSliceLeafPtr(sa: SwapAllocator, key_slice: []const T) !Ptr {
+                const nodenptr = try Node.fromSliceLeaf(sa, key_slice);
+                sa.swapOut(nodenptr.ptr);
+                return nodenptr.ptr;
+            }
+
+            fn fromSliceInternal(sa: SwapAllocator, key_slice: []const T, children: []const Ptr) !NodeNPtr {
+                std.debug.assert(key_slice.len == children.len - 1);
+                const ptr = try sa.alloc(@sizeOf(Node));
+                const node = try Node.swapIn(sa, ptr);
+                node.* = Node{ .internal = .{
+                    .keys = KeyArray.fromSlice(key_slice) catch unreachable,
+                    .children = ChildrenArray.fromSlice(children) catch unreachable,
+                } };
+                return NodeNPtr{ .node = node, .ptr = ptr };
+            }
+
+            fn fromSliceInternalPtr(sa: SwapAllocator, key_slice: []const T, children: []const Ptr) !Ptr {
+                const nodenptr = try Node.fromSliceInternal(sa, key_slice, children);
+                sa.swapOut(nodenptr.ptr);
+                return nodenptr.ptr;
+            }
+
+            fn constKeys(self: *const Node) *const KeyArray {
+                return switch (self.*) {
+                    .leaf => |*node| &node.keys,
+                    .internal => |*node| &node.keys,
+                };
+            }
+
+            fn keys(self: *Node) *KeyArray {
+                return switch (self.*) {
+                    .leaf => |*node| &node.keys,
+                    .internal => |*node| &node.keys,
+                };
+            }
+
+            fn len(self: *const Node) usize {
+                return switch (self.*) {
+                    .leaf => |node| node.keys.len,
+                    .internal => |node| node.keys.len,
+                };
+            }
+
+            fn insert(self: *Node, sa: SwapAllocator, cx: Ctx, item: T) !void {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            // FIXME: replace with binary search
+                            if (cmp(cx, item, key) == .lt) {
+                                node.keys.insert(ii, item) catch unreachable;
+                                return;
+                            }
+                        }
+                        // it's above all our keys so add it at the end
+                        node.keys.append(item) catch unreachable;
+                    },
+                    .internal => |*node| {
+                        var ii = blk: {
+                            for (node.keys.slice(), 0..) |key, ii| {
+                                // FIXME: replace with binary search
+                                if (cmp(cx, item, key) == .lt) {
+                                    break :blk ii;
+                                }
+                            }
+                            // it's above all our keys so add it to the last child
+                            break :blk node.children.len - 1;
+                        };
+                        if (try node.splitChildIfFull(sa, ii)) {
+                            if (cmp(cx, item, node.keys.get(ii)) == .gt) {
+                                // add to the new daughter node
+                                ii += 1;
+                            }
+                        }
+                        const chosen_ptr = node.children.get(ii);
+                        const chosen_child = try Node.swapIn(sa, chosen_ptr);
+                        defer sa.swapOut(chosen_ptr);
+                        try chosen_child.insert(sa, cx, item);
+                    },
+                }
+            }
+
+            /// This returns the node containing the key and the index of the key
+            fn find(sa: SwapAllocator, ptr: Ptr, cx: Ctx, needle: T) !?struct {
+                usize,
+                *Node,
+                Ptr,
+            } {
+                const self = try Node.swapIn(sa, ptr);
+                var swap_out = true;
+                defer if (swap_out) {
+                    sa.swapOut(ptr);
+                };
+                switch (self.*) {
+                    .leaf => |node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            switch (cmp(cx, needle, key)) {
+                                .eq => {
+                                    swap_out = false;
+                                    return .{ ii, self, ptr };
+                                },
+                                .lt => {
+                                    return null;
+                                },
+                                .gt => {},
+                            }
+                        }
+                        return null;
+                    },
+                    .internal => |node| {
+                        for (node.keys.slice(), 0..) |key, ii| {
+                            switch (cmp(cx, needle, key)) {
+                                .eq => {
+                                    swap_out = false;
+                                    return .{ ii, self, ptr };
+                                },
+                                .lt => {
+                                    const child_ptr = node.children.get(ii);
+                                    return try Node.find(sa, child_ptr, cx, needle);
+                                },
+                                .gt => {},
+                            }
+                        }
+                        const child_ptr = node.children.get(node.children.len - 1);
+                        return try Node.find(sa, child_ptr, cx, needle);
+                    },
+                }
+            }
+        };
+
+        // ha: Allocator,
+        sa: SwapAllocator,
+        // pager: Pager,
+        root: ?Ptr = null,
+
+        pub fn init(sa: SwapAllocator) Self {
+            return Self{
+                .sa = sa,
+            };
         }
 
-        pub fn deinitHeap(ha: Allocator, self: *Self) void {
-            defer ha.destroy(self);
-            if (self.left_child) |child| {
-                deinitHeap(ha, child);
+        pub fn deinit(self: *Self) !void {
+            if (self.root) |root_ptr| {
+                try Node.deinit(self.sa, root_ptr);
+                self.root = null;
             }
-            if (self.right_child) |child| {
-                deinitHeap(ha, child);
+        }
+
+        pub fn insert(self: *Self, cx: Ctx, item: T) !void {
+            if (self.root) |root_ptr| {
+                const node = try Node.swapIn(self.sa, root_ptr);
+                defer self.sa.swapOut(root_ptr);
+                if (node.len() == (2 * order) - 1) {
+                    var internal = Node.Internal{
+                        .keys = Node.KeyArray.init(0) catch unreachable,
+                        .children = Node.ChildrenArray.fromSlice(&[_]Ptr{root_ptr}) catch unreachable,
+                    };
+                    _ = try internal.splitChildIfFull(self.sa, 0);
+
+                    const new_root_ptr = try self.sa.alloc(@sizeOf(Node));
+                    const new_root = try Node.swapIn(self.sa, new_root_ptr);
+                    defer self.sa.swapOut(new_root_ptr);
+                    new_root.* = Node{ .internal = internal };
+                    try new_root.insert(self.sa, cx, item);
+
+                    self.root = new_root_ptr;
+                } else {
+                    try node.insert(self.sa, cx, item);
+                }
+            } else {
+                self.root = try Node.fromSliceLeafPtr(self.sa, &[_]T{item});
             }
+        }
+
+        pub fn find(self: *Self, cx: Ctx, needle: T) !?T {
+            if (self.root) |root_ptr| {
+                if (try Node.find(self.sa, root_ptr, cx, needle)) |found| {
+                    defer self.sa.swapOut(found[2]);
+                    return switch (found[1].*) {
+                        .leaf => |node| node.keys.get(found[0]),
+                        .internal => |node| node.keys.get(found[0]),
+                    };
+                }
+            }
+            return null;
         }
     };
 }
 
-test "BST.insert" {
-    const MyBst = BST(
+test "SwapBTree.insert" {
+    const page_size = std.mem.page_size;
+    const MyBtree = SwapBTree(
         usize,
         void,
         struct {
@@ -205,52 +325,43 @@ test "BST.insert" {
                 return std.math.order(a, b);
             }
         }.cmp,
+        12,
         // .{
         //     .extension = BSTConfig.heapExtension,
         // },
     );
     const ha = std.testing.allocator;
+    var mmap_pager = try mod_mmap.MmapPager.init(ha, "/tmp/SwapBTree.insert", .{
+        .page_size = page_size,
+    });
+    defer mmap_pager.deinit();
 
-    var tree = try MyBst.initHeap(ha, 500);
-    defer MyBst.deinitHeap(ha, tree);
-    const children = [_]usize{ 123, 53, 98823, 123, 534, 123, 54, 7264, 21, 0, 23 };
-    for (children) |val| {
-        const child = try MyBst.initHeap(ha, val);
-        tree.insert({}, child);
+    var lru = try mod_mmap.LRUSwapCache.init(ha, mmap_pager.pager(), 1);
+    defer lru.deinit();
+    var pager = lru.pager();
+
+    var msa = mod_mmap.PagingSwapAllocator(.{}).init(ha, pager);
+    defer msa.deinit();
+    var sa = msa.allocator();
+
+    var tree = MyBtree.init(sa);
+    defer tree.deinit() catch unreachable;
+    for (0..10_000) |ii| {
+        _ = ii;
+        try tree.insert({}, std.crypto.random.uintAtMost(usize, 10_000));
     }
-    try std.testing.expect(tree.find({}, 500) != null);
-    try std.testing.expect(tree.find({}, 0) != null);
-    try std.testing.expect(tree.find({}, 54) != null);
-    try std.testing.expect(tree.find({}, 1223) == null);
-    try std.testing.expectEqual(@as(usize, 123), ((tree.find({}, 123) orelse unreachable).successor() orelse unreachable).item);
-    try std.testing.expectEqual(@as(usize, 54), ((tree.find({}, 123) orelse unreachable).predecessor() orelse unreachable).item);
-    try std.testing.expectEqual(@as(usize, 54), ((tree.find({}, 53) orelse unreachable).successor() orelse unreachable).item);
-    try std.testing.expectEqual(@as(usize, 53), ((tree.find({}, 54) orelse unreachable).predecessor() orelse unreachable).item);
-    try std.testing.expectEqual(@as(usize, 98823), tree.max().item);
-    try std.testing.expectEqual(@as(usize, 0), tree.min().item);
-    {
-        const find = tree.find({}, 23) orelse unreachable;
-        defer MyBst.deinitHeap(ha, find);
-        try std.testing.expectEqual(@as(usize, 21), (find.delete() orelse unreachable).item);
+    const items = [_]usize{ 123, 53, 98823, 123, 534, 123, 54, 7264, 21, 0, 23 };
+    for (items) |val| {
+        try tree.insert({}, val);
     }
-    {
-        const find = tree;
-        defer MyBst.deinitHeap(ha, find);
-        tree = find.delete() orelse unreachable;
-        try std.testing.expectEqual(@as(usize, 534), tree.item);
-    }
-    {
-        const find = try MyBst.initHeap(ha, 500);
-        defer MyBst.deinitHeap(ha, find);
-        try std.testing.expect(find.delete() == null);
-    }
+
+    // tree.print();
+    try std.testing.expect(try tree.find({}, 123) != null);
+    try std.testing.expect(try tree.find({}, 0) != null);
+    try std.testing.expect(try tree.find({}, 54) != null);
+    // try std.testing.expect(tree.find({}, 1223) == null);
 }
 
-// const BTreeConfig = struct {
-//     order: usize = 12,
-// };
-
-// Order will be multiplied by to ensure an even value.
 fn BTree(
     comptime T: type,
     comptime Ctx: type,
@@ -258,6 +369,9 @@ fn BTree(
     // comptime config: BTreeConfig,
     comptime order: usize,
 ) type {
+    if (order == 0) {
+        @compileError("order is 0");
+    }
     return struct {
         const Self = @This();
         const Node = union(enum) {
@@ -419,25 +533,6 @@ fn BTree(
                 }
             }
 
-            // this assumes both self and right are of the same Node type.
-            fn merge(self: *Node, ha: Allocator, median: T, right: *Node) void {
-                switch (self.*) {
-                    .leaf => |*node| {
-                        node.keys.append(median) catch unreachable;
-                        node.keys.appendSlice(right.leaf.keys.slice()) catch unreachable;
-                        right.deinit(ha);
-                    },
-                    .internal => |*node| {
-                        node.keys.append(median) catch unreachable;
-                        node.keys.appendSlice(right.internal.keys.slice()) catch unreachable;
-
-                        node.children.appendSlice(right.internal.children.slice()) catch unreachable;
-                        right.internal.children.resize(0) catch unreachable;
-                        right.deinit(ha);
-                    },
-                }
-            }
-
             fn delete(self: *Node, ha: Allocator, cx: Ctx, needle: T) ?T {
                 switch (self.*) {
                     .leaf => |*node| {
@@ -588,6 +683,25 @@ fn BTree(
                             }
                         }
                         return chosen_child.deleteMax(ha, cx);
+                    },
+                }
+            }
+
+            // this assumes both self and right are of the same Node type.
+            fn merge(self: *Node, ha: Allocator, median: T, right: *Node) void {
+                switch (self.*) {
+                    .leaf => |*node| {
+                        node.keys.append(median) catch unreachable;
+                        node.keys.appendSlice(right.leaf.keys.slice()) catch unreachable;
+                        right.deinit(ha);
+                    },
+                    .internal => |*node| {
+                        node.keys.append(median) catch unreachable;
+                        node.keys.appendSlice(right.internal.keys.slice()) catch unreachable;
+
+                        node.children.appendSlice(right.internal.children.slice()) catch unreachable;
+                        right.internal.children.resize(0) catch unreachable;
+                        right.deinit(ha);
                     },
                 }
             }
@@ -835,4 +949,235 @@ test "BTree.delete" {
     }
     try std.testing.expect(tree.count_depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
+}
+
+pub fn BST(
+    comptime T: type,
+    comptime Ctx: type,
+    comptime cmp: fn (cx: Ctx, a: T, b: T) std.math.Order,
+) type {
+    return struct {
+        const Self = @This();
+
+        item: T,
+        parent: ?*Self = null,
+        left_child: ?*Self = null,
+        right_child: ?*Self = null,
+
+        pub fn insert(self: *Self, cx: Ctx, in: *Self) void {
+            switch (cmp(cx, in.item, self.item)) {
+                .lt => {
+                    // println("node {} is adding {} to left", .{ self.item, in.item });
+                    if (self.left_child) |child| {
+                        child.insert(cx, in);
+                    } else {
+                        self.left_child = in;
+                        in.parent = self;
+                    }
+                },
+                .eq, .gt => {
+                    // println("node {} is adding {} to left", .{ self.item, in.item });
+                    if (self.right_child) |child| {
+                        child.insert(cx, in);
+                    } else {
+                        self.right_child = in;
+                        in.parent = self;
+                    }
+                },
+            }
+        }
+
+        pub fn transplant(self: *Self, in: ?*Self) void {
+            if (self.parent) |parent| {
+                if (self == parent.left_child) {
+                    parent.left_child = in;
+                } else {
+                    parent.right_child = in;
+                }
+                if (in) |incoming| {
+                    incoming.parent = parent;
+                }
+            }
+        }
+
+        pub fn delete(self: *Self) ?*Self {
+            defer self.parent = null;
+            defer self.right_child = null;
+            defer self.left_child = null;
+            if (self.left_child) |left| {
+                if (self.right_child) |right| {
+                    // find the successor which should be the min from
+                    // the right branch
+                    const succ = right.min();
+                    if (succ.parent != self) {
+                        // transplant it with its right child
+                        // NOTE: it doesn't have a left child since it's a min
+                        succ.transplant(succ.right_child);
+                        succ.right_child = right;
+                        right.parent = succ;
+                    }
+                    self.transplant(succ);
+                    succ.left_child = left;
+                    left.parent = succ;
+                    return succ;
+                } else {
+                    self.transplant(left);
+                    return left;
+                }
+            } else {
+                self.transplant(self.right_child);
+                return self.right_child orelse self.parent;
+            }
+        }
+
+        pub fn find(self: *Self, cx: Ctx, val: T) ?*Self {
+            switch (cmp(cx, val, self.item)) {
+                .eq => {
+                    return self;
+                },
+                .lt => {
+                    if (self.left_child) |child| {
+                        return child.find(cx, val);
+                    } else {
+                        return null;
+                    }
+                },
+                .gt => {
+                    // println("node {} is adding {} to left", .{ self.item, in.item });
+                    if (self.right_child) |child| {
+                        return child.find(cx, val);
+                    } else {
+                        return null;
+                    }
+                },
+            }
+        }
+
+        pub fn min(self: *Self) *Self {
+            if (self.left_child) |child| {
+                return child.min();
+            } else {
+                return self;
+            }
+        }
+
+        pub fn max(self: *Self) *Self {
+            if (self.right_child) |child| {
+                return child.max();
+            } else {
+                return self;
+            }
+        }
+
+        pub fn predecessor(self: *Self) ?*Self {
+            if (self.left_child) |child| {
+                return child.max();
+            }
+            var x = self;
+            var y = self.parent;
+            while (true) {
+                if (y) |parent| {
+                    if (parent.left_child) |child| {
+                        if (x == child) {
+                            x = parent;
+                            y = parent.parent;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            return y;
+        }
+
+        pub fn successor(self: *Self) ?*Self {
+            if (self.right_child) |child| {
+                return child.min();
+            }
+            var x = self;
+            var y = self.parent;
+            while (true) {
+                if (y) |parent| {
+                    if (parent.right_child) |child| {
+                        if (x == child) {
+                            x = parent;
+                            y = parent.parent;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            return y;
+        }
+
+        pub fn initHeap(ha: Allocator, item: T) !*Self {
+            var ptr = try ha.create(Self);
+            ptr.* = Self{
+                .item = item,
+            };
+            return ptr;
+        }
+
+        pub fn deinitHeap(ha: Allocator, self: *Self) void {
+            defer ha.destroy(self);
+            if (self.left_child) |child| {
+                deinitHeap(ha, child);
+            }
+            if (self.right_child) |child| {
+                deinitHeap(ha, child);
+            }
+        }
+    };
+}
+
+test "BST.insert" {
+    const MyBst = BST(
+        usize,
+        void,
+        struct {
+            fn cmp(cx: void, a: usize, b: usize) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        // .{
+        //     .extension = BSTConfig.heapExtension,
+        // },
+    );
+    const ha = std.testing.allocator;
+
+    var tree = try MyBst.initHeap(ha, 500);
+    defer MyBst.deinitHeap(ha, tree);
+    const children = [_]usize{ 123, 53, 98823, 123, 534, 123, 54, 7264, 21, 0, 23 };
+    for (children) |val| {
+        const child = try MyBst.initHeap(ha, val);
+        tree.insert({}, child);
+    }
+    try std.testing.expect(tree.find({}, 500) != null);
+    try std.testing.expect(tree.find({}, 0) != null);
+    try std.testing.expect(tree.find({}, 54) != null);
+    try std.testing.expect(tree.find({}, 1223) == null);
+    try std.testing.expectEqual(@as(usize, 123), ((tree.find({}, 123) orelse unreachable).successor() orelse unreachable).item);
+    try std.testing.expectEqual(@as(usize, 54), ((tree.find({}, 123) orelse unreachable).predecessor() orelse unreachable).item);
+    try std.testing.expectEqual(@as(usize, 54), ((tree.find({}, 53) orelse unreachable).successor() orelse unreachable).item);
+    try std.testing.expectEqual(@as(usize, 53), ((tree.find({}, 54) orelse unreachable).predecessor() orelse unreachable).item);
+    try std.testing.expectEqual(@as(usize, 98823), tree.max().item);
+    try std.testing.expectEqual(@as(usize, 0), tree.min().item);
+    {
+        const find = tree.find({}, 23) orelse unreachable;
+        defer MyBst.deinitHeap(ha, find);
+        try std.testing.expectEqual(@as(usize, 21), (find.delete() orelse unreachable).item);
+    }
+    {
+        const find = tree;
+        defer MyBst.deinitHeap(ha, find);
+        tree = find.delete() orelse unreachable;
+        try std.testing.expectEqual(@as(usize, 534), tree.item);
+    }
+    {
+        const find = try MyBst.initHeap(ha, 500);
+        defer MyBst.deinitHeap(ha, find);
+        try std.testing.expect(find.delete() == null);
+    }
 }
