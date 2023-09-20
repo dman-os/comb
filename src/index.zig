@@ -174,25 +174,38 @@ fn SwapBTree(
                 };
             }
 
-            fn insert(self: *Node, sa: SwapAllocator, cx: Ctx, item: T) !void {
+            fn insert(self: *Node, sa: SwapAllocator, cx: Ctx, item: T) !?T {
                 switch (self.*) {
                     .leaf => |*node| {
                         for (node.keys.slice(), 0..) |key, ii| {
-                            // FIXME: replace with binary search
-                            if (cmp(cx, item, key) == .lt) {
-                                node.keys.insert(ii, item) catch unreachable;
-                                return;
+                            switch (cmp(cx, item, key)) {
+                                .eq => {
+                                    node.keys.set(ii, item);
+                                    return key;
+                                },
+                                .lt => {
+                                    node.keys.insert(ii, item) catch unreachable;
+                                    return null;
+                                },
+                                .gt => {},
                             }
                         }
                         // it's above all our keys so add it at the end
                         node.keys.append(item) catch unreachable;
+                        return null;
                     },
                     .internal => |*node| {
                         var ii = blk: {
                             for (node.keys.slice(), 0..) |key, ii| {
-                                // FIXME: replace with binary search
-                                if (cmp(cx, item, key) == .lt) {
-                                    break :blk ii;
+                                switch (cmp(cx, item, key)) {
+                                    .eq => {
+                                        node.keys.set(ii, item);
+                                        return key;
+                                    },
+                                    .lt => {
+                                        break :blk ii;
+                                    },
+                                    .gt => {},
                                 }
                             }
                             // it's above all our keys so add it to the last child
@@ -207,7 +220,7 @@ fn SwapBTree(
                         const chosen_ptr = node.children.get(ii);
                         const chosen_child = try Node.swapIn(sa, chosen_ptr);
                         defer sa.swapOut(chosen_ptr);
-                        try chosen_child.insert(sa, cx, item);
+                        return try chosen_child.insert(sa, cx, item);
                     },
                 }
             }
@@ -474,7 +487,7 @@ fn SwapBTree(
                 }
             }
 
-            fn countKeys(self: *const Node, sa: SwapAllocator) !usize {
+            fn size(self: *const Node, sa: SwapAllocator) !usize {
                 switch (self.*) {
                     .leaf => |node| {
                         return node.keys.len;
@@ -484,16 +497,16 @@ fn SwapBTree(
                         for (node.children.slice()) |child_ptr| {
                             const child = try Node.swapIn(sa, child_ptr);
                             defer sa.swapOut(child_ptr);
-                            total += try child.countKeys(sa);
+                            total += try child.size(sa);
                         }
                         return total;
                     },
                 }
             }
 
-            fn print(self: *const Node, sa: SwapAllocator, depth: usize) void {
+            fn print(self: *const Node, sa: SwapAllocator, cur_depth: usize) void {
                 for (self.constKeys().slice(), 0..) |key, kk| {
-                    println("node {} on depth {} key[{}] = {}", .{ @intFromPtr(self), depth, kk, key });
+                    println("node {} on depth {} key[{}] = {}", .{ @intFromPtr(self), cur_depth, kk, key });
                 }
                 switch (self.*) {
                     .internal => |node| {
@@ -526,7 +539,7 @@ fn SwapBTree(
             }
         }
 
-        pub fn insert(self: *Self, cx: Ctx, item: T) !void {
+        pub fn insert(self: *Self, cx: Ctx, item: T) !?T {
             if (self.root) |root_ptr| {
                 const node = try Node.swapIn(self.sa, root_ptr);
                 defer self.sa.swapOut(root_ptr);
@@ -541,14 +554,16 @@ fn SwapBTree(
                     const new_root = try Node.swapIn(self.sa, new_root_ptr);
                     defer self.sa.swapOut(new_root_ptr);
                     new_root.* = Node{ .internal = internal };
-                    try new_root.insert(self.sa, cx, item);
+                    const resp = try new_root.insert(self.sa, cx, item);
 
                     self.root = new_root_ptr;
+                    return resp;
                 } else {
-                    try node.insert(self.sa, cx, item);
+                    return try node.insert(self.sa, cx, item);
                 }
             } else {
                 self.root = try Node.fromSliceLeafPtr(self.sa, &[_]T{item});
+                return null;
             }
         }
 
@@ -589,19 +604,19 @@ fn SwapBTree(
             return null;
         }
 
-        pub fn countKeys(self: *const Self) !usize {
+        pub fn size(self: *const Self) !usize {
             if (self.root) |root_ptr| {
                 const root = try Node.swapIn(self.sa, root_ptr);
                 defer self.sa.swapOut(root_ptr);
-                return try root.countKeys(self.sa);
+                return try root.size(self.sa);
             } else {
                 return 0;
             }
         }
 
-        pub fn count_depth(self: *const Self) !usize {
+        pub fn depth(self: *const Self) !usize {
             if (self.root) |rn| {
-                var depth: usize = 1;
+                var ctr: usize = 1;
                 var ptr = rn;
                 while (true) {
                     const node = try Node.swapIn(self.sa, ptr);
@@ -610,9 +625,9 @@ fn SwapBTree(
                         .internal => |in| ptr = in.children.get(0),
                         else => break,
                     }
-                    depth += 1;
+                    ctr += 1;
                 }
-                return depth;
+                return ctr;
             } else {
                 return 0;
             }
@@ -662,17 +677,20 @@ test "SwapBTree.insert" {
     defer tree.deinit() catch unreachable;
     for (0..10_000) |ii| {
         _ = ii;
-        try tree.insert({}, std.crypto.random.uintAtMost(usize, 10_000));
+        _ = try tree.insert({}, std.crypto.random.uintAtMost(usize, 10_000));
     }
     const items = [_]usize{ 123, 53, 98823, 123, 534, 123, 54, 7264, 21, 0, 23 };
     for (items) |val| {
-        try tree.insert({}, val);
+        _ = try tree.insert({}, val);
     }
 
     // tree.print();
     try std.testing.expect(try tree.find({}, 123) != null);
     try std.testing.expect(try tree.find({}, 0) != null);
     try std.testing.expect(try tree.find({}, 54) != null);
+    const old_count = try tree.size();
+    try std.testing.expect(try tree.insert({}, 54) != null);
+    try std.testing.expectEqual(old_count, try tree.size());
     // try std.testing.expect(tree.find({}, 1223) == null);
 }
 
@@ -710,28 +728,28 @@ test "SwapBTree.delete" {
     defer tree.deinit() catch unreachable;
     const items = "CGMPTXABDEFJKLNOQRSUVYZ";
     for (items) |val| {
-        try tree.insert({}, val);
+        _ = try tree.insert({}, val);
     }
     // tree.print();
-    // try std.testing.expectEqual(@as(usize, 23), tree.countKeys());
-    // try std.testing.expectEqual(@as(usize, 3), tree.count_depth());
+    // try std.testing.expectEqual(@as(usize, 23), tree.size());
+    // try std.testing.expectEqual(@as(usize, 3), tree.depth());
     try std.testing.expect(try tree.find({}, 'F') != null);
     try std.testing.expect(try tree.delete({}, 'F') != null);
     try std.testing.expect(try tree.find({}, 'F') == null);
-    try std.testing.expectEqual(@as(usize, 22), try tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 22), try tree.size());
     try std.testing.expect(try tree.delete({}, 'M') != null);
-    try std.testing.expectEqual(@as(usize, 21), try tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 21), try tree.size());
     try std.testing.expect(try tree.delete({}, 'G') != null);
-    try std.testing.expectEqual(@as(usize, 20), try tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 20), try tree.size());
     try std.testing.expect(try tree.delete({}, 'D') != null);
-    try std.testing.expectEqual(@as(usize, 19), try tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 19), try tree.size());
     try std.testing.expect(try tree.delete({}, 'B') != null);
-    try std.testing.expectEqual(@as(usize, 18), try tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 18), try tree.size());
     const del_items = "CPTXAEJKLNOQRSUVYZ";
     for (del_items) |val| {
         try std.testing.expect(try tree.delete({}, val) != null);
     }
-    try std.testing.expect(try tree.count_depth() == 0);
+    try std.testing.expect(try tree.depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
 }
 
@@ -1113,7 +1131,7 @@ fn BTree(
                 }
             }
 
-            fn countKeys(self: *const Node) usize {
+            fn size(self: *const Node) usize {
                 switch (self.*) {
                     .leaf => |node| {
                         return node.keys.len;
@@ -1121,16 +1139,16 @@ fn BTree(
                     .internal => |node| {
                         var total: usize = node.keys.len;
                         for (node.children.slice()) |child| {
-                            total += child.countKeys();
+                            total += child.size();
                         }
                         return total;
                     },
                 }
             }
 
-            fn print(self: *const Node, depth: usize) void {
+            fn print(self: *const Node, cur_depth: usize) void {
                 for (self.constKeys().slice(), 0..) |key, kk| {
-                    println("node {} on depth {} key[{}] = {}", .{ @intFromPtr(self), depth, kk, key });
+                    println("node {} on depth {} key[{}] = {}", .{ @intFromPtr(self), cur_depth, kk, key });
                 }
                 switch (self.*) {
                     .internal => |node| {
@@ -1210,26 +1228,26 @@ fn BTree(
             return null;
         }
 
-        pub fn countKeys(self: *const Self) usize {
+        pub fn size(self: *const Self) usize {
             if (self.root) |node| {
-                return node.countKeys();
+                return node.size();
             } else {
                 return 0;
             }
         }
 
-        pub fn count_depth(self: *const Self) usize {
+        pub fn depth(self: *const Self) usize {
             if (self.root) |rn| {
-                var depth: usize = 1;
+                var ctr: usize = 1;
                 var node = rn;
                 while (true) {
                     switch (node.*) {
                         .internal => |in| node = in.children.get(0),
                         else => break,
                     }
-                    depth += 1;
+                    ctr += 1;
                 }
-                return depth;
+                return ctr;
             } else {
                 return 0;
             }
@@ -1302,25 +1320,25 @@ test "BTree.delete" {
         try tree.insert({}, val);
     }
     // tree.print();
-    try std.testing.expectEqual(@as(usize, 23), tree.countKeys());
-    try std.testing.expectEqual(@as(usize, 3), tree.count_depth());
+    try std.testing.expectEqual(@as(usize, 23), tree.size());
+    try std.testing.expectEqual(@as(usize, 3), tree.depth());
     try std.testing.expect(tree.find({}, 'F') != null);
     try std.testing.expect(tree.delete({}, 'F') != null);
     try std.testing.expect(tree.find({}, 'F') == null);
-    try std.testing.expectEqual(@as(usize, 22), tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 22), tree.size());
     try std.testing.expect(tree.delete({}, 'M') != null);
-    try std.testing.expectEqual(@as(usize, 21), tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 21), tree.size());
     try std.testing.expect(tree.delete({}, 'G') != null);
-    try std.testing.expectEqual(@as(usize, 20), tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 20), tree.size());
     try std.testing.expect(tree.delete({}, 'D') != null);
-    try std.testing.expectEqual(@as(usize, 19), tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 19), tree.size());
     try std.testing.expect(tree.delete({}, 'B') != null);
-    try std.testing.expectEqual(@as(usize, 18), tree.countKeys());
+    try std.testing.expectEqual(@as(usize, 18), tree.size());
     const del_items = "CPTXAEJKLNOQRSUVYZ";
     for (del_items) |val| {
         try std.testing.expect(tree.delete({}, val) != null);
     }
-    try std.testing.expect(tree.count_depth() == 0);
+    try std.testing.expect(tree.depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
 }
 

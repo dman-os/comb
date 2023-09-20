@@ -5,6 +5,14 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
+    - [ ] Queries
+    - [ ] B-Tree implementation for field indices
+        - [x] BSTree
+        - [x] SwapBTree
+    - [ ] Parser
+      - [ ] fwd slash escaping
+      - [x] whitespace in double quote
+    - [ ] Lru cache resizing: use large cache during initial crawling and downsize afterwards
     - [x] Database modification operations (including FANotify <-> Database integration & test suite)
       - [x] Created
       - [x] Modified
@@ -13,17 +21,10 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
       - [x] Moved
       - [x] Moved (Dir)
       - [x] ~~`tmpfs` alternative for testing~~ Issues with `tmpfs` now fixed
-    - [ ] Queries
-    - [ ] B-Tree implementation for field indices
-        - [x] BSTree
     - [x] `std.Thread.Condition` based `Queue`
       - A single CPU core is still saturated when it's flooded with events. Investigate what's making this happen
         - Crossed fingers it won't be the syscalls (can't be!)
         - My current suspicion is that it's the db query for the parent of the target entry that's spiking the CPU
-    - [ ] Parser
-      - [ ] fwd slash escaping
-      - [x] whitespace in double quote
-    - [ ] Lru cache resizing: use large cache during initial index and downsize afterwards
 
 - [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
 - [ ] Make sure `rename` covers all `moved_to` cases
