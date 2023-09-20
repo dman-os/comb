@@ -17,6 +17,101 @@ const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 
+fn SwapBTreeMap(
+    comptime K: type,
+    comptime V: type,
+    comptime Ctx: type,
+    comptime cmp: fn (cx: Ctx, a: K, b: K) std.math.Order,
+    comptime order: usize,
+) type {
+    return struct {
+        const Self = @This();
+        pub const Entry = struct { key: K, val: V };
+        const Tree = SwapBTree(
+            Entry,
+            Ctx,
+            struct {
+                fn entry_cmp(cx: Ctx, a: Entry, b: Entry) std.math.Order {
+                    return cmp(cx, a.key, b.key);
+                }
+            }.entry_cmp,
+            order,
+        );
+
+        tree: Tree,
+
+        pub fn init(sa: SwapAllocator) Self {
+            return .{ .tree = Tree.init(sa) };
+        }
+
+        pub fn deinit(self: *Self) !void {
+            try self.tree.deinit();
+        }
+
+        pub fn set(self: *Self, ctx: Ctx, key: K, val: V) !?V {
+            if (try self.tree.insert(ctx, .{ .key = key, .val = val })) |old| {
+                return old.val;
+            }
+            return null;
+        }
+
+        pub fn get(self: *const Self, ctx: Ctx, key: K) !?V {
+            if (try self.tree.find(ctx, .{ .key = key, .val = undefined })) |find| {
+                return find.val;
+            }
+            return null;
+        }
+
+        pub fn delete(self: *Self, ctx: Ctx, key: K) !?V {
+            if (try self.tree.remove(ctx, .{ .key = key, .val = undefined })) |find| {
+                return find.val;
+            }
+            return null;
+        }
+
+        pub fn size(self: *const Self) !usize {
+            return try self.tree.size();
+        }
+    };
+}
+
+test "SwapBTreeMap" {
+    const page_size = std.mem.page_size;
+    const MyMap = SwapBTreeMap(usize, []const u8, void, struct {
+        fn cmp(cx: void, a:usize, b: usize) std.math.Order{
+            _ = cx;
+            return std.math.order(a,b);
+        }
+    }.cmp,12);
+    const ha = std.testing.allocator;
+    var mmap_pager = try mod_mmap.MmapPager.init(ha, "/tmp/SwapBTreeMap.insert", .{
+        .page_size = page_size,
+    });
+    defer mmap_pager.deinit();
+
+    var lru = try mod_mmap.LRUSwapCache.init(ha, mmap_pager.pager(), 1);
+    defer lru.deinit();
+    var pager = lru.pager();
+
+    var msa = mod_mmap.PagingSwapAllocator(.{}).init(ha, pager);
+    defer msa.deinit();
+    var sa = msa.allocator();
+
+    var map = MyMap.init(sa);
+    defer map.deinit() catch unreachable;
+
+    try std.testing.expect(try map.set({}, 1, "one") == null);
+    try std.testing.expect(try map.set({}, 1, "wan") != null);
+    try std.testing.expect(try map.set({}, 1, "uno") != null);
+    try std.testing.expect(try map.set({}, 1, "and") != null);
+    try std.testing.expect(try map.set({}, 2, "tew") == null);
+    try std.testing.expect(try map.set({}, 3, "tree") == null);
+    try std.testing.expect(try map.set({}, 4, "for") == null);
+    try std.testing.expect(try map.set({}, 5, "fif") == null);
+    try std.testing.expect(try map.set({}, 6, "sex") == null);
+    try std.testing.expectEqual(@as(usize, 6), try map.size());
+}
+
 // const BTreeConfig = struct {
 //     order: usize = 12,
 // };
@@ -225,7 +320,7 @@ fn SwapBTree(
                 }
             }
 
-            fn delete(self: *Node, sa: SwapAllocator, cx: Ctx, needle: T) !?T {
+            fn remove(self: *Node, sa: SwapAllocator, cx: Ctx, needle: T) !?T {
                 switch (self.*) {
                     .leaf => |*node| {
                         for (node.keys.slice(), 0..) |key, ii| {
@@ -249,7 +344,7 @@ fn SwapBTree(
                                         defer sa.swapOut(child_ptr);
                                         // return node.keys.orderedRemove(ii);
                                         if (child.len() >= order) {
-                                            node.keys.set(ii, try child.deleteMax(sa, cx));
+                                            node.keys.set(ii, try child.removeMax(sa, cx));
                                             return key;
                                         }
 
@@ -258,15 +353,15 @@ fn SwapBTree(
                                         if (child_b.len() >= order) {
                                             // NOTE: we only defer swapOut in this block
                                             defer sa.swapOut(child_ptr);
-                                            node.keys.set(ii, try child_b.deleteMin(sa, cx));
+                                            node.keys.set(ii, try child_b.removeMin(sa, cx));
                                             return key;
                                         }
 
                                         // NOTE: we always swap out before merge since it'll free the mergee
                                         sa.swapOut(child_ptr);
                                         try child.merge(sa, node.keys.orderedRemove(ii), node.children.orderedRemove(ii + 1));
-                                        // FIXME: why does the book rec recursive delete here instead of just excluding needle from the merge
-                                        return try child.delete(sa, cx, needle);
+                                        // FIXME: why does the book rec recursive remove here instead of just excluding needle from the merge
+                                        return try child.remove(sa, cx, needle);
                                     },
                                     .lt => break :blk ii,
                                     .gt => {},
@@ -297,7 +392,7 @@ fn SwapBTree(
                                         },
                                         else => {},
                                     }
-                                    return try chosen_child.delete(sa, cx, needle);
+                                    return try chosen_child.remove(sa, cx, needle);
                                 } else if (has_right) {
                                     const right_ptr = node.children.get(child_ii + 1);
                                     const right = try Node.swapIn(sa, right_ptr);
@@ -310,7 +405,7 @@ fn SwapBTree(
                                         // swap out as `merge` will deinit it
                                         swap_out_child = false;
                                         try left.merge(sa, node.keys.orderedRemove(child_ii - 1), node.children.orderedRemove(child_ii));
-                                        return try left.delete(sa, cx, needle);
+                                        return try left.remove(sa, cx, needle);
                                     }
                                 }
                             }
@@ -330,16 +425,16 @@ fn SwapBTree(
                                         },
                                         else => {},
                                     }
-                                    return try chosen_child.delete(sa, cx, needle);
+                                    return try chosen_child.remove(sa, cx, needle);
                                 }
                             }
                         }
-                        return try chosen_child.delete(sa, cx, needle);
+                        return try chosen_child.remove(sa, cx, needle);
                     },
                 }
             }
 
-            fn deleteMin(self: *Node, sa: SwapAllocator, cx: Ctx) !T {
+            fn removeMin(self: *Node, sa: SwapAllocator, cx: Ctx) !T {
                 switch (self.*) {
                     .leaf => |*node| {
                         return node.keys.orderedRemove(0);
@@ -370,12 +465,12 @@ fn SwapBTree(
                                 try chosen_child.merge(sa, node.keys.orderedRemove(0), node.children.orderedRemove(1));
                             }
                         }
-                        return try chosen_child.deleteMin(sa, cx);
+                        return try chosen_child.removeMin(sa, cx);
                     },
                 }
             }
 
-            fn deleteMax(self: *Node, sa: SwapAllocator, cx: Ctx) !T {
+            fn removeMax(self: *Node, sa: SwapAllocator, cx: Ctx) !T {
                 switch (self.*) {
                     .leaf => |*node| {
                         return node.keys.pop();
@@ -406,11 +501,11 @@ fn SwapBTree(
                                 swap_out_child = false;
                                 // both are under order, merge them
                                 try left.merge(sa, node.keys.pop(), node.children.pop());
-                                // NOTE: we delete from left after the merge
-                                return try left.deleteMax(sa, cx);
+                                // NOTE: we remove from left after the merge
+                                return try left.removeMax(sa, cx);
                             }
                         }
-                        return try chosen_child.deleteMax(sa, cx);
+                        return try chosen_child.removeMax(sa, cx);
                     },
                 }
             }
@@ -580,13 +675,13 @@ fn SwapBTree(
             return null;
         }
 
-        pub fn delete(self: *Self, cx: Ctx, needle: T) !?T {
+        pub fn remove(self: *Self, cx: Ctx, needle: T) !?T {
             if (self.root) |root_ptr| {
                 var deinit_root = false;
                 defer if (deinit_root) Node.deinitUnchecked(self.sa, root_ptr);
                 const root = try Node.swapIn(self.sa, root_ptr);
                 defer self.sa.swapOut(root_ptr);
-                if (try root.delete(self.sa, cx, needle)) |found| {
+                if (try root.remove(self.sa, cx, needle)) |found| {
                     switch (root.*) {
                         .leaf => |*node| if (node.keys.len == 0) {
                             deinit_root = true;
@@ -694,7 +789,7 @@ test "SwapBTree.insert" {
     // try std.testing.expect(tree.find({}, 1223) == null);
 }
 
-test "SwapBTree.delete" {
+test "SwapBTree.remove" {
     const page_size = std.mem.page_size;
     const MyBtree = SwapBTree(
         usize,
@@ -734,20 +829,20 @@ test "SwapBTree.delete" {
     // try std.testing.expectEqual(@as(usize, 23), tree.size());
     // try std.testing.expectEqual(@as(usize, 3), tree.depth());
     try std.testing.expect(try tree.find({}, 'F') != null);
-    try std.testing.expect(try tree.delete({}, 'F') != null);
+    try std.testing.expect(try tree.remove({}, 'F') != null);
     try std.testing.expect(try tree.find({}, 'F') == null);
     try std.testing.expectEqual(@as(usize, 22), try tree.size());
-    try std.testing.expect(try tree.delete({}, 'M') != null);
+    try std.testing.expect(try tree.remove({}, 'M') != null);
     try std.testing.expectEqual(@as(usize, 21), try tree.size());
-    try std.testing.expect(try tree.delete({}, 'G') != null);
+    try std.testing.expect(try tree.remove({}, 'G') != null);
     try std.testing.expectEqual(@as(usize, 20), try tree.size());
-    try std.testing.expect(try tree.delete({}, 'D') != null);
+    try std.testing.expect(try tree.remove({}, 'D') != null);
     try std.testing.expectEqual(@as(usize, 19), try tree.size());
-    try std.testing.expect(try tree.delete({}, 'B') != null);
+    try std.testing.expect(try tree.remove({}, 'B') != null);
     try std.testing.expectEqual(@as(usize, 18), try tree.size());
     const del_items = "CPTXAEJKLNOQRSUVYZ";
     for (del_items) |val| {
-        try std.testing.expect(try tree.delete({}, val) != null);
+        try std.testing.expect(try tree.remove({}, val) != null);
     }
     try std.testing.expect(try tree.depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
@@ -924,7 +1019,7 @@ fn BTree(
                 }
             }
 
-            fn delete(self: *Node, ha: Allocator, cx: Ctx, needle: T) ?T {
+            fn remove(self: *Node, ha: Allocator, cx: Ctx, needle: T) ?T {
                 switch (self.*) {
                     .leaf => |*node| {
                         for (node.keys.slice(), 0..) |key, ii| {
@@ -945,15 +1040,15 @@ fn BTree(
                                     .eq => {
                                         // return node.keys.orderedRemove(ii);
                                         if (node.children.get(ii).len() >= order) {
-                                            node.keys.set(ii, node.children.get(ii).deleteMax(ha, cx));
+                                            node.keys.set(ii, node.children.get(ii).removeMax(ha, cx));
                                             return key;
                                         } else if (node.children.get(ii + 1).len() >= order) {
-                                            node.keys.set(ii, node.children.get(ii + 1).deleteMin(ha, cx));
+                                            node.keys.set(ii, node.children.get(ii + 1).removeMin(ha, cx));
                                             return key;
                                         } else {
                                             node.children.get(ii).merge(ha, node.keys.orderedRemove(ii), node.children.orderedRemove(ii + 1));
-                                            // FIXME: why does the book rec recursive delete here instead of just excluding needle from the merge
-                                            return node.children.get(ii).delete(ha, cx, needle);
+                                            // FIXME: why does the book rec recursive remove here instead of just excluding needle from the merge
+                                            return node.children.get(ii).remove(ha, cx, needle);
                                         }
                                     },
                                     .lt => break :blk ii,
@@ -980,14 +1075,14 @@ fn BTree(
                                         },
                                         else => {},
                                     }
-                                    return chosen_child.delete(ha, cx, needle);
+                                    return chosen_child.remove(ha, cx, needle);
                                 } else if (has_right) {
                                     const right = node.children.get(child_ii + 1);
                                     // if both siblings and chosen are under order
                                     if (right.len() < order) {
                                         // TODO: what's the point of checking right here? it doesn't get modified
                                         left.merge(ha, node.keys.orderedRemove(child_ii - 1), node.children.orderedRemove(child_ii));
-                                        return left.delete(ha, cx, needle);
+                                        return left.remove(ha, cx, needle);
                                     }
                                 }
                             }
@@ -1005,16 +1100,16 @@ fn BTree(
                                         },
                                         else => {},
                                     }
-                                    return chosen_child.delete(ha, cx, needle);
+                                    return chosen_child.remove(ha, cx, needle);
                                 }
                             }
                         }
-                        return chosen_child.delete(ha, cx, needle);
+                        return chosen_child.remove(ha, cx, needle);
                     },
                 }
             }
 
-            fn deleteMin(self: *Node, ha: Allocator, cx: Ctx) T {
+            fn removeMin(self: *Node, ha: Allocator, cx: Ctx) T {
                 switch (self.*) {
                     .leaf => |*node| {
                         return node.keys.orderedRemove(0);
@@ -1040,12 +1135,12 @@ fn BTree(
                                 chosen_child.merge(ha, node.keys.orderedRemove(0), node.children.orderedRemove(1));
                             }
                         }
-                        return chosen_child.deleteMin(ha, cx);
+                        return chosen_child.removeMin(ha, cx);
                     },
                 }
             }
 
-            fn deleteMax(self: *Node, ha: Allocator, cx: Ctx) T {
+            fn removeMax(self: *Node, ha: Allocator, cx: Ctx) T {
                 switch (self.*) {
                     .leaf => |*node| {
                         return node.keys.pop();
@@ -1069,11 +1164,11 @@ fn BTree(
                             } else {
                                 // both are under order, merge them
                                 left.merge(ha, node.keys.pop(), node.children.pop());
-                                // NOTE: we delete from left after the merge
-                                return left.deleteMax(ha, cx);
+                                // NOTE: we remove from left after the merge
+                                return left.removeMax(ha, cx);
                             }
                         }
-                        return chosen_child.deleteMax(ha, cx);
+                        return chosen_child.removeMax(ha, cx);
                     },
                 }
             }
@@ -1208,9 +1303,9 @@ fn BTree(
             return null;
         }
 
-        pub fn delete(self: *Self, cx: Ctx, needle: T) ?T {
+        pub fn remove(self: *Self, cx: Ctx, needle: T) ?T {
             if (self.root) |root| {
-                if (root.delete(self.ha, cx, needle)) |found| {
+                if (root.remove(self.ha, cx, needle)) |found| {
                     switch (root.*) {
                         .leaf => |*node| if (node.keys.len == 0) {
                             defer root.deinit(self.ha);
@@ -1296,7 +1391,7 @@ test "BTree.insert" {
     // try std.testing.expect(tree.find({}, 1223) == null);
 }
 
-test "BTree.delete" {
+test "BTree.remove" {
     const MyBtree = BTree(
         u8,
         void,
@@ -1323,20 +1418,20 @@ test "BTree.delete" {
     try std.testing.expectEqual(@as(usize, 23), tree.size());
     try std.testing.expectEqual(@as(usize, 3), tree.depth());
     try std.testing.expect(tree.find({}, 'F') != null);
-    try std.testing.expect(tree.delete({}, 'F') != null);
+    try std.testing.expect(tree.remove({}, 'F') != null);
     try std.testing.expect(tree.find({}, 'F') == null);
     try std.testing.expectEqual(@as(usize, 22), tree.size());
-    try std.testing.expect(tree.delete({}, 'M') != null);
+    try std.testing.expect(tree.remove({}, 'M') != null);
     try std.testing.expectEqual(@as(usize, 21), tree.size());
-    try std.testing.expect(tree.delete({}, 'G') != null);
+    try std.testing.expect(tree.remove({}, 'G') != null);
     try std.testing.expectEqual(@as(usize, 20), tree.size());
-    try std.testing.expect(tree.delete({}, 'D') != null);
+    try std.testing.expect(tree.remove({}, 'D') != null);
     try std.testing.expectEqual(@as(usize, 19), tree.size());
-    try std.testing.expect(tree.delete({}, 'B') != null);
+    try std.testing.expect(tree.remove({}, 'B') != null);
     try std.testing.expectEqual(@as(usize, 18), tree.size());
     const del_items = "CPTXAEJKLNOQRSUVYZ";
     for (del_items) |val| {
-        try std.testing.expect(tree.delete({}, val) != null);
+        try std.testing.expect(tree.remove({}, val) != null);
     }
     try std.testing.expect(tree.depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
@@ -1391,7 +1486,7 @@ pub fn BST(
             }
         }
 
-        pub fn delete(self: *Self) ?*Self {
+        pub fn remove(self: *Self) ?*Self {
             defer self.parent = null;
             defer self.right_child = null;
             defer self.left_child = null;
@@ -1558,17 +1653,17 @@ test "BST.insert" {
     {
         const find = tree.find({}, 23) orelse unreachable;
         defer MyBst.deinitHeap(ha, find);
-        try std.testing.expectEqual(@as(usize, 21), (find.delete() orelse unreachable).item);
+        try std.testing.expectEqual(@as(usize, 21), (find.remove() orelse unreachable).item);
     }
     {
         const find = tree;
         defer MyBst.deinitHeap(ha, find);
-        tree = find.delete() orelse unreachable;
+        tree = find.remove() orelse unreachable;
         try std.testing.expectEqual(@as(usize, 534), tree.item);
     }
     {
         const find = try MyBst.initHeap(ha, 500);
         defer MyBst.deinitHeap(ha, find);
-        try std.testing.expect(find.delete() == null);
+        try std.testing.expect(find.remove() == null);
     }
 }
