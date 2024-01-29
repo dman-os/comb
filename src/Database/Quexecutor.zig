@@ -27,6 +27,8 @@ const Entry = Database.Entry;
 const gram_len = Database._gram_len;
 const Gram = Database._Gram;
 
+const mod_tracy = @import("../tracy.zig");
+
 pub const Error = error{InvalidQuery};
 const Plan = struct {
     const NodeId = usize;
@@ -62,6 +64,8 @@ const Plan = struct {
     }
 
     fn build(self: *@This(), ha7r: Allocator, clause: *const Query.Filter.Clause) !void {
+        const trace = mod_tracy.trace(@src());
+        defer trace.end();
         self.nodes.clearRetainingCapacity();
         // don't rely on the return pointer since it might be
         // invalid when sub nodes resize the arraylist
@@ -197,6 +201,8 @@ pub fn deinit(self: *@This()) void {
 const ExecErr = Allocator.Error || mod_mmap.Pager.SwapInError;
 
 fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]Id {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     // const IdSet = std.AutoHashMapUnmanaged(Id, void);
     // const IdSet = std.ArrayListUnmanaged(Id, void);
     const IdSet = std.AutoHashMap(Id, void);
@@ -287,9 +293,10 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]I
             var result = std.ArrayList(Id).init(ha7r);
             defer result.deinit();
             for (parents) |id| {
-                if (self.db.childOfIndex.get(id)) |children| {
-                    var it = children.keyIterator();
-                    while (it.next()) |child| {
+                if (try self.db.childOfIndex.get(self.db.sa7r, {}, id)) |children| {
+                    var it = try children.iterator(self.db.ha7r,self.db.sa7r);
+                    defer it.deinit();
+                    while (try it.next()) |child| {
                         try result.append(child.*);
                     }
                 }
@@ -303,9 +310,10 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]I
             var result = std.ArrayList(Id).init(ha7r);
             defer result.deinit();
             for (ancestors) |id| {
-                if (self.db.descendantOfIndex.get(id)) |descendants| {
-                    var it = descendants.keyIterator();
-                    while (it.next()) |child| {
+                if (try self.db.descendantOfIndex.get(self.db.sa7r, {}, id)) |descendants| {
+                    var it = try descendants.iterator(self.db.ha7r, self.db.sa7r);
+                    defer it.deinit();
+                    while (try it.next()) |child| {
                         try result.append(child.*);
                     }
                 }
@@ -318,6 +326,8 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]I
 }
 
 pub fn query(self: *@This(), input: *const Query) ![]const Id {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     // println("querying: query={}", .{ input });
     if (input.filter) |filter| {
         defer self.plan.clear();

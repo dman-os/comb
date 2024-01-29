@@ -263,7 +263,7 @@ const FanotifyEventMapper = struct {
             }
         } else |err| {
             switch (err) {
-                error.DirIsNull => {
+                error.DirIsNull, error.NeutrinoDuringMeta => {
                     std.log.debug("error {} processing event {}", .{ err, event });
                 },
                 else => {
@@ -375,7 +375,10 @@ const FanotifyEventMapper = struct {
         _ = self;
         const name = event.name orelse return;
         const dir = event.dir orelse return;
-        std.debug.assert(mod_treewalking.entryFromAbsolutePath2(dir, name) == std.os.OpenError.FileNotFound);
+        const res = mod_treewalking.entryFromAbsolutePath2(dir, name);
+        if (res != std.os.OpenError.FileNotFound) {
+            std.log.err("unexpected result asserting neutrino: {!}", .{res});
+        }
     }
 };
 
@@ -416,9 +419,8 @@ const FsEventWorker = struct {
                 defer self.ha7r.destroy(node);
                 defer node.data.deinit(self.ha7r);
                 self.handleEvent(node.data) catch |err| {
-                    var str = std.fmt.allocPrint(self.ha7r, "error on " ++ @typeName(FsEventWorker) ++ ".handleEvent: {}", .{err}) catch @panic("OutOfMemory");
-                    defer self.ha7r.free(str);
-                    @panic(str);
+                    std.log.err("error on " ++ @typeName(FsEventWorker) ++ ".handleEvent {} on evt {}", .{ err, node.data });
+                    // @panic(str);
                 };
             } else |_| {
                 // _ = err;

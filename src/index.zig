@@ -17,6 +17,8 @@ const Ptr = mod_mmap.SwapAllocator.Ptr;
 
 const mod_plist = @import("plist.zig");
 
+const mod_tracy = @import("tracy.zig");
+
 pub fn orderToFillPageSwapBTreeMap(
     comptime K: type,
     comptime V: type,
@@ -48,6 +50,8 @@ pub fn SwapBTreeMap(
 ) type {
     return struct {
         const Self = @This();
+        // FIXME: this will be memory inefficent due to byte alignment
+        // consider building Map funcitonality into the core tree
         pub const Entry = struct { key: K, val: V };
         const Tree = SwapBTree(
             Entry,
@@ -60,10 +64,10 @@ pub fn SwapBTreeMap(
             order,
         );
 
-        tree: Tree,
+        tree: Tree = .{},
 
         pub fn init() Self {
-            return .{ .tree = Tree.init() };
+            return .{};
         }
 
         pub fn deinit(self: *Self, sa: SwapAllocator) !void {
@@ -94,6 +98,32 @@ pub fn SwapBTreeMap(
         pub fn size(self: *const Self, sa: SwapAllocator) !usize {
             return try self.tree.size(sa);
         }
+
+        const EntryPtr = struct {
+            inner: Tree.ValPtr,
+            key: K,
+            val_ptr: *V,
+            found_existing: bool,
+
+            pub fn swapOut(self: *@This()) void {
+                self.inner.swapOut();
+            }
+        };
+
+        pub fn getOrPut(self: *Self, sa: SwapAllocator, cx: Ctx, key: K) !EntryPtr {
+            // insert or replace an epmty Entry
+            const inner = try self.tree.insertMut(sa, cx, .{ .key = key, .val = undefined });
+            // if we replaced something, put it back but using the pointer (no tree traversal)
+            if (inner.previous) |previous| {
+                inner.inner.val_ptr.val = previous.val;
+            }
+            return .{
+                .inner = inner.inner,
+                .key = key,
+                .val_ptr = &inner.inner.val_ptr.val,
+                .found_existing = inner.previous != null,
+            };
+        }
     };
 }
 
@@ -106,9 +136,11 @@ test "SwapBTreeMap" {
         }
     }.cmp, 12);
     const ha = std.testing.allocator;
-    var mmap_pager = try mod_mmap.MmapPager.init(ha, "/tmp/SwapBTreeMap.insert", .{
-        .page_size = page_size,
-    });
+    var mmap_pager = try mod_mmap.MmapPager.init(
+        ha,
+        "/tmp/SwapBTreeMap",
+        .{ .page_size = page_size },
+    );
     defer mmap_pager.deinit();
 
     var lru = try mod_mmap.LRUSwapCache.init(ha, mmap_pager.pager(), 1);
@@ -123,15 +155,34 @@ test "SwapBTreeMap" {
     defer map.deinit(sa) catch unreachable;
 
     try std.testing.expect(try map.set(sa, {}, 1, "one") == null);
+    try std.testing.expectEqualSlices(u8, "one", try map.get(sa, {}, 1) orelse unreachable);
     try std.testing.expect(try map.set(sa, {}, 1, "wan") != null);
     try std.testing.expect(try map.set(sa, {}, 1, "uno") != null);
     try std.testing.expect(try map.set(sa, {}, 1, "and") != null);
+    try std.testing.expectEqualSlices(u8, "and", try map.get(sa, {}, 1) orelse unreachable);
     try std.testing.expect(try map.set(sa, {}, 2, "tew") == null);
+    try std.testing.expectEqualSlices(u8, "tew", try map.get(sa, {}, 2) orelse unreachable);
     try std.testing.expect(try map.set(sa, {}, 3, "tree") == null);
     try std.testing.expect(try map.set(sa, {}, 4, "for") == null);
     try std.testing.expect(try map.set(sa, {}, 5, "fif") == null);
     try std.testing.expect(try map.set(sa, {}, 6, "sex") == null);
     try std.testing.expectEqual(@as(usize, 6), try map.size(sa));
+
+    {
+        var kv = try map.getOrPut(sa, {}, 7);
+        defer kv.swapOut();
+        try std.testing.expect(!kv.found_existing);
+        kv.val_ptr.* = "s7n";
+    }
+    try std.testing.expectEqualSlices(u8, "s7n", try map.get(sa, {}, 7) orelse unreachable);
+    {
+        var kv = try map.getOrPut(sa, {}, 5);
+        defer kv.swapOut();
+        try std.testing.expect(kv.found_existing);
+        try std.testing.expectEqualSlices(u8, "fif", kv.val_ptr.*);
+        kv.val_ptr.* = "viv";
+    }
+    try std.testing.expectEqualSlices(u8, "viv", try map.get(sa, {}, 5) orelse unreachable);
 }
 
 pub fn orderToFillPageSwapBTree(comptime T: type, page_size: usize) usize {
@@ -185,6 +236,40 @@ pub fn SwapBTree(
         const Self = @This();
         const KeyArray = std.BoundedArray(T, (2 * order) - 1);
 
+        const ValPtr = struct {
+            // THIS IS PRIVATE
+            val_ptr: *T,
+            node_ptr: NodePtr,
+            cx: Ctx,
+            sa: SwapAllocator,
+
+            pub fn get(self: *const @This()) T {
+                return self.val_ptr.*;
+            }
+
+            // this asserts the replacement equals the old value and returns the old value
+            pub fn set(self: *const @This(), replacement: T) T {
+                const old = self.val_ptr.*;
+                std.debug.assert(cmp(self.cx, replacement, old) == .eq);
+                self.val_ptr.* = replacement;
+                return old;
+            }
+
+            pub fn swapOut(self: *@This()) void {
+                self.node_ptr.swapOut(self.sa);
+            }
+        };
+
+        const InsertResult = struct {
+            inner: ValPtr,
+            // this will be Some if a key was replaced
+            previous: ?T,
+
+            pub fn swapOut(self: *@This()) void {
+                self.inner.swapOut();
+            }
+        };
+
         const Leaf = struct {
             keys: KeyArray,
 
@@ -215,23 +300,26 @@ pub fn SwapBTree(
                 return .{ .leaf = nodenptr.ptr };
             }
 
-            fn insert(self: *Leaf, cx: Ctx, item: T) !?T {
+            fn insert(self: *Leaf, cx: Ctx, item: T) !struct {
+                usize,
+                ?T,
+            } {
                 for (self.keys.slice(), 0..) |key, ii| {
                     switch (cmp(cx, item, key)) {
                         .eq => {
                             self.keys.set(ii, item);
-                            return key;
+                            return .{ ii, key };
                         },
                         .lt => {
                             self.keys.insert(ii, item) catch unreachable;
-                            return null;
+                            return .{ ii, null };
                         },
                         .gt => {},
                     }
                 }
                 // it's above all our keys so add it at the end
                 self.keys.append(item) catch unreachable;
-                return null;
+                return .{ self.keys.len - 1, null };
             }
 
             fn remove(self: *@This(), cx: Ctx, needle: T) !?T {
@@ -408,18 +496,25 @@ pub fn SwapBTree(
                 return .{ .internal = nodenptr.ptr };
             }
 
+            const InternalInsertResult = union(enum) { child: InsertResult, self: struct {
+                usize,
+                ?T,
+            } };
+
             fn insert(
                 self: *@This(),
                 sa: SwapAllocator,
                 cx: Ctx,
                 item: T,
-            ) SwapAllocator.Error!?T {
+            ) SwapAllocator.Error!InternalInsertResult {
+                const trace = mod_tracy.trace(@src());
+                defer trace.end();
                 var ii = blk: {
                     for (self.keys.slice(), 0..) |key, ii| {
                         switch (cmp(cx, item, key)) {
                             .eq => {
                                 self.keys.set(ii, item);
-                                return key;
+                                return .{ .self = .{ ii, key } };
                             },
                             .lt => {
                                 break :blk ii;
@@ -437,9 +532,7 @@ pub fn SwapBTree(
                     }
                 }
                 const chosen_ptr = self.children.get(ii);
-                var chosen_child = try chosen_ptr.swapIn(sa);
-                defer chosen_ptr.swapOut(sa);
-                return try chosen_child.insert(sa, cx, item);
+                return .{ .child = try chosen_ptr.insert(sa, cx, item) };
             }
 
             fn splitChildIfFull(self: *@This(), sa: SwapAllocator, child_ii: usize) !bool {
@@ -498,6 +591,8 @@ pub fn SwapBTree(
                 cx: Ctx,
                 needle: T,
             ) SwapAllocator.Error!?T {
+                const trace = mod_tracy.trace(@src());
+                defer trace.end();
                 const child_ii = blk: {
                     for (self.keys.slice(), 0..) |key, ii| {
                         switch (cmp(cx, needle, key)) {
@@ -674,12 +769,48 @@ pub fn SwapBTree(
                 }
             }
 
+            fn insert(self: NodePtr, sa: SwapAllocator, cx: Ctx, needle: T) !InsertResult {
+                return switch (try self.swapIn(sa)) {
+                    .leaf => |leaf| {
+                        const val = try leaf.insert(cx, needle);
+                        return .{
+                            .inner = .{
+                                .val_ptr = &leaf.keys.slice()[val[0]],
+                                .node_ptr = self,
+                                .sa = sa,
+                                .cx = cx,
+                            },
+                            .previous = val[1],
+                        };
+                    },
+                    .internal => |int| {
+                        switch (try int.insert(sa, cx, needle)) {
+                            .self => |val| return .{
+                                .inner = .{
+                                    .val_ptr = &int.keys.slice()[val[0]],
+                                    .node_ptr = self,
+                                    .sa = sa,
+                                    .cx = cx,
+                                },
+                                .previous = val[1],
+                            },
+                            .child => |val| {
+                                defer self.swapOut(sa);
+                                return val;
+                            },
+                        }
+                    },
+                };
+            }
+
             /// This returns the node containing the key and the index of the key
             fn find(self: NodePtr, sa: SwapAllocator, cx: Ctx, needle: T) !?struct {
                 usize,
                 Node,
                 NodePtr,
             } {
+                const trace = mod_tracy.trace(@src());
+                defer trace.end();
                 const in_mem = try self.swapIn(sa);
                 var swap_out = true;
                 defer if (swap_out) self.swapOut(sa);
@@ -869,14 +1000,9 @@ pub fn SwapBTree(
                 }
             }
 
-            fn insert(self: *Node, sa: SwapAllocator, cx: Ctx, needle: T) !?T {
-                return switch (self.*) {
-                    .leaf => |leaf| try leaf.insert(cx, needle),
-                    .internal => |int| try int.insert(sa, cx, needle),
-                };
-            }
-
             fn size(self: *const Node, sa: SwapAllocator) !usize {
+                const trace = mod_tracy.trace(@src());
+                defer trace.end();
                 switch (self.*) {
                     .leaf => |node| {
                         return node.keys.len;
@@ -978,52 +1104,71 @@ pub fn SwapBTree(
             }
         }
 
-        pub fn insert(self: *Self, sa: SwapAllocator, cx: Ctx, item: T) !?T {
-            if (self.root) |root_ptr| {
+        pub fn insertMut(self: *Self, sa: SwapAllocator, cx: Ctx, item: T) !InsertResult {
+            const trace = mod_tracy.trace(@src());
+            defer trace.end();
+            const new_root = if (self.root) |root_ptr| blk: {
                 var node = try root_ptr.swapIn(sa);
-                defer root_ptr.swapOut(sa);
-                if (node.len() == (2 * order) - 1) {
+                const grow_tree = node.len() == (2 * order) - 1;
+                root_ptr.swapOut(sa);
+                if (grow_tree) {
                     var children = switch (root_ptr) {
-                        .leaf => |ptr| blk: {
+                        .leaf => |ptr| blk2: {
                             var slice = [_]Ptr{ptr};
-                            break :blk Internal.ChildrenArray.fromSlice(
+                            break :blk2 Internal.ChildrenArray.fromSlice(
                                 .{ .leaf = &slice },
                             ) catch unreachable;
                         },
-                        .internal => |ptr| blk: {
+                        .internal => |ptr| blk2: {
                             var slice = [_]Ptr{ptr};
-                            break :blk Internal.ChildrenArray.fromSlice(
+                            break :blk2 Internal.ChildrenArray.fromSlice(
                                 .{ .internal = &slice },
                             ) catch unreachable;
                         },
                     };
-                    var internal = Internal{
-                        .keys = KeyArray.init(0) catch unreachable,
-                        .children = children,
-                    };
-                    _ = try internal.splitChildIfFull(sa, 0);
-                    const new_root_ptr = try sa.alloc(@sizeOf(Internal));
-                    const new_root = try Internal.swapIn(sa, new_root_ptr);
-                    defer sa.swapOut(new_root_ptr);
-                    new_root.* = internal;
-                    self.root = NodePtr{ .internal = new_root_ptr };
-                    return try new_root.insert(sa, cx, item);
-                } else {
-                    return try node.insert(sa, cx, item);
+                    var in_mem = try Internal.fromSlice(sa, &.{}, children.slice());
+                    defer sa.swapOut(in_mem.ptr);
+                    _ = try in_mem.internal.splitChildIfFull(sa, 0);
+                    break :blk NodePtr{ .internal = in_mem.ptr };
                 }
-            } else {
-                self.root = try Leaf.fromSlicePtr(sa, &[_]T{item});
-                return null;
-            }
+                break :blk root_ptr;
+            } else try Leaf.fromSlicePtr(sa, &.{});
+            self.root = new_root;
+            const res = try new_root.insert(sa, cx, item);
+            return res;
         }
 
-        pub fn find(self: *Self, sa: SwapAllocator, cx: Ctx, needle: T) !?T {
+        pub fn insert(self: *Self, sa: SwapAllocator, cx: Ctx, item: T) !?T {
+            var res = try self.insertMut(sa, cx, item);
+            defer res.swapOut();
+            return res.previous;
+        }
+
+        pub fn find(self: *const Self, sa: SwapAllocator, cx: Ctx, needle: T) !?T {
             if (self.root) |root_ptr| {
                 if (try root_ptr.find(sa, cx, needle)) |found| {
                     defer found[2].swapOut(sa);
                     return switch (found[1]) {
                         .leaf => |node| node.keys.get(found[0]),
                         .internal => |node| node.keys.get(found[0]),
+                    };
+                }
+            }
+            return null;
+        }
+
+        // The return value borrows `sa` and `cx`
+        pub fn findMut(self: *Self, sa: SwapAllocator, cx: Ctx, needle: T) !?ValPtr {
+            if (self.root) |root_ptr| {
+                if (try root_ptr.find(sa, cx, needle)) |found| {
+                    return .{
+                        .val_ptr = switch (found[1]) {
+                            .leaf => |node| &node.keys.slice()[found[0]],
+                            .internal => |node| &node.keys.slice()[found[0]],
+                        },
+                        .node_ptr = found[2],
+                        .sa = sa,
+                        .cx = cx,
                     };
                 }
             }
@@ -1335,21 +1480,154 @@ test "SwapBTree.iterator" {
 
     var tree = MyBtree.init();
     defer tree.deinit(sa) catch unreachable;
-    const items = "CGMPTXABDEFJKLNOQRSUVYZ";
-    for (items) |val| {
-        _ = try tree.insert(sa, {}, val);
+    {
+        const items = "CGMPTXABDEFJKLNOQRSU";
+        for (items) |val| {
+            _ = try tree.insert(sa, {}, val);
+        }
+    }
+
+    // Spruce some chaos
+    try std.testing.expect(try tree.remove(sa, {}, 'O') != null);
+
+    {
+        const items = "VYZ";
+        for (items) |val| {
+            _ = try tree.insert(sa, {}, val);
+        }
     }
 
     var it = try tree.iterator(ha, sa);
     defer it.deinit();
     // try tree.print();
-    for ("ABCDEFGJKLMNOPQRSTUVXYZ") |char| {
+    for ("ABCDEFGJKLMNPQRSTUVXYZ") |char| {
         const item = try it.next() orelse unreachable;
         try std.testing.expectEqual(@as(usize, char), item.*);
     }
 }
 
-fn BTree(
+pub fn BTreeMap(
+    comptime K: type,
+    comptime V: type,
+    comptime Ctx: type,
+    comptime cmp: fn (cx: Ctx, a: K, b: K) std.math.Order,
+    comptime order: usize,
+) type {
+    return struct {
+        const Self = @This();
+        // FIXME: this will be memory inefficent due to byte alignment
+        // consider building Map funcitonality into the core tree
+        pub const Entry = struct { key: K, val: V };
+        const Tree = BTree(
+            Entry,
+            Ctx,
+            struct {
+                fn entry_cmp(cx: Ctx, a: Entry, b: Entry) std.math.Order {
+                    return cmp(cx, a.key, b.key);
+                }
+            }.entry_cmp,
+            order,
+        );
+
+        tree: Tree,
+
+        pub fn init(ha: Allocator) Self {
+            return .{ .tree = Tree.init(ha) };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.tree.deinit();
+        }
+
+        pub fn set(self: *Self, ctx: Ctx, key: K, val: V) !?V {
+            if (try self.tree.insert(ctx, .{ .key = key, .val = val })) |old| {
+                return old.val;
+            }
+            return null;
+        }
+
+        pub fn get(self: *const Self, ctx: Ctx, key: K) ?V {
+            if (self.tree.find(ctx, .{ .key = key, .val = undefined })) |find| {
+                return find.val;
+            }
+            return null;
+        }
+
+        pub fn delete(self: *Self, ctx: Ctx, key: K) ?V {
+            if (self.tree.remove(ctx, .{ .key = key, .val = undefined })) |find| {
+                return find.val;
+            }
+            return null;
+        }
+
+        pub fn size(self: *const Self) usize {
+            return self.tree.size();
+        }
+
+        const EntryPtr = struct {
+            key: K,
+            val_ptr: *V,
+            found_existing: bool,
+        };
+
+        pub fn getOrPut(self: *Self, cx: Ctx, key: K) !EntryPtr {
+            // insert or replace an epmty Entry
+            const kv = try self.tree.insertMut(cx, .{ .key = key, .val = undefined });
+            // if we replaced something, put it back but using the pointer (no tree traversal)
+            if (kv.previous) |previous| {
+                kv.val_ptr.val = previous.val;
+            }
+            return .{
+                .key = key,
+                .val_ptr = &kv.val_ptr.val,
+                .found_existing = kv.previous != null,
+            };
+        }
+    };
+}
+
+test "BTreeMap" {
+    const MyMap = BTreeMap(usize, []const u8, void, struct {
+        fn cmp(cx: void, a: usize, b: usize) std.math.Order {
+            _ = cx;
+            return std.math.order(a, b);
+        }
+    }.cmp, 12);
+    const ha = std.testing.allocator;
+
+    var map = MyMap.init(ha);
+    defer map.deinit();
+
+    try std.testing.expect(try map.set({}, 1, "one") == null);
+    try std.testing.expectEqualSlices(u8, "one", map.get({}, 1) orelse unreachable);
+    try std.testing.expect(try map.set({}, 1, "wan") != null);
+    try std.testing.expect(try map.set({}, 1, "uno") != null);
+    try std.testing.expect(try map.set({}, 1, "and") != null);
+    try std.testing.expectEqualSlices(u8, "and", map.get({}, 1) orelse unreachable);
+    try std.testing.expect(try map.set({}, 2, "tew") == null);
+    try std.testing.expectEqualSlices(u8, "tew", map.get({}, 2) orelse unreachable);
+    try std.testing.expect(try map.set({}, 3, "tree") == null);
+    try std.testing.expect(try map.set({}, 4, "for") == null);
+    try std.testing.expect(try map.set({}, 5, "fif") == null);
+    try std.testing.expect(try map.set({}, 6, "sex") == null);
+    try std.testing.expectEqual(@as(usize, 6), map.size());
+
+    {
+        var kv = try map.getOrPut({}, 7);
+        try std.testing.expect(!kv.found_existing);
+        kv.val_ptr.* = "s7n";
+    }
+    try std.testing.expectEqualSlices(u8, "s7n", map.get({}, 7) orelse unreachable);
+    {
+        var kv = try map.getOrPut({}, 5);
+        try std.testing.expect(kv.found_existing);
+        try std.testing.expectEqualSlices(u8, "fif", kv.val_ptr.*);
+        kv.val_ptr.* = "viv";
+    }
+    try std.testing.expectEqualSlices(u8, "viv", map.get({}, 5) orelse unreachable);
+}
+
+pub fn BTree(
     comptime T: type,
     comptime Ctx: type,
     comptime cmp: fn (cx: Ctx, a: T, b: T) std.math.Order,
@@ -1361,6 +1639,10 @@ fn BTree(
     }
     return struct {
         const Self = @This();
+        pub const InsertResult = struct {
+            val_ptr: *T,
+            previous: ?T,
+        };
         const Node = union(enum) {
             // multiply by 2 to keep max children even and max keys odd
             const KeyArray = std.BoundedArray(T, (2 * order) - 1);
@@ -1474,26 +1756,52 @@ fn BTree(
                 };
             }
 
-            fn insert(self: *Node, ha: Allocator, cx: Ctx, item: T) !void {
+            fn insert(self: *Node, ha: Allocator, cx: Ctx, item: T) !InsertResult {
                 switch (self.*) {
                     .leaf => |*node| {
                         for (node.keys.slice(), 0..) |key, ii| {
-                            // FIXME: replace with binary search
-                            if (cmp(cx, item, key) == .lt) {
-                                node.keys.insert(ii, item) catch unreachable;
-                                return;
+                            switch (cmp(cx, item, key)) {
+                                .eq => {
+                                    node.keys.set(ii, item);
+                                    return .{
+                                        .val_ptr = &node.keys.buffer[ii],
+                                        .previous = key,
+                                    };
+                                },
+                                .lt => {
+                                    node.keys.insert(ii, item) catch unreachable;
+                                    return .{
+                                        .val_ptr = &node.keys.buffer[ii],
+                                        .previous = null,
+                                    };
+                                },
+                                .gt => {},
                             }
                         }
                         // it's above all our keys so add it at the end
                         node.keys.append(item) catch unreachable;
+                        return .{
+                            .val_ptr = &node.keys.buffer[node.keys.len - 1],
+                            .previous = null,
+                        };
                     },
                     .internal => |*node| {
                         var ii = blk: {
                             for (node.keys.slice(), 0..) |key, ii| {
-                                // FIXME: replace with binary search
-                                if (cmp(cx, item, key) == .lt) {
-                                    break :blk ii;
+                                switch (cmp(cx, item, key)) {
+                                    .eq => {
+                                        node.keys.set(ii, item);
+                                        return .{
+                                            .val_ptr = &node.keys.buffer[ii],
+                                            .previous = key,
+                                        };
+                                    },
+                                    .lt => {
+                                        break :blk ii;
+                                    },
+                                    .gt => {},
                                 }
+                                if (cmp(cx, item, key) == .lt) {}
                             }
                             // it's above all our keys so add it to the last child
                             break :blk node.children.len - 1;
@@ -1505,7 +1813,7 @@ fn BTree(
                             }
                         }
                         const chosen_child = node.children.get(ii);
-                        try chosen_child.insert(ha, cx, item);
+                        return try chosen_child.insert(ha, cx, item);
                     },
                 }
             }
@@ -1762,7 +2070,7 @@ fn BTree(
             }
         }
 
-        pub fn insert(self: *Self, cx: Ctx, item: T) !void {
+        pub fn insertMut(self: *Self, cx: Ctx, item: T) !InsertResult {
             if (self.root) |node| {
                 if (node.len() == (2 * order) - 1) {
                     var internal = Node.Internal{
@@ -1772,17 +2080,27 @@ fn BTree(
                     _ = try internal.splitChildIfFull(self.ha, 0);
                     var new_root = try self.ha.create(Node);
                     new_root.* = Node{ .internal = internal };
-                    try new_root.insert(self.ha, cx, item);
+                    const res = try new_root.insert(self.ha, cx, item);
                     self.root = new_root;
+                    return res;
                 } else {
-                    try node.insert(self.ha, cx, item);
+                    return try node.insert(self.ha, cx, item);
                 }
             } else {
-                self.root = try Node.initLeaf(self.ha, item);
+                const node = try Node.initLeaf(self.ha, item);
+                self.root = node;
+                return .{
+                    .val_ptr = &node.leaf.keys.buffer[0],
+                    .previous = null,
+                };
             }
         }
+        pub fn insert(self: *Self, cx: Ctx, item: T) !?T {
+            const res = try self.insertMut(cx, item);
+            return res.previous;
+        }
 
-        pub fn find(self: *Self, cx: Ctx, needle: T) ?T {
+        pub fn find(self: *const Self, cx: Ctx, needle: T) ?T {
             if (self.root) |root| {
                 if (root.find(cx, needle)) |found| {
                     return switch (found[0].*) {
@@ -1844,6 +2162,99 @@ fn BTree(
                 node.print(0);
             }
         }
+
+        pub const Iterator = struct {
+            const NodeStack = std.ArrayList(struct { *Node, usize });
+            tree: *const Self,
+            node_stack: NodeStack,
+            cur_node: ?*Node = null,
+            next_ii: usize = 0,
+
+            fn new(target: *const Self) !@This() {
+                var stack = NodeStack.init(target.ha);
+                if (target.root) |root_ptr| {
+                    var node = root_ptr;
+                    while (true) {
+                        switch (node.*) {
+                            .leaf => {
+                                return .{
+                                    .tree = target,
+                                    .node_stack = stack,
+                                    .cur_node = node,
+                                };
+                            },
+                            .internal => |int| {
+                                try stack.append(.{ node, 0 });
+                                node = int.children.get(0);
+                            },
+                        }
+                    }
+                } else {
+                    return .{
+                        .tree = target,
+                        .node_stack = stack,
+                    };
+                }
+            }
+
+            pub fn deinit(self: *@This()) void {
+                if (self.cur_node != null) {
+                    self.cur_node = null;
+                }
+                self.node_stack.deinit();
+            }
+
+            fn goUp(self: *@This()) ?*T {
+                if (self.node_stack.popOrNull()) |parent| {
+                    const node = parent[0];
+                    self.cur_node = node;
+                    if (parent[1] < node.len()) {
+                        self.next_ii = parent[1] + 1;
+                        return &node.internal.keys.slice()[parent[1]];
+                    } else {
+                        return self.goUp();
+                    }
+                }
+                self.cur_node = null;
+                return null;
+            }
+
+            pub fn next(self: *@This()) !?*T {
+                if (self.cur_node) |node| {
+                    switch (node.*) {
+                        .leaf => |*leaf| if (self.next_ii < leaf.keys.len) {
+                            defer self.next_ii += 1;
+                            return &leaf.keys.slice()[self.next_ii];
+                        } else return self.goUp(),
+
+                        .internal => |int| if (self.next_ii < int.children.len) {
+                            try self.node_stack.append(
+                                .{ self.cur_node orelse unreachable, self.next_ii },
+                            );
+                            var cur_node = int.children.get(self.next_ii);
+                            while (true) {
+                                switch (cur_node.*) {
+                                    .leaf => {
+                                        self.cur_node = cur_node;
+                                        self.next_ii = 0;
+                                        return try self.next();
+                                    },
+                                    .internal => |int_int| {
+                                        try self.node_stack.append(.{ cur_node, 0 });
+                                        cur_node = int_int.children.get(0);
+                                    },
+                                }
+                            }
+                        } else return self.goUp(),
+                    }
+                }
+                return null;
+            }
+        };
+
+        pub fn iterator(self: *const Self) !Iterator {
+            return try Iterator.new(self);
+        }
     };
 }
 
@@ -1865,11 +2276,11 @@ test "BTree.insert" {
     defer tree.deinit();
     for (0..10_000) |ii| {
         _ = ii;
-        try tree.insert({}, std.crypto.random.uintAtMost(usize, 10_000));
+        _ = try tree.insert({}, std.crypto.random.uintAtMost(usize, 10_000));
     }
     const items = [_]usize{ 123, 53, 98823, 123, 534, 123, 54, 7264, 21, 0, 23 };
     for (items) |val| {
-        try tree.insert({}, val);
+        _ = try tree.insert({}, val);
     }
 
     // tree.print();
@@ -1897,7 +2308,7 @@ test "BTree.remove" {
     defer tree.deinit();
     const items = "CGMPTXABDEFJKLNOQRSUVYZ";
     for (items) |val| {
-        try tree.insert({}, val);
+        _ = try tree.insert({}, val);
     }
     // tree.print();
     try std.testing.expectEqual(@as(usize, 23), tree.size());
@@ -1920,6 +2331,45 @@ test "BTree.remove" {
     }
     try std.testing.expect(tree.depth() == 0);
     // try std.testing.expect(tree.find({}, 1223) == null);
+}
+
+test "BTree.iterator" {
+    const MyBtree = BTree(
+        usize,
+        void,
+        struct {
+            fn cmp(cx: void, a: usize, b: usize) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        3,
+    );
+    const ha = std.testing.allocator;
+    var tree = MyBtree.init(ha);
+    defer tree.deinit();
+    {
+        const items = "CGMPTXABDEFJKLNOQRSU";
+        for (items) |val| {
+            _ = try tree.insert({}, val);
+        }
+    }
+
+    try std.testing.expect(tree.remove({}, 'O') != null);
+
+    {
+        const items = "VYZ";
+        for (items) |val| {
+            _ = try tree.insert({}, val);
+        }
+    }
+
+    var it = try tree.iterator();
+    defer it.deinit();
+    for ("ABCDEFGJKLMNPQRSTUVXYZ") |char| {
+        const item = try it.next() orelse unreachable;
+        try std.testing.expectEqual(@as(usize, char), item.*);
+    }
 }
 
 pub fn BST(

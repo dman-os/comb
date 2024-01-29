@@ -207,6 +207,232 @@ const PageNo = Pager.PageNo;
 const PageSlice = Pager.PageSlice;
 const BlockId = Pager.BlockId;
 
+pub const HeapPager = struct {
+    const Self = @This();
+
+    const Block = struct {
+        buf: ?Pager.PageSlice,
+        swappedIn: bool = false,
+    };
+
+    ha: Allocator,
+    blocks: std.ArrayListUnmanaged(Block) = .{},
+    free_list: std.ArrayListUnmanaged(Pager.PageNo) = .{},
+
+    pub fn init(ha: Allocator) Self {
+        return .{ .ha = ha };
+    }
+
+    pub fn deinit(self: *Self) void {
+        var swapped_in_count: usize = 0;
+        var live_count: usize = 0;
+        for (self.blocks.items) |block| {
+            if (block.buf) |buf| {
+                live_count += 1;
+                if (block.swappedIn) {
+                    swapped_in_count += 1;
+                }
+                self.ha.free(buf);
+            }
+        }
+        if (live_count > 0) {
+            std.log.warn(
+                "freed {} blocks at deinit of " ++ @typeName(Self) ++ "of which {} were swapped in",
+                .{ live_count, swapped_in_count },
+            );
+        }
+        self.free_list.deinit(self.ha);
+        self.blocks.deinit(self.ha);
+    }
+
+    pub fn pager(self: *Self) Pager {
+        return Pager.init(
+            self,
+            @as(*const Self, self),
+            alloc,
+            allocBlock,
+            free,
+            freeBlock,
+            swapIn,
+            swapInBlock,
+            swapOut,
+            swapOutBlock,
+            pageSize,
+            isSwappedIn,
+        );
+    }
+
+    fn alloc(self: *Self) Pager.AllocError!Pager.PageNo {
+        const id = try self.allocBlock(1);
+        return id.idx;
+    }
+
+    fn allocBlock(self: *Self, len: u32) Pager.AllocError!Pager.BlockId {
+        const buf = try self.ha.alignedAlloc(
+            u8,
+            mmap_align,
+            len * self.pageSize(),
+        );
+        const page = Block{ .buf = buf };
+        if (self.free_list.popOrNull()) |idx| {
+            self.blocks.items[idx] = page;
+            return .{ .idx = idx, .len = len };
+        } else {
+            try self.blocks.append(self.ha, page);
+            return .{
+                .idx = @as(u32, @intCast(self.blocks.items.len)) - 1,
+                .len = len,
+            };
+        }
+    }
+
+    fn free(self: *Self, no: Pager.PageNo) void {
+        self.freeBlock(.{ .idx = no, .len = 1 });
+    }
+
+    fn freeBlock(self: *Self, id: Pager.BlockId) void {
+        if (id.idx >= self.blocks.items.len) {
+            @panic("unallocated page freed");
+        }
+
+        var page = &self.blocks.items[id.idx];
+        if (page.swappedIn) {
+            @panic("page freed while swappedIn");
+        }
+        if (page.buf) |buf| {
+            self.ha.free(buf);
+            page.buf = null;
+        } else {
+            @panic("double free");
+        }
+        self.free_list.append(self.ha, id.idx) catch @panic("oom");
+    }
+
+    fn swapIn(self: *Self, no: Pager.PageNo) Pager.SwapInError!Pager.PageSlice {
+        return try self.swapInBlock(.{ .idx = no, .len = 1 });
+    }
+
+    fn swapInBlock(self: *Self, id: Pager.BlockId) Pager.SwapInError!Pager.PageSlice {
+        const page = &self.blocks.items[id.idx];
+        if (page.buf) |buf| {
+            // if (page.swappedIn) {
+            //     @panic("double swap in");
+            // }
+            page.swappedIn = true;
+            return buf;
+        } else {
+            @panic("Page is free");
+        }
+    }
+    fn swapOut(self: *Self, no: Pager.PageNo) void {
+        self.swapOutBlock(.{ .idx = no, .len = 1 });
+    }
+
+    fn swapOutBlock(self: *Self, id: Pager.BlockId) void {
+        const page = &self.blocks.items[id.idx];
+        if (page.buf == null) {
+            @panic("Page is free");
+        }
+        // if (!page.swappedIn) {
+        //     @panic("double swap out");
+        // }
+        page.swappedIn = false;
+    }
+
+    fn pageSize(self: *const Self) usize {
+        _ = self;
+        return std.mem.page_size;
+    }
+
+    fn isSwappedIn(self: *const Self, no: Pager.PageNo) bool {
+        const page = &self.blocks.items[no];
+        if (page.buf == null) {
+            @panic("Page is free");
+        }
+        return page.swappedIn;
+    }
+};
+
+test "HeapPager.usage" {
+    const page_size = std.mem.page_size;
+
+    var a7r = std.testing.allocator;
+    var heap_pager = HeapPager.init(a7r);
+    defer heap_pager.deinit();
+    var pager = heap_pager.pager();
+
+    const page_count = 10;
+    const item_per_page = page_size / @sizeOf(usize);
+    var nums = [_]usize{0} ** (page_count * item_per_page);
+    for (&nums, 0..) |*num, ii| {
+        num.* = ii;
+    }
+    var pages: [page_count]PageNo = undefined;
+    for (&pages, 0..) |*no, pii| {
+        no.* = try pager.alloc();
+        var bytes = try pager.swapIn(no.*);
+        defer pager.swapOut(no.*);
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |*num, ii| {
+            num.* = nums[(pii * item_per_page) + ii];
+        }
+    }
+    defer for (pages) |no| {
+        pager.free(no);
+    };
+
+    for (pages, 0..) |no, pii| {
+        var bytes = try pager.swapIn(no);
+        defer pager.swapOut(no);
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |num, ii| {
+            try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
+        }
+    }
+    {
+        const page_no = page_count / 2;
+        pager.free(pages[page_no]);
+        // TODO: find a way to test panics?
+        // try std.testing.expectError(error.PageNotAllocated, pager.swapIn(pages[page_no]));
+
+        var new_stuff = [_]usize{0} ** item_per_page;
+        for (&new_stuff, 0..) |*num, ii| {
+            num.* = item_per_page - ii;
+            nums[(page_no * item_per_page) + ii] = item_per_page - ii;
+        }
+
+        var no = try pager.alloc();
+        var bytes = try pager.swapIn(no);
+        defer pager.swapOut(no);
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |*num, ii| {
+            num.* = new_stuff[ii];
+        }
+    }
+    for (pages, 0..) |no, pii| {
+        var bytes = try pager.swapIn(no);
+        defer pager.swapOut(no);
+        for (std.mem.bytesAsSlice(usize, bytes), 0..) |num, ii| {
+            try std.testing.expectEqual(nums[(pii * item_per_page) + ii], num);
+        }
+    }
+    {
+        const block_id = try pager.allocBlock(page_count);
+        defer pager.freeBlock(block_id);
+        {
+            const slice = try pager.swapInBlock(block_id);
+            defer pager.swapOutBlock(block_id);
+            const num_slice = std.mem.sliceAsBytes(&nums);
+            @memcpy(slice, num_slice);
+        }
+        {
+            const slice = try pager.swapInBlock(block_id);
+            defer pager.swapOutBlock(block_id);
+            // FIXME: this failed on my machine with the following:
+            //    slices differ. first difference occurs at index 36968 (0x9068)
+            // though I was unable to recreate it. Cosmic rays?
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&nums), slice);
+        }
+    }
+}
+
 /// Implements the `Pager` interface using `mmap` over a backing file.
 pub const MmapPager = struct {
     const Self = @This();
@@ -480,7 +706,10 @@ pub const MmapPager = struct {
             try self.pages.ensureUnusedCapacity(self.a7r, block_len);
             // // ensure capacity on the free list to avoid error checking on free calls
             // try self.free_list.ensureUnusedCapacity(block_len);
-            std.os.ftruncate(self.backing_file.handle, (self.pages.items.len + block_len) * self.config.page_size) catch |err| return switch (err) {
+            std.os.ftruncate(
+                self.backing_file.handle,
+                (self.pages.items.len + block_len) * self.config.page_size,
+            ) catch |err| return switch (err) {
                 std.os.TruncateError.AccessDenied => unreachable,
                 std.os.TruncateError.FileTooBig => error.FileTooBig,
                 std.os.TruncateError.InputOutput => error.InputOutput,
@@ -1458,6 +1687,7 @@ pub fn PagingSwapAllocator(comptime config: PagingSwapAllocatorConfig) type {
         pub fn swapOut(self: *Self, gpptr: SwapAllocator.Ptr) void {
             const ptr = CustomPtr.fromGpPtr(gpptr);
             const buck_idx = ptr.buck;
+
             if (buck_idx == bucket_count) {
                 if (self.large_allocs.get(ptr.slot)) |large| {
                     self.pager.swapOutBlock(large.block);

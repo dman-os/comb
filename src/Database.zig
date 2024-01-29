@@ -21,6 +21,10 @@ const mod_gram = @import("gram.zig");
 
 const mod_plist = @import("plist.zig");
 
+const mod_index = @import("index.zig");
+
+const mod_tracy = @import("tracy.zig");
+
 pub const Quexecutor = @import("Database/Quexecutor.zig");
 
 test {
@@ -78,11 +82,34 @@ pub const _gram_len = 3;
 /// We associate each trigram with a set of `Id`.
 const PList = mod_plist.SwapPostingList(Id, _gram_len);
 
+const IdSet = mod_index.SwapBTree(
+    Id,
+    void,
+    struct {
+        fn cmp(cx: void, a: Id, b: Id) std.math.Order {
+            _ = cx;
+            return std.math.order(a.toInt(), b.toInt());
+        }
+    }.cmp,
+    mod_index.orderToFillPageSwapBTree(Id, std.mem.page_size),
+);
+
+const IndexId2Id = mod_index.SwapBTreeMap(
+    Id,
+    IdSet,
+    void,
+    struct {
+        fn cmp(cx: void, a: Id, b: Id) std.math.Order {
+            _ = cx;
+            return std.math.order(a.toInt(), b.toInt());
+        }
+    }.cmp,
+    mod_index.orderToFillPageSwapBTreeMap(Id, IdSet, std.mem.page_size),
+);
+
 pub const _Gram = mod_gram.Gram(_gram_len);
 
-pub const DatabseErr = error{
-    StaleHandle,
-};
+pub const DatabseErr = error{StaleHandle};
 
 config: Config,
 /// The heap allocator.
@@ -93,8 +120,10 @@ pager: Pager,
 table: SwapList(Entry),
 meta: SwapList(RowMeta),
 plist: PList = .{},
-childOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
-descendantOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
+childOfIndex: IndexId2Id = .{},
+// childOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
+descendantOfIndex: IndexId2Id = .{},
+// descendantOfIndex: std.AutoHashMapUnmanaged(Id, std.AutoHashMapUnmanaged(Id, void)) = .{},
 free_slots: FreeSlots,
 lock: std.Thread.Mutex = .{},
 
@@ -104,6 +133,9 @@ pub fn init(
     sa7r: SwapAllocator,
     config: Config,
 ) Self {
+    if (pager.pageSize() != std.mem.page_size) {
+        @panic("work");
+    }
     var self = Self{
         .ha7r = ha7r,
         .sa7r = sa7r,
@@ -135,27 +167,44 @@ pub fn deinit(self: *Self) void {
     self.meta.deinit(self.ha7r, self.sa7r, self.pager);
     self.free_slots.deinit();
     self.plist.deinit(self.ha7r, self.sa7r, self.pager);
+    // self.childOfIndex.deinit() catch unreachable;
+    // self.descendantOfIndex.deinit() catch unreachable;
+    // self.childOfIndex.tree.print(self.sa7r) catch unreachable;
     {
-        var it = self.childOfIndex.iterator();
-        while (it.next()) |entry| {
+        var it = self.childOfIndex.tree.iterator(self.ha7r, self.sa7r) catch @panic("oom");
+        defer it.deinit();
+        while (it.next() catch @panic("oom")) |entry| {
             // entry.value_ptr.deinit(self.ha7r, self.sa7r, self.pager);
-            entry.value_ptr.deinit(self.ha7r);
+            entry.val.deinit(self.sa7r) catch unreachable;
         }
-        self.childOfIndex.deinit(self.ha7r);
+        self.childOfIndex.deinit(self.sa7r) catch unreachable;
     }
     {
-        var it = self.descendantOfIndex.iterator();
-        while (it.next()) |entry| {
+        var it = self.descendantOfIndex.tree.iterator(self.ha7r, self.sa7r) catch @panic("oom");
+        defer it.deinit();
+        while (it.next() catch @panic("oom")) |entry| {
             // entry.value_ptr.deinit(self.ha7r, self.sa7r, self.pager);
-            entry.value_ptr.deinit(self.ha7r);
+            entry.val.deinit(self.sa7r) catch unreachable;
         }
-        self.descendantOfIndex.deinit(self.ha7r);
+        self.descendantOfIndex.deinit(self.sa7r) catch unreachable;
     }
 }
 
 fn setAtIdx(self: *Self, idx: usize, entry: Entry) !void {
     try self.table.set(self.sa7r, self.pager, idx, entry);
 }
+
+// const Events = union(enum) {
+//     const TreeCreated = struct { tree: mod_treewalking.Tree, root_parent: Id };
+//     const FileMoved = struct { id: Id, new_name: []const u8, new_parent_opt: ?Id };
+//     const FileModified = struct { id: Id, entry: *const FsEntry(void, void) };
+//
+//     fileCreated: FsEntry(Id, []const u8),
+//     fileDeleted: Id,
+//     fileMoved: FileMoved,
+//     fileModified: FileModified,
+//     treeCreated: TreeCreated,
+// };
 
 pub fn treeCreated(self: *Self, tree: *const mod_treewalking.Tree, root_parent: Id) !void {
     self.lock.lock();
@@ -194,6 +243,8 @@ pub inline fn fileCreated(self: *Self, entry: *const FsEntry(Id, []const u8)) !I
 
 /// Add an entry to the database.
 fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     // clone the entry but store the name on the swap this time
     const swapped_entry = entry.clone(try self.sa7r.dupeJustPtr(entry.name));
     const id = if (self.free_slots.removeOrNull()) |id| blk: {
@@ -226,30 +277,38 @@ fn fileCreatedUnsafe(self: *Self, entry: *const FsEntry(Id, []const u8)) !Id {
             .gen = 0,
         };
     };
-    try self.plist.insert(self.ha7r, self.sa7r, self.pager, id, entry.name, std.ascii.whitespace[0..]
-    // &[_]u8{ self.config.delimiter }
+    try self.plist.insert(
+        self.ha7r,
+        self.sa7r,
+        self.pager,
+        id,
+        entry.name,
+        std.ascii.whitespace[0..],
+        // &[_]u8{ self.config.delimiter }
     );
+    // FIXME: should we restrict these for directories only?
     {
-        var kv = try self.childOfIndex.getOrPut(self.ha7r, entry.parent);
+        var kv = try self.childOfIndex.getOrPut(self.sa7r, {}, entry.parent);
+        defer kv.swapOut();
         if (!kv.found_existing) {
             // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
-            kv.value_ptr.* = .{};
+            kv.val_ptr.* = .{};
         }
-        try kv.value_ptr.put(self.ha7r, id, {});
+        _ = try kv.val_ptr.insert(self.sa7r, {}, id);
     }
     // skip populating the desc of index
     if (false) {
         var id_self = id;
         var parent = entry.parent;
-        while (
         // FIXME: a better way of detecting root
-        id_self.id != parent.id) {
+        while (id_self.id != parent.id) {
             var kv = try self.descendantOfIndex.getOrPut(self.ha7r, parent);
+            defer kv.swapOut();
             if (!kv.found_existing) {
                 // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
-                kv.value_ptr.* = .{};
+                kv.val_ptr.* = .{};
             }
-            try kv.value_ptr.put(self.ha7r, id, {});
+            _ = try kv.val_ptr.insert(self.sa7r, {}, id);
 
             id_self = parent;
 
@@ -270,20 +329,25 @@ pub fn fileDeleted(self: *Self, id: Id) !bool {
 }
 
 fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     if (try self.isStaleUnsafe(id)) return false;
+    // self.childOfIndex.tree.print(self.sa7r) catch unreachable;
     // recursively free any children
-    if (self.childOfIndex.fetchRemove(id)) |kv| {
-        var children = kv.value;
-        defer children.deinit(self.ha7r);
-        var it = children.iterator();
-        while (it.next()) |pair| {
-            var was_deleted = try self.fileDeletedUnsafe(pair.key_ptr.*, true);
+    if (try self.childOfIndex.delete(self.sa7r, {}, id)) |val| {
+        var children = val;
+        defer children.deinit(self.sa7r) catch unreachable;
+        var it = try children.iterator(self.ha7r, self.sa7r);
+        defer it.deinit();
+        while (try it.next()) |key| {
+            var was_deleted = try self.fileDeletedUnsafe(key.*, true);
             if (was_deleted) {
                 // @panic("found an actual live child");
             }
             // @panic("children list is not empty");
         }
     }
+    // self.childOfIndex.tree.print(self.sa7r) catch unreachable;
 
     // do all faillible things first
     var row = try self.meta.swapIn(self.sa7r, self.pager, id.id);
@@ -300,16 +364,28 @@ fn fileDeletedUnsafe(self: *Self, id: Id, recusring: bool) !bool {
     var name = try self.sa7r.swapIn(entry.name);
     errdefer self.sa7r.swapOut(entry.name);
     // remove from plist
-    try self.plist.remove(self.ha7r, self.sa7r, self.pager, id, name, std.ascii.whitespace[0..], struct {
-        fn isEql(lhs: Id, rhs: Id) bool {
-            return lhs.toInt() == rhs.toInt();
-        }
-    }.isEql);
+    try self.plist.remove(
+        self.ha7r,
+        self.sa7r,
+        self.pager,
+        id,
+        name,
+        std.ascii.whitespace[0..],
+        struct {
+            fn isEql(lhs: Id, rhs: Id) bool {
+                return lhs.toInt() == rhs.toInt();
+            }
+        }.isEql,
+    );
 
     if (!recusring) {
         // remove from parent's `childOfIndex`
-        var siblings = self.childOfIndex.get(entry.parent) orelse @panic("no siblings index");
-        std.debug.assert(siblings.remove(id));
+        var siblings = try self.childOfIndex.get(
+            self.sa7r,
+            {},
+            entry.parent,
+        ) orelse @panic("no siblings index");
+        std.debug.assert(try siblings.remove(self.sa7r, {}, id) != null);
     }
 
     self.sa7r.swapOut(entry.name);
@@ -326,6 +402,8 @@ pub fn fileMoved(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id)
 }
 
 pub fn fileMovedUnsafe(self: *Self, id: Id, new_name: []const u8, new_parent_opt: ?Id) !void {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     if (try self.isStaleUnsafe(id)) return error.StaleHandle;
 
     const entry = try self.table.swapIn(self.sa7r, self.pager, id.id);
@@ -337,32 +415,51 @@ pub fn fileMovedUnsafe(self: *Self, id: Id, new_name: []const u8, new_parent_opt
     var old_name = try self.sa7r.swapIn(old_name_swap);
     errdefer self.sa7r.swapOut(old_name_swap);
 
-    try self.plist.insert(self.ha7r, self.sa7r, self.pager, id, new_name, std.ascii.whitespace[0..]
-    // &[_]u8{ self.config.delimiter }
+    try self.plist.insert(
+        self.ha7r,
+        self.sa7r,
+        self.pager,
+        id,
+        new_name,
+        std.ascii.whitespace[0..],
+        // &[_]u8{ self.config.delimiter }
     );
 
     entry.name = try self.sa7r.dupeJustPtr(new_name);
 
-    try self.plist.remove(self.ha7r, self.sa7r, self.pager, id, old_name, std.ascii.whitespace[0..], struct {
-        fn isEql(lhs: Id, rhs: Id) bool {
-            return lhs.toInt() == rhs.toInt();
-        }
-    }.isEql);
+    try self.plist.remove(
+        self.ha7r,
+        self.sa7r,
+        self.pager,
+        id,
+        old_name,
+        std.ascii.whitespace[0..],
+        struct {
+            fn isEql(lhs: Id, rhs: Id) bool {
+                return lhs.toInt() == rhs.toInt();
+            }
+        }.isEql,
+    );
 
     if (new_parent_opt) |new_parent| {
         if (entry.parent.toInt() != new_parent.toInt()) {
             // remove from parent's `childOfIndex`
-            var old_siblings = self.childOfIndex.get(entry.parent) orelse @panic("no siblings index");
-            std.debug.assert(old_siblings.remove(id));
+            var old_siblings = try self.childOfIndex.get(
+                self.sa7r,
+                {},
+                entry.parent,
+            ) orelse @panic("no siblings index");
+            std.debug.assert(try old_siblings.remove(self.sa7r, {}, id) != null);
 
             entry.parent = new_parent;
 
-            var kv = try self.childOfIndex.getOrPut(self.ha7r, new_parent);
+            var kv = try self.childOfIndex.getOrPut(self.sa7r, {}, new_parent);
+            defer kv.swapOut();
             if (!kv.found_existing) {
                 // kv.value_ptr.* = SwapList(Id).init(self.pager.pageSize());
-                kv.value_ptr.* = .{};
+                kv.val_ptr.* = .{};
             }
-            try kv.value_ptr.put(self.ha7r, id, {});
+            _ = try kv.val_ptr.insert(self.sa7r, {}, id);
         }
     }
 }
@@ -374,6 +471,8 @@ pub fn fileModified(self: *Self, id: Id, entry: *const FsEntry(void, void)) !voi
 }
 
 fn fileModifiedUnsafe(self: *Self, id: Id, entry: *const FsEntry(void, void)) !void {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     if (try self.isStaleUnsafe(id)) return error.StaleHandle;
 
     const entry_ptr = try self.table.swapIn(self.sa7r, self.pager, id.id);
@@ -415,6 +514,8 @@ pub fn getAtId(self: *Database, id: Id) !FsEntry(Id, []const u8) {
 }
 
 fn getAtIdUnsafe(self: *Database, id: Id) !FsEntry(Id, []const u8) {
+    const trace = mod_tracy.trace(@src());
+    defer trace.end();
     if (try self.isStaleUnsafe(id)) return error.StaleHandle;
     const entry = try self.table.swapIn(self.sa7r, self.pager, id.id);
     defer self.table.swapOut(self.sa7r, self.pager, id.id);
@@ -609,7 +710,11 @@ pub fn genRandFile(path: []const u8) FsEntry([]const u8, []const u8) {
 /// Assumes db is empty.
 /// Returns a heap allocated array of `Id`s assigned to the `entries` in the
 /// respective indices.
-pub fn fileList2PlasticTree2Db(ha7r: Allocator, entries: []const FsEntry([]const u8, []const u8), db: *Database) ![]Id {
+pub fn fileList2PlasticTree2Db(
+    ha7r: Allocator,
+    entries: []const FsEntry([]const u8, []const u8),
+    db: *Database,
+) ![]Id {
     var declared_map = try ha7r.alloc(Id, entries.len);
 
     var path_id_map = std.StringHashMap(Id).init(ha7r);
@@ -659,12 +764,17 @@ pub fn fileList2PlasticTree2Db(ha7r: Allocator, entries: []const FsEntry([]const
                 unreachable;
             };
 
-            var entry_id = try db.fileCreated(&s_entry.conv(Id, []const u8, parent, s_entry.name));
+            var entry_id = try db.fileCreated(
+                &s_entry.conv(Id, []const u8, parent, s_entry.name),
+            );
             // println(
             //    "inserted entry: {s}/{s} at id {}",
             //    .{ s_entry.parent, s_entry.name, entry_id }
             // );
-            try path_id_map.putNoClobber(try std.fs.path.join(ha7r, &.{ s_entry.parent, s_entry.name }),
+            try path_id_map.putNoClobber(try std.fs.path.join(
+                ha7r,
+                &.{ s_entry.parent, s_entry.name },
+            ),
             // if (is_root)
             //     try ha7r.dupe(u8, "/")
             // else
@@ -690,7 +800,11 @@ const DbTest = struct {
         var ha7r = std.testing.allocator;
         var big_buf = [_]u8{0} ** 1024;
         for (table) |case| {
-            var mmap_pager = try mod_mmap.MmapPager.init(ha7r, try std.fmt.bufPrint(big_buf[0..], "/tmp/Database.query.{s}", .{case.name}), .{});
+            var mmap_pager = try mod_mmap.MmapPager.init(
+                ha7r,
+                try std.fmt.bufPrint(big_buf[0..], "/tmp/Database.query.{s}", .{case.name}),
+                .{},
+            );
             defer mmap_pager.deinit();
 
             var lru = try mod_mmap.LRUSwapCache.init(ha7r, mmap_pager.pager(), 1);
@@ -738,7 +852,10 @@ const DbTest = struct {
             std.sort.pdq(Id, expected_id_list, {}, lt.lt);
             std.sort.pdq(Id, results, {}, lt.lt);
             std.testing.expectEqualSlices(Id, expected_id_list, results) catch |err| {
-                println("unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}\n\tdeclated_map: {any}", .{ results, expected_id_list, case.query, parsed_query, declared_map });
+                println(
+                    "unequal slices:\n\tresult: {any},\n\texpected: {any}\n\traw: {s}\n\tquery: {}\n\tdeclated_map: {any}",
+                    .{ results, expected_id_list, case.query, parsed_query, declared_map },
+                );
                 return err;
             };
         }

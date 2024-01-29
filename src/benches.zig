@@ -15,6 +15,7 @@ const PlasticTree = comb.mod_treewalking.PlasticTree;
 
 const SwapAllocator = comb.mod_mmap.SwapAllocator;
 const Pager = comb.mod_mmap.Pager;
+const mod_index = comb.mod_index;
 
 const mod_bench = struct {
     const BenchConfig = struct {
@@ -79,7 +80,16 @@ const mod_bench = struct {
             low_bound = if (elapsed < low_bound) elapsed else low_bound;
             up_bound = if (elapsed > up_bound) elapsed else up_bound;
         }
-        std.debug.print("{s}: [low {d}ms; average {d}ms; upper {d}ms] for {} iterations\n", .{ name, @as(f64, @floatFromInt(low_bound)) / 1_000_000, @as(f64, @floatFromInt(avg_elapsed)) / 1_000_000, @as(f64, @floatFromInt(up_bound)) / 1_000_000, iterations });
+        std.debug.print(
+            "{s}: [low {d}ms; average {d}ms; upper {d}ms] for {} iterations\n",
+            .{
+                name,
+                @as(f64, @floatFromInt(low_bound)) / 1_000_000,
+                @as(f64, @floatFromInt(avg_elapsed)) / 1_000_000,
+                @as(f64, @floatFromInt(up_bound)) / 1_000_000,
+                iterations,
+            },
+        );
     }
 };
 
@@ -662,4 +672,236 @@ test "SwapPList.bench.walk" {
         break :ss longest_name;
     };
     try bench_plist_swapping(id_t, gram_len, &plist, a7r, sa7r, pager, search_str);
+}
+
+test "IndexId2Id.HashMap.insert.gen" {
+    const size: usize = 1_000_000;
+    const id_t = usize;
+
+    // var a7r = std.testing.allocator;
+
+    // var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    // defer arena.deinit();
+    // var a7r = arena.allocator();
+
+    var gpha = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpha.deinit();
+    var ha7r = gpha.allocator();
+
+    const Map = std.AutoHashMap;
+    const IdSet = Map(id_t, void);
+    const IndexId2Id = Map(id_t, IdSet);
+    var index = IndexId2Id.init(ha7r);
+    defer {
+        var iter = index.iterator();
+        while (iter.next()) |set| {
+            set.value_ptr.deinit();
+        }
+        index.deinit();
+    }
+
+    var tree = try PlasticTree.init(.{ .size = size }, ha7r);
+    defer tree.deinit();
+
+    try tree.gen();
+    std.debug.print("done generating fake tree of size {}\n", .{size});
+
+    const BenchCtx = struct {
+        ha7r: Allocator,
+        index: IndexId2Id,
+        fake_tree: PlasticTree,
+        nextIdx: usize = 0,
+        fn do(self: *@This()) void {
+            const entry = self.fake_tree.list.items[self.nextIdx];
+            defer self.nextIdx = (self.nextIdx + 1) % self.fake_tree.list.items.len;
+            var kv = self.index.getOrPut(entry.parent) catch @panic("oom");
+            if (!kv.found_existing) {
+                kv.value_ptr.* = IdSet.init(self.ha7r);
+            }
+            kv.value_ptr.put(self.nextIdx, {}) catch @panic("oom");
+        }
+    };
+    var ctx = BenchCtx{
+        .ha7r = ha7r,
+        .index = index,
+        .fake_tree = tree,
+    };
+    try mod_bench.bench("IndexId2Id(HashMap).put", &ctx, BenchCtx.do, .{});
+}
+
+test "IndexId2Id.BTreeMap.insert.gen" {
+    const size: usize = 1_000_000;
+    const id_t = usize;
+
+    // var a7r = std.testing.allocator;
+
+    // var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    // defer arena.deinit();
+    // var a7r = arena.allocator();
+
+    var gpha = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpha.deinit();
+    var ha7r = gpha.allocator();
+
+    const IdSet = mod_index.BTree(
+        id_t,
+        void,
+        struct {
+            fn cmp(cx: void, a: id_t, b: id_t) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        mod_index.orderToFillPageSwapBTree(id_t, std.mem.page_size),
+    );
+    const IndexId2Id = mod_index.BTreeMap(
+        id_t,
+        IdSet,
+        void,
+        struct {
+            fn cmp(cx: void, a: id_t, b: id_t) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        mod_index.orderToFillPageSwapBTreeMap(id_t, IdSet, std.mem.page_size),
+    );
+    var index = IndexId2Id.init(ha7r);
+    defer {
+        var it = index.tree.iterator() catch @panic("oom");
+        defer it.deinit();
+        while (it.next() catch @panic("oom")) |entry| {
+            entry.val.deinit();
+        }
+        index.deinit();
+    }
+
+    var tree = try PlasticTree.init(.{ .size = size }, ha7r);
+    defer tree.deinit();
+
+    try tree.gen();
+    std.debug.print("done generating fake tree of size {}\n", .{size});
+
+    const BenchCtx = struct {
+        ha7r: Allocator,
+        index: IndexId2Id,
+        fake_tree: PlasticTree,
+        nextIdx: usize = 0,
+        fn do(self: *@This()) void {
+            const entry = self.fake_tree.list.items[self.nextIdx];
+            defer self.nextIdx = (self.nextIdx + 1) % self.fake_tree.list.items.len;
+
+            var kv = self.index.getOrPut({}, entry.parent) catch @panic("oom");
+            if (!kv.found_existing) {
+                kv.val_ptr.* = IdSet.init(self.ha7r);
+            }
+            _ = kv.val_ptr.insert({}, self.nextIdx) catch @panic("oom");
+        }
+    };
+    var ctx = BenchCtx{
+        .ha7r = ha7r,
+        .index = index,
+        .fake_tree = tree,
+    };
+    try mod_bench.bench("IndexId2Id(BTreeMap).put", &ctx, BenchCtx.do, .{});
+}
+
+test "IndexId2Id.SwapBTreeMap.insert.gen" {
+    const size: usize = 1_000_000;
+    const id_t = usize;
+
+    // var a7r = std.testing.allocator;
+
+    // var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    // defer arena.deinit();
+    // var a7r = arena.allocator();
+
+    var gpha = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpha.deinit();
+    var ha7r = gpha.allocator();
+
+    // const file_p = "/tmp/comb.bench.SwapBTreeMap.insert.gen";
+    // var mmap_pager = try mod_mmap.MmapPager.init(ha7r, file_p, .{});
+    // defer mmap_pager.deinit();
+    // // var pager = mmap_pager.pager();
+    var heap_pager = mod_mmap.HeapPager.init(ha7r);
+    defer heap_pager.deinit();
+
+    // var lru = try mod_mmap.LRUSwapCache.init(
+    //     ha7r,
+    //     heap_pager.pager(),
+    //     (1024 * 1024 * 1024) / std.mem.page_size,
+    // );
+    // defer lru.deinit();
+
+    var pager = heap_pager.pager();
+
+    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(ha7r, pager);
+    defer ma7r.deinit();
+    var sa7r = ma7r.allocator();
+
+    const IdSet = mod_index.SwapBTree(
+        id_t,
+        void,
+        struct {
+            fn cmp(cx: void, a: id_t, b: id_t) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        mod_index.orderToFillPageSwapBTree(id_t, std.mem.page_size),
+    );
+    const IndexId2Id = mod_index.SwapBTreeMap(
+        id_t,
+        IdSet,
+        void,
+        struct {
+            fn cmp(cx: void, a: id_t, b: id_t) std.math.Order {
+                _ = cx;
+                return std.math.order(a, b);
+            }
+        }.cmp,
+        mod_index.orderToFillPageSwapBTreeMap(id_t, IdSet, std.mem.page_size),
+    );
+    var index = IndexId2Id.init();
+    defer {
+        var it = index.tree.iterator(ha7r, sa7r) catch @panic("oom");
+        defer it.deinit();
+        while (it.next() catch @panic("oom")) |entry| {
+            entry.val.deinit(sa7r) catch unreachable;
+        }
+        index.deinit(sa7r) catch unreachable;
+    }
+
+    var tree = try PlasticTree.init(.{ .size = size }, ha7r);
+    defer tree.deinit();
+
+    try tree.gen();
+    std.debug.print("done generating fake tree of size {}\n", .{size});
+
+    const BenchCtx = struct {
+        ha7r: Allocator,
+        sa7r: SwapAllocator,
+        index: IndexId2Id,
+        fake_tree: PlasticTree,
+        nextIdx: usize = 0,
+        fn do(self: *@This()) void {
+            const entry = self.fake_tree.list.items[self.nextIdx];
+            defer self.nextIdx = (self.nextIdx + 1) % self.fake_tree.list.items.len;
+
+            var kv = self.index.getOrPut(self.sa7r, {}, entry.parent) catch @panic("swap err");
+            defer kv.swapOut();
+            if (!kv.found_existing) {
+                kv.val_ptr.* = .{};
+            }
+            _ = kv.val_ptr.insert(self.sa7r, {}, self.nextIdx) catch @panic("swap err");
+        }
+    };
+    var ctx = BenchCtx{
+        .ha7r = ha7r,
+        .sa7r = sa7r,
+        .index = index,
+        .fake_tree = tree,
+    };
+    try mod_bench.bench("IndexId2Id(SwapBTreeMap).put", &ctx, BenchCtx.do, .{});
 }

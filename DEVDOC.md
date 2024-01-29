@@ -1,51 +1,60 @@
-# > *Comb* dev-doc
+# > _Comb_ dev-doc
 
 JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 
 ## TODO
 
 - Work stack
-    - [ ] Queries
-    - [ ] B-Tree implementation for field indices
-        - [x] BSTree
-        - [x] SwapBTree
-    - [ ] Parser
-      - [ ] fwd slash escaping
-      - [x] whitespace in double quote
-    - [ ] Lru cache resizing: use large cache during initial crawling and downsize afterwards
-    - [x] Database modification operations (including FANotify <-> Database integration & test suite)
-      - [x] Created
-      - [x] Modified
-      - [x] Deleted
-      - [x] Deleted (Dir)
-      - [x] Moved
-      - [x] Moved (Dir)
-      - [x] ~~`tmpfs` alternative for testing~~ Issues with `tmpfs` now fixed
-    - [x] `std.Thread.Condition` based `Queue`
-      - A single CPU core is still saturated when it's flooded with events. Investigate what's making this happen
-        - Crossed fingers it won't be the syscalls (can't be!)
-        - My current suspicion is that it's the db query for the parent of the target entry that's spiking the CPU
+  - [ ] Imrove b-tree perf
+    - [ ] Optimize LRUPageCache
+      - [ ] BumpPageCache?
+  - [ ] Multi-threaded walking
+  - [ ] Queries
+  - [ ] B-Tree implementation for field indices
+    - [x] BSTree
+    - [x] SwapBTree
+  - [ ] Parser
+    - [ ] fwd slash escaping
+    - [x] whitespace in double quote
+  - [ ] Lru cache resizing: use large cache during initial crawling and downsize
+        afterwards
+  - [x] Database modification operations (including FANotify <-> Database
+        integration & test suite)
+    - [x] Created
+    - [x] Modified
+    - [x] Deleted
+    - [x] Deleted (Dir)
+    - [x] Moved
+    - [x] Moved (Dir)
+    - [x] ~~`tmpfs` alternative for testing~~ Issues with `tmpfs` now fixed
+  - [x] `std.Thread.Condition` based `Queue`
+    - A single CPU core is still saturated when it's flooded with events.
+      Investigate what's making this happen
+      - Crossed fingers it won't be the syscalls (can't be!)
+      - My current suspicion is that it's the db query for the parent of the
+        target entry that's spiking the CPU
 
-- [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels makes them obsolete.
+- [ ] remove the `Thread`.`yield` calls all about. Timed wait on the channels
+      makes them obsolete.
 - [ ] Make sure `rename` covers all `moved_to` cases
 - [ ] Remove all inline function markers
 
 - Later
-    - [ ] Support less than gram length (3) search strings
-    - [ ] `SwapHashMap`: a possible optimization for `PList.remove`?
+  - [ ] Support less than gram length (3) search strings
+  - [ ] `SwapHashMap`: a possible optimization for `PList.remove`?
 
 ## design doc
 
 ### Features
 
 - [ ] Fast
-    - [ ] Acceleration Indices
-        - [x] PostingList (for names)
-        - [ ] B-Tree (for other values)
+  - [ ] Acceleration Indices
+    - [x] PostingList (for names)
+    - [ ] B-Tree (for other values)
 - [ ] Current (TM)
-    - [x] FANotify integration
+  - [x] FANotify integration
 - [ ] Low resource footprint
-    - [x] Disk Swapping
+  - [x] Disk Swapping
 - [ ] CLI client
 - [ ] IPC interface
 
@@ -53,11 +62,12 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 
 Prolly a DAG; but except nodes can be deduplicated.
 
-- Nodes are lists of ids: *shortlist*
-- Edges are *filters*
+- Nodes are lists of ids: _shortlist_
+- Edges are _filters_
 - Start node is the entire table, end the result
 
 Concerns:
+
 - how to identify duplicate nodes?
 - how to and when to use indices?
 - pagination strategy?
@@ -70,7 +80,7 @@ Concerns:
 #### Node actions
 
 - Query Plan
-- Op 
+- Op
   - and
     - set intersection
   - or
@@ -91,7 +101,7 @@ Concerns:
 
 That is, instead of talking to a deamon, clients use a library to interact with
 a db file and query it. We'll still need a daemon if we want to keep it current
-and speccing out and implementing a DB format that supports mutliple clients is 
+and speccing out and implementing a DB format that supports mutliple clients is
 a lot more work.
 
 ### July 05 Incident
@@ -102,18 +112,17 @@ ofcourse, meant hammering out an uncessarily, extensible dynamic dispatch API
 for pagers and everything. It's all compiling and almost all the tests are
 passing except one. A stupid mistake. I want the LRU cache to have multiple
 users (`Pagers` are implemented in the vein of `std.mem.Allocator`) but I
-completely neglected to think through how that'd work. Here's my problem: if
-two different users request the same page be swapped in but one of them swaps
-out early, ofcourse we'll need to keep the page swapped in till everyone's
-happy...
+completely neglected to think through how that'd work. Here's my problem: if two
+different users request the same page be swapped in but one of them swaps out
+early, ofcourse we'll need to keep the page swapped in till everyone's happy...
 
 ...
 
 ...
 
-oh fuck. Writing this down revealed *the* simple solution. I thought I had to
-rewrite most of today to get this working. I really ought to quit programming
-at such late hours.
+oh fuck. Writing this down revealed _the_ simple solution. I thought I had to
+rewrite most of today to get this working. I really ought to quit programming at
+such late hours.
 
 RUBBER DUCKING!
 
@@ -137,7 +146,7 @@ performance by a factor of 2x to 10x.
 
 ### MMAP HELL
 
-The insophistication of my mmaping scheme has finally caught up with me. Let's 
+The insophistication of my mmaping scheme has finally caught up with me. Let's
 redo it. First of all, here's what we want:
 
 - Avoid fragmentation and minimaize disk size usage.
@@ -153,25 +162,24 @@ safely abstract this away from high level users.
 ### `FAN_EVENT_MODIFY`
 
 ...are emitted anytime a file is written to and as you can imagine are
-supernumerous. We'll be needing a scheme to combine them for over a span of
-time if not options for completely disabling them erstwhile we find ourselves
-syscalling and queriying 
-against the index each time we catch 
-
+supernumerous. We'll be needing a scheme to combine them for over a span of time
+if not options for completely disabling them erstwhile we find ourselves
+syscalling and queriying against the index each time we catch
 
 ### Test harnesses
 
 I want to automated tests for every peice of this as I imagine, testing this by
-hand would be painful.  Especially as more and more features accure.  There are
-a number of moving peices so unit tests are probably the best thing to do but I
-wonder if a single large e2e testing suite will be workable.  If I were to write
+hand would be painful. Especially as more and more features accure. There are a
+number of moving peices so unit tests are probably the best thing to do but I
+wonder if a single large e2e testing suite will be workable. If I were to write
 such a thing, I want it to exercise all the interesting boundaries and I want it
 to have easy knobs that'll allow me exercise these boundaries in any variation
-I'd want.  That sounds like an unreasonable requirment at first blush but let's
-see if we can get something working.  If it doesn't suffice, I guess it's always
+I'd want. That sounds like an unreasonable requirment at first blush but let's
+see if we can get something working. If it doesn't suffice, I guess it's always
 good to have an e2e suite anyways.
 
 Concerns include:
+
 - Query parsing
 - IPC
 - Query execution
@@ -181,7 +189,7 @@ Concerns include:
 
 After a bit of tinkering, I've written an e2e suite for the fanotify pipeline.
 Making modifications to the filesystem on one end and querying the database on
-the other to see if the expected changes are reflected.  In order to make it
+the other to see if the expected changes are reflected. In order to make it
 managable, the suite and all previous fanotify tests make use of `tmpfs` mounts.
 Unfortunately, the fanotify implementation seems to be lacking for `tmpfs` when
 using `REPORT_FID` and it doesn't give me the containing directory name making
@@ -192,30 +200,29 @@ next time, write the rubber duck relization when you have one.)
 
 After spending hours trying to make sense of the contents of kernel `bugzilla`
 and `lore` and finding no reported issues on `tmpfs`, I decided to go read
-`fanotify` manual pages again.  It turns out, I'm reading the event buffers
-wrong.  To be more specific, it's possible that multiple
+`fanotify` manual pages again. It turns out, I'm reading the event buffers
+wrong. To be more specific, it's possible that multiple
 `fanotify_event_info_fid` might be attached to a single fanotify event but my
-code just reads one.  Could be that's where we'll find the missing
+code just reads one. Could be that's where we'll find the missing
 information...let's investigate.
 
 ---
 
-There are indeed multiple fid records being sent.  Two in the problematic cases
-which lines up with what the docs read.  Unfortunately, the record I was
-ignoring only carries a stale file handle.  Which is not useful, not usefall at
-all.
+There are indeed multiple fid records being sent. Two in the problematic cases
+which lines up with what the docs read. Unfortunately, the record I was ignoring
+only carries a stale file handle. Which is not useful, not usefall at all.
 
 ---
 
-Hold up for a fucking minute?  The MAN pages are new!  I started to notice a
-bunch of information that I know for a fact wasn't in here before and looking at
-the change date, it's indeed from December of 2022.  This is good news. I wonder
-if the notice about multiple records was in the previous verision.
+Hold up for a fucking minute? The MAN pages are new! I started to notice a bunch
+of information that I know for a fact wasn't in here before and looking at the
+change date, it's indeed from December of 2022. This is good news. I wonder if
+the notice about multiple records was in the previous verision.
 
 ---
 
-OMG, I think I found the bug.  The `open_by_handle_at` command takes the file
-descriptor of the mount we're accessing as the first paramter.  I've been giving
+OMG, I think I found the bug. The `open_by_handle_at` command takes the file
+descriptor of the mount we're accessing as the first paramter. I've been giving
 it the handle to current working directory which resolves to the mount the
 current directory is on which is not the same damn mount as the `tmpfs` mounts.
 Let's see if giving it the appropriate handle helps.
@@ -225,9 +232,9 @@ page.
 
 ---
 
-It indeed did help.  Took a while though.  `open_by_handle_at` kept throwing
+It indeed did help. Took a while though. `open_by_handle_at` kept throwing
 `EBADF`(`BadFileDescriptor`) when I used the fd I used from a `Dir` open on the
-mount using `std.os.fs.cwd().openDir`.  I had to use `std.os.open` directly with
+mount using `std.os.fs.cwd().openDir`. I had to use `std.os.open` directly with
 the `O.RDONLY` permission for it to work.
 
 ---
@@ -235,8 +242,7 @@ the `O.RDONLY` permission for it to work.
 Spent the whole fucking night trying to hunt down a seg fault...incase want to
 know (still to find it). You know what, this warrants a devlog entry.
 
-
-### Thread  Cleanup
+### Thread Cleanup
 
 Within the codebase exists many instances of such code that serve as entry
 points for threads:
@@ -251,12 +257,11 @@ fn threadFn(self: *@This()) !void {
         // ... do something with event (hopefully cleanup)
         try self.handleEvent(event);
     }
-
- ```
+```
 
 We don't want to the thread to go on forever so we usually add a way to signal
-it to finish.  The channel impl I'm using isn't sophisticated enough to signal when there are no more possible
-senders 
+it to finish. The channel impl I'm using isn't sophisticated enough to signal
+when there are no more possible senders
 
 ```ziglang
 fn threadFn(self: *@This()) !void {
@@ -268,11 +273,12 @@ fn threadFn(self: *@This()) !void {
         try self.handleEvent(event);
     }
 }
- ```
- 
-In Rust, one could use the closing on the channel to signal this but our implementation 
-isn't so sophisticated. This means that we'll have to add timeouts to the `get` to make 
-sure we don't wait in there forever and miss the death signal.
+```
+
+In Rust, one could use the closing on the channel to signal this but our
+implementation isn't so sophisticated. This means that we'll have to add
+timeouts to the `get` to make sure we don't wait in there forever and miss the
+death signal.
 
 ```ziglang
 fn threadFn(self: *@This()) !void {
@@ -287,8 +293,9 @@ fn threadFn(self: *@This()) !void {
         }
     }
 }
- ```
+```
 
 ---
 
-Turns out the issue I had was a use-after-free bug and I needn't not solve this right away.
+Turns out the issue I had was a use-after-free bug and I needn't not solve this
+right away.

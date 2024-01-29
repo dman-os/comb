@@ -5,8 +5,8 @@ default:
   @just --list --unsorted
 
 alias b := build
-build:
-    zig build
+build *ARGS:
+    zig build {{ARGS}}
 
 alias r := run
 run:

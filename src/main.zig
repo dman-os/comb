@@ -32,6 +32,8 @@ pub const mod_fanotify = @import("fanotify.zig");
 
 pub const Query = @import("Query.zig");
 
+pub const mod_tracy = @import("tracy.zig");
+
 var die_signal = std.Thread.ResetEvent{};
 
 fn handleStopSig(signal: c_int) void {
@@ -62,7 +64,7 @@ fn swapping() !void {
     var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
     defer mmap_pager.deinit();
 
-    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (64 * 1024 * 1024) / std.mem.page_size);
+    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (256 * 1024 * 1024) / std.mem.page_size);
     // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
@@ -91,7 +93,7 @@ fn swapping() !void {
         defer arena.deinit();
         timer.reset();
         // var tree = try Tree.walk(arena.allocator(), "/run/media/asdf/Windows/", null);
-        var tree = try Tree.walk(arena.allocator(), "/", null);
+        var tree = try Tree.walk(arena.allocator(), "/", 500_000);
         // defer tree.deinit();
         const walk_elapsed = timer.read();
         std.log.info("Done walking tree with {} items in {d} seconds", .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) });
@@ -128,6 +130,8 @@ fn swapping() !void {
     // var matcher = db.plistNameMatcher();
     // defer matcher.deinit(&db);
     while (true) {
+        const t = mod_tracy.trace(@src());
+        defer t.end();
         std.debug.print("Ready to search: ", .{});
         try stdin_rdr.readUntilDelimiterArrayList(&phrase, '\n', 1024 * 1024);
         std.log.info("Searching...", .{});

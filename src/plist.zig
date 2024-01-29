@@ -15,6 +15,8 @@ const SwapList = mod_mmap.SwapList;
 const Pager = mod_mmap.Pager;
 const Ptr = mod_mmap.SwapAllocator.Ptr;
 
+const mod_tracy = @import("tracy.zig");
+
 pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
     if (gram_len == 0) {
         @compileError("gram_len is 0");
@@ -66,6 +68,8 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
             delimiters: []const u8,
             is_eql: *const fn (lhs: I, rhs: I) bool,
         ) !void {
+            const trace = mod_tracy.trace(@src());
+            defer trace.end();
             self.cache.clearRetainingCapacity();
 
             try mod_gram.grammer(@as(u4, gram_len), name, true, delimiters, Appender(GramPos).new(&Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, Appender(GramPos).Curry.UnmanagedSet.put));
@@ -102,6 +106,8 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
         }
 
         pub fn insert(self: *Self, ha7r: Allocator, sa7r: SwapAllocator, pager: Pager, id: I, name: []const u8, delimiters: []const u8) !void {
+            const trace = mod_tracy.trace(@src());
+            defer trace.end();
             self.cache.clearRetainingCapacity();
 
             try mod_gram.grammer(@as(u4, gram_len), name, true, delimiters, Appender(GramPos).new(&Appender(GramPos).Curry.UnmanagedSet{ .set = &self.cache, .a7r = ha7r }, Appender(GramPos).Curry.UnmanagedSet.put));
@@ -124,6 +130,8 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
 
         /// Returned slice is only valid until next modification of `self`.
         pub fn gramItems(self: *const Self, gram: Gram, sa7r: SwapAllocator, pager: Pager, appender: Appender(I)) !void {
+            const trace = mod_tracy.trace(@src());
+            defer trace.end();
             if (self.map.get(gram)) |list| {
                 var it = list.iterator(sa7r, pager);
                 defer it.close();
@@ -174,6 +182,8 @@ pub fn SwapPostingList(comptime I: type, comptime gram_len: u4) type {
                 string: []const u8,
                 delimiters: []const u8,
             ) Error![]const I {
+                const trace = mod_tracy.trace(@src());
+                defer trace.end();
                 if (string.len < gram_len) return Error.TooShort;
 
                 self.check.clearRetainingCapacity();
