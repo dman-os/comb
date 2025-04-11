@@ -61,16 +61,19 @@ fn swapping() !void {
 
     var a7r = gpa.allocator();
 
-    var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{});
+    const page_size = 1 * std.mem.page_size;
+    var mmap_pager = try mod_mmap.MmapPager.init(a7r, "/tmp/comb.db", .{ .page_size = page_size });
     defer mmap_pager.deinit();
 
-    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (256 * 1024 * 1024) / std.mem.page_size);
+    var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), (256 * 1024 * 1024) / page_size);
     // var lru = try mod_mmap.LRUSwapCache.init(a7r, mmap_pager.pager(), 1);
     defer lru.deinit();
 
     var pager = lru.pager();
 
-    var ma7r = mod_mmap.PagingSwapAllocator(.{}).init(a7r, pager);
+    var ma7r = mod_mmap.PagingSwapAllocator(.{
+        .page_size = page_size,
+    }).init(a7r, pager);
     defer ma7r.deinit();
     var sa7r = ma7r.allocator();
 
@@ -93,7 +96,7 @@ fn swapping() !void {
         defer arena.deinit();
         timer.reset();
         // var tree = try Tree.walk(arena.allocator(), "/run/media/asdf/Windows/", null);
-        var tree = try Tree.walk(arena.allocator(), "/", 500_000);
+        var tree = try Tree.walk(arena.allocator(), "/", 5_000_000);
         // defer tree.deinit();
         const walk_elapsed = timer.read();
         std.log.info("Done walking tree with {} items in {d} seconds", .{ tree.list.items.len, @divFloor(walk_elapsed, std.time.ns_per_s) });

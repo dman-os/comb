@@ -34,6 +34,8 @@ test {
 const Self = @This();
 const Database = Self;
 
+const page_size = 1 * std.mem.page_size;
+
 /// Handle for each `Entry`
 pub const Id = packed struct {
     gen: u8,
@@ -91,7 +93,7 @@ const IdSet = mod_index.SwapBTree(
             return std.math.order(a.toInt(), b.toInt());
         }
     }.cmp,
-    mod_index.orderToFillPageSwapBTree(Id, std.mem.page_size),
+    mod_index.orderToFillPageSwapBTree(Id, page_size),
 );
 
 const IndexId2Id = mod_index.SwapBTreeMap(
@@ -104,7 +106,7 @@ const IndexId2Id = mod_index.SwapBTreeMap(
             return std.math.order(a.toInt(), b.toInt());
         }
     }.cmp,
-    mod_index.orderToFillPageSwapBTreeMap(Id, IdSet, std.mem.page_size),
+    mod_index.orderToFillPageSwapBTreeMap(Id, IdSet, page_size),
 );
 
 pub const _Gram = mod_gram.Gram(_gram_len);
@@ -133,7 +135,7 @@ pub fn init(
     sa7r: SwapAllocator,
     config: Config,
 ) Self {
-    if (pager.pageSize() != std.mem.page_size) {
+    if (pager.pageSize() != page_size) {
         @panic("work");
     }
     var self = Self{
@@ -775,11 +777,11 @@ pub fn fileList2PlasticTree2Db(
                 ha7r,
                 &.{ s_entry.parent, s_entry.name },
             ),
-            // if (is_root)
-            //     try ha7r.dupe(u8, "/")
-            // else
-            //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
-            entry_id);
+                // if (is_root)
+                //     try ha7r.dupe(u8, "/")
+                // else
+                //     try std.fmt.allocPrint(ha7r, "{s}/{s}", .{ s_entry.parent, s_entry.name }),
+                entry_id);
             id = entry_id;
         }
         declared_map[ii] = id orelse @panic("id not set");

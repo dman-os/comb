@@ -5,6 +5,8 @@ JUST PUT THE FUCKEN ALLOCATOR IN THE STRUCT YO!
 ## TODO
 
 - Work stack
+  - [ ] Replace mmap pager with WAL pager
+  - [ ] Minimize stat calls when treewalking
   - [ ] Imrove b-tree perf
     - [ ] Optimize LRUPageCache
       - [ ] BumpPageCache?

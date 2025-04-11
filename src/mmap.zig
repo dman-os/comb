@@ -4,6 +4,10 @@
 //! -- If we were distentangle `SwapList` and `Pager`, it being the primary
 //!    consumer of most of these types, we can make the latter private.
 
+// FIXME: there's no reason to use mmap here
+// write a pager that uses file reads directly
+// and a WAL file
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;

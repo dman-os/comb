@@ -214,6 +214,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]I
             // println("ixion: ", .{});
             var result = std.ArrayList(Id).fromOwnedSlice(
                 ha7r,
+                // FIXME: index out of bounds
                 try self.execNode(&children[0], ha7r),
             );
             defer result.deinit();
@@ -294,7 +295,7 @@ fn execNode(self: *@This(), node: *const Plan.Node, ha7r: Allocator) ExecErr![]I
             defer result.deinit();
             for (parents) |id| {
                 if (try self.db.childOfIndex.get(self.db.sa7r, {}, id)) |children| {
-                    var it = try children.iterator(self.db.ha7r,self.db.sa7r);
+                    var it = try children.iterator(self.db.ha7r, self.db.sa7r);
                     defer it.deinit();
                     while (try it.next()) |child| {
                         try result.append(child.*);
